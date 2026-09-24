@@ -5,6 +5,17 @@ on:
   schedule:
     - cron: "17 9 * * *"
   workflow_dispatch:
+    inputs:
+      recent_max_requests:
+        description: "Maximum Search requests for recent collection (1–600)"
+        required: true
+        type: number
+        default: 600
+      backfill_max_requests:
+        description: "Maximum Search requests for historical backfill (1–900)"
+        required: true
+        type: number
+        default: 900
 
 permissions:
   contents: read
@@ -17,10 +28,31 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    env:
+      RECENT_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 600 || inputs.recent_max_requests }}
+      BACKFILL_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 900 || inputs.backfill_max_requests }}
     permissions:
       contents: read
       id-token: write
     steps:
+      - name: Validate request limits
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import sys
+
+          limits = {
+              "RECENT_MAX_REQUESTS": (1, 600),
+              "BACKFILL_MAX_REQUESTS": (1, 900),
+          }
+          for name, (minimum, maximum) in limits.items():
+              value = os.environ.get(name, "")
+              if not re.fullmatch(r"[0-9]+", value) or not minimum <= int(value) <= maximum:
+                  print(f"{name} must be an integer from {minimum} to {maximum}", file=sys.stderr)
+                  sys.exit(1)
+          PY
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
         with:
@@ -40,10 +72,10 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
-        run: uv run --frozen gh-ml run --max-requests 600
+        run: uv run --frozen gh-ml run --max-requests "$RECENT_MAX_REQUESTS"
       - name: Backfill historical repositories
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
-        run: uv run --frozen gh-ml backfill --max-requests 900
+        run: uv run --frozen gh-ml backfill --max-requests "$BACKFILL_MAX_REQUESTS"
