@@ -135,3 +135,27 @@ id = "vision.visual-localization"
 q = "\"visual localization\" in:readme"
 domains = ["computer-vision", "robotics"]
 methods = ["visual-localization", "visual-place-recognition"]
+
+[[queries]]
+id = "vision.image-super-resolution"
+q = "\"image super-resolution\" in:readme"
+domains = ["computer-vision"]
+methods = ["super-resolution", "restoration"]
+
+[[queries]]
+id = "vision.visual-anomaly-detection"
+q = "\"visual anomaly detection\" in:readme"
+domains = ["computer-vision", "anomaly-detection"]
+methods = ["anomaly-detection", "detection"]
+
+[[queries]]
+id = "vision.image-retrieval"
+q = "\"image retrieval\" in:readme"
+domains = ["computer-vision", "information-retrieval"]
+methods = ["image-retrieval", "metric-learning"]
+
+[[queries]]
+id = "vision.face-recognition"
+q = "\"face recognition\" in:readme"
+domains = ["computer-vision"]
+methods = ["face-recognition", "face-analysis"]

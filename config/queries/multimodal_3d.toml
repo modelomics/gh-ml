@@ -123,3 +123,27 @@ id = "multimodal.video-language-model"
 q = "\"video language model\" in:readme"
 domains = ["multimodal", "video", "language"]
 methods = ["video-language-model", "video-understanding"]
+
+[[queries]]
+id = "multimodal.image-to-video"
+q = "\"image to video\" in:readme"
+domains = ["multimodal", "video", "generative-ai"]
+methods = ["image-to-video", "video-generation"]
+
+[[queries]]
+id = "multimodal.video-question-answering"
+q = "\"video question answering\" in:readme"
+domains = ["multimodal", "video", "language"]
+methods = ["video-question-answering", "video-understanding"]
+
+[[queries]]
+id = "multimodal.3d-object-detection"
+q = "\"3D object detection\" in:readme"
+domains = ["computer-vision", "robotics", "3d"]
+methods = ["3d-object-detection", "3d-perception"]
+
+[[queries]]
+id = "multimodal.3d-human-pose"
+q = "\"3D human pose estimation\" in:readme"
+domains = ["computer-vision", "3d", "human-motion"]
+methods = ["3d-pose-estimation", "pose-estimation"]

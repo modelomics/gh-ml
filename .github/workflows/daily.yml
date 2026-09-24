@@ -17,10 +17,15 @@ on:
         type: number
         default: 500
       backfill_max_requests:
-        description: "Maximum Search requests for historical backfill (1–900)"
+        description: "Maximum Search requests for historical backfill (1–700)"
         required: true
         type: number
-        default: 900
+        default: 700
+      historical_sample_max_requests:
+        description: "Maximum Search requests for annual historical sample (1–200)"
+        required: true
+        type: number
+        default: 200
 
 permissions:
   contents: read
@@ -36,7 +41,8 @@ jobs:
     env:
       SAMPLE_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 500 || inputs.sample_max_requests }}
       RECENT_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 600 || inputs.recent_max_requests }}
-      BACKFILL_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 900 || inputs.backfill_max_requests }}
+      HISTORICAL_SAMPLE_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 200 || inputs.historical_sample_max_requests }}
+      BACKFILL_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 700 || inputs.backfill_max_requests }}
     permissions:
       contents: read
       id-token: write
@@ -52,7 +58,8 @@ jobs:
           limits = {
               "SAMPLE_MAX_REQUESTS": (1, 500),
               "RECENT_MAX_REQUESTS": (1, 600),
-              "BACKFILL_MAX_REQUESTS": (1, 900),
+              "HISTORICAL_SAMPLE_MAX_REQUESTS": (1, 200),
+              "BACKFILL_MAX_REQUESTS": (1, 700),
           }
           for name, (minimum, maximum) in limits.items():
               value = os.environ.get(name, "")
@@ -86,6 +93,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml run --max-requests "$RECENT_MAX_REQUESTS"
+      - name: Sample historical repositories by year
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
+        run: uv run --frozen gh-ml historical-sample --max-requests "$HISTORICAL_SAMPLE_MAX_REQUESTS"
       - name: Backfill historical repositories
         env:
           GITHUB_TOKEN: ${{ github.token }}

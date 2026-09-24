@@ -117,3 +117,15 @@ id = "rl.imitation-learning"
 q = "\"imitation learning\" in:description"
 domains = ["reinforcement-learning", "robotics"]
 methods = ["imitation-learning", "behavior-cloning"]
+
+[[queries]]
+id = "rl.distributional"
+q = "\"distributional reinforcement learning\" in:description,readme"
+domains = ["reinforcement-learning"]
+methods = ["distributional-reinforcement-learning", "value-based-reinforcement-learning"]
+
+[[queries]]
+id = "rl.continual"
+q = "\"continual reinforcement learning\" in:description,readme"
+domains = ["reinforcement-learning", "continual-learning"]
+methods = ["continual-reinforcement-learning", "continual-learning"]

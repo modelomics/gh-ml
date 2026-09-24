@@ -129,3 +129,27 @@ id = "timeseries.event-forecasting"
 q = "\"event forecasting\" in:description"
 domains = ["time-series", "forecasting"]
 methods = ["event-forecasting", "temporal-modeling"]
+
+[[queries]]
+id = "timeseries.imputation"
+q = "\"time series imputation\" in:description,readme"
+domains = ["time-series", "missing-data"]
+methods = ["imputation", "time-series-modeling"]
+
+[[queries]]
+id = "timeseries.synthetic-generation"
+q = "\"time series generation\" in:description,readme"
+domains = ["time-series", "synthetic-data"]
+methods = ["generative-modeling", "time-series-generation"]
+
+[[queries]]
+id = "timeseries.clustering"
+q = "\"time series clustering\" in:description,readme"
+domains = ["time-series", "clustering"]
+methods = ["clustering", "unsupervised-learning"]
+
+[[queries]]
+id = "timeseries.tabular-foundation-models"
+q = "\"tabular foundation model\" in:description,readme"
+domains = ["tabular-ml", "foundation-models"]
+methods = ["pretraining", "tabular-learning"]

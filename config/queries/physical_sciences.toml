@@ -135,3 +135,21 @@ id = "science.quantum-materials"
 q = "\"quantum materials\" \"machine learning\" in:description,readme"
 domains = ["physics", "materials-science", "condensed-matter-physics"]
 methods = ["property-prediction", "materials-discovery", "scientific-machine-learning"]
+
+[[queries]]
+id = "science.computational-mechanics"
+q = "\"computational mechanics\" \"machine learning\" in:description,readme"
+domains = ["computational-mechanics", "engineering", "scientific-computing"]
+methods = ["surrogate-modeling", "physics-informed-learning", "finite-element-method"]
+
+[[queries]]
+id = "science.photonics"
+q = "photonics \"machine learning\" in:description,readme"
+domains = ["photonics", "optics", "physics"]
+methods = ["inverse-design", "surrogate-modeling", "scientific-machine-learning"]
+
+[[queries]]
+id = "science.ocean-modeling"
+q = "\"ocean modeling\" \"machine learning\" in:description,readme"
+domains = ["oceanography", "earth-science", "climate-science"]
+methods = ["ocean-modeling", "surrogate-modeling", "data-assimilation"]

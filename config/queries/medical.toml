@@ -17,6 +17,18 @@ domains = ["health-and-biomedicine", "radiology"]
 methods = ["image-analysis", "decision-support"]
 
 [[queries]]
+id = "medical.ophthalmology"
+q = "ophthalmology AI retinal in:description,readme"
+domains = ["health-and-biomedicine", "ophthalmology", "medical-imaging"]
+methods = ["image-analysis", "diagnosis", "classification"]
+
+[[queries]]
+id = "medical.dermatology"
+q = "dermatology AI dermoscopy in:description,readme"
+domains = ["health-and-biomedicine", "dermatology", "medical-imaging"]
+methods = ["image-analysis", "diagnosis", "classification"]
+
+[[queries]]
 id = "medical.pathology"
 q = "\"computational pathology\" in:description"
 domains = ["health-and-biomedicine", "pathology"]
@@ -135,6 +147,12 @@ id = "medical.patient-risk"
 q = "\"patient deterioration prediction\" in:description,readme"
 domains = ["health-and-biomedicine", "clinical-informatics"]
 methods = ["risk-prediction", "early-warning", "time-series-modeling"]
+
+[[queries]]
+id = "medical.survival-analysis"
+q = "clinical survival prediction in:description,readme"
+domains = ["health-and-biomedicine", "clinical-informatics"]
+methods = ["survival-analysis", "outcome-prediction", "risk-prediction"]
 
 [[queries]]
 id = "medical.medical-robotics"

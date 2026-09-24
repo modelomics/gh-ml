@@ -141,3 +141,21 @@ id = "materials-crystal-graph"
 q = "\"crystal graph\" in:description,readme"
 domains = ["materials-science", "chemistry"]
 methods = ["graph-neural-network", "property-prediction", "materials-discovery"]
+
+[[queries]]
+id = "materials-polymer-informatics"
+q = "polymer informatics in:description,readme"
+domains = ["materials-science", "polymer-science", "chemistry"]
+methods = ["property-prediction", "materials-discovery", "materials-design"]
+
+[[queries]]
+id = "chem-molecular-spectroscopy"
+q = "molecular spectroscopy \"machine learning\" in:description,readme"
+domains = ["chemistry", "computational-chemistry"]
+methods = ["spectroscopy", "property-prediction", "surrogate-modeling"]
+
+[[queries]]
+id = "materials-dft-prediction"
+q = "\"density functional theory\" \"machine learning\" in:description,readme"
+domains = ["materials-science", "chemistry", "computational-chemistry"]
+methods = ["property-prediction", "surrogate-modeling", "materials-discovery"]

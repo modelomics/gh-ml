@@ -246,6 +246,133 @@ def test_sample_cli_uses_real_discovery_with_created_date_query(tmp_path: Path, 
     assert coverage["requests_used"] == 1 and coverage["complete_sweep"] is True
 
 
+def test_historical_sample_cli_records_separate_state_and_year_coverage(tmp_path: Path, monkeypatch) -> None:
+    spec = QuerySpec(id="history", q="protein model", domains=(), methods=())
+    outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor={"year": 2020}, requests_used=2,
+                              coverage=[{"year": 2008, "status": "ok"}])
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "_github_token", lambda _: None)
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_queries", lambda _: [spec])
+    monkeypatch.setattr(cli, "discover_historical_sample", lambda *args, **kwargs: calls.append(kwargs) or outcome)
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    assert cli.main(["historical-sample", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+    manifest = json.loads(next(tmp_path.glob("manifest-*.json")).read_text(encoding="utf-8"))
+    coverage = json.loads((tmp_path / manifest["coverage_file"]).read_text(encoding="utf-8"))
+    state = json.loads((tmp_path / "historical-sample-state.json").read_text(encoding="utf-8"))
+    assert manifest["mode"] == coverage["mode"] == "historical-sample"
+    assert coverage["date_field"] == "created"
+    assert coverage["start_year"] == 2008 and coverage["end"] == "2026-09-24"
+    assert coverage["complete_sweep"] is False
+    assert calls[0]["start_year"] == 2008 and calls[0]["end"] == "2026-09-24"
+    assert state["cursor"] == {"year": 2020}
+    assert state["complete"] is False
+    assert not (tmp_path / "sample-state.json").exists()
+
+
+def test_historical_sample_resume_keeps_bound_and_publishes_state_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    spec = QuerySpec(id="history", q="protein model", domains=(), methods=())
+    catalog = [{"id": spec.id, "query": spec.q}]
+    (tmp_path / "historical-sample-state.json").write_text(json.dumps({
+        "start_year": 2008, "end": "2025-12-31", "cursor": {"year": 2017},
+        "complete": False, "catalog_signature": catalog,
+    }), encoding="utf-8")
+    outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor=None, requests_used=4,
+                              coverage=[{"year": 2017, "status": "ok"}])
+    calls: list[dict] = []
+    published: list[dict] = []
+    remote_paths: list[str] = []
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_queries", lambda _: [spec])
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: remote_paths.append(kwargs["checkpoint_path"]) or None)
+    monkeypatch.setattr(cli, "discover_historical_sample", lambda *args, **kwargs: calls.append(kwargs) or outcome)
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: published.append(kwargs) or "https://example.test/run")
+
+    assert cli.main(["historical-sample", "--output-dir", str(tmp_path)]) == 0
+    assert calls[0]["cursor"] == {"year": 2017}
+    assert calls[0]["end"] == "2025-12-31"
+    assert remote_paths == ["state/historical-sample.json"]
+    assert published[0]["checkpoint_path"] == "state/historical-sample.json"
+    assert published[0]["checkpoint"]["complete"] is True
+    assert json.loads((tmp_path / "historical-sample-state.json").read_text(encoding="utf-8"))["complete"] is True
+
+
+def test_historical_sample_completed_campaign_skips_discovery_and_publish(tmp_path: Path, monkeypatch) -> None:
+    spec = QuerySpec(id="history", q="protein model", domains=(), methods=())
+    (tmp_path / "historical-sample-state.json").write_text(json.dumps({
+        "start_year": 2008, "end": "2025-12-31", "cursor": None, "complete": True,
+        "catalog_signature": [{"id": spec.id, "query": spec.q}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "_github_token", lambda _: None)
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: (_ for _ in ()).throw(AssertionError("client should not be created")))
+    monkeypatch.setattr(cli, "load_queries", lambda _: [spec])
+    monkeypatch.setattr(cli, "discover_historical_sample", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must skip")))
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must skip")))
+
+    assert cli.main(["historical-sample", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+
+
+def test_historical_sample_catalog_change_resets_and_refreshes_complete_grid(tmp_path: Path, monkeypatch) -> None:
+    old = QuerySpec(id="history", q="old query", domains=(), methods=())
+    new = QuerySpec(id="history", q="new query", domains=(), methods=())
+    (tmp_path / "historical-sample-state.json").write_text(json.dumps({
+        "start_year": 2008, "end": "2025-12-31", "cursor": None, "complete": True,
+        "catalog_signature": [{"id": old.id, "query": old.q}],
+    }), encoding="utf-8")
+    outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor={"year": 2010}, requests_used=1,
+                              coverage=[{"year": 2008, "status": "ok"}])
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "_github_token", lambda _: None)
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_queries", lambda _: [new])
+    monkeypatch.setattr(cli, "discover_historical_sample", lambda *args, **kwargs: calls.append(kwargs) or outcome)
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    assert cli.main(["historical-sample", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+    assert calls[0]["cursor"] is None
+    assert calls[0]["end"] == "2026-09-24"
+
+
+def test_historical_sample_uses_real_discovery_year_created_query(tmp_path: Path, monkeypatch) -> None:
+    spec = QuerySpec(id="history", q="protein model", domains=(), methods=())
+    queries: list[str] = []
+
+    class FakeGitHubClient:
+        def __init__(self, token=None):
+            pass
+
+        def search_repositories(self, query: str, *, page: int, per_page: int):
+            queries.append(query)
+            return SimpleNamespace(items=[], total_count=0, incomplete_results=False)
+
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "_github_token", lambda _: None)
+    monkeypatch.setattr(cli, "GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr(cli, "load_queries", lambda _: [spec])
+
+    assert cli.main(["historical-sample", "--no-publish", "--start-year", "2020", "--end", "2021-12-31", "--output-dir", str(tmp_path)]) == 0
+    assert any("created:2020-01-01..2020-12-31" in query for query in queries)
+
+
+def test_historical_sample_no_publish_does_not_load_remote_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor=None, requests_used=1,
+                              coverage=[{"year": 2008, "status": "ok"}])
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "_github_token", lambda _: None)
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not load remote checkpoint")))
+    monkeypatch.setattr(cli, "discover_historical_sample", lambda *args, **kwargs: outcome)
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    assert cli.main(["historical-sample", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+
+
 def test_cli_publishes_empty_sweep_checkpoint_for_ephemeral_runners(
     tmp_path: Path, monkeypatch
 ) -> None:

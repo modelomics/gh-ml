@@ -141,3 +141,15 @@ id = "nlp-speech-language-modeling"
 q = "\"speech language model\" in:readme"
 domains = ["natural-language-processing", "audio", "speech"]
 methods = ["speech-language-model", "multimodal-learning"]
+
+[[queries]]
+id = "nlp-bm25-retrieval"
+q = "BM25 retrieval in:readme"
+domains = ["information-retrieval"]
+methods = ["bm25", "lexical-retrieval"]
+
+[[queries]]
+id = "nlp-entity-linking"
+q = "\"entity linking\" in:readme"
+domains = ["natural-language-processing"]
+methods = ["entity-linking", "entity-resolution"]

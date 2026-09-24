@@ -117,3 +117,27 @@ id = "applied.customer-lifetime-value"
 q = "\"customer lifetime value\" in:description"
 domains = ["marketing", "customer-analytics"]
 methods = ["customer-lifetime-value-prediction"]
+
+[[queries]]
+id = "applied.dynamic-pricing"
+q = "\"dynamic pricing\" in:readme"
+domains = ["pricing", "retail", "finance"]
+methods = ["dynamic-pricing", "price-optimization"]
+
+[[queries]]
+id = "applied.inventory-optimization"
+q = "\"inventory optimization\" in:readme"
+domains = ["retail", "supply-chain", "operations-research"]
+methods = ["inventory-optimization", "demand-forecasting"]
+
+[[queries]]
+id = "applied.portfolio-optimization"
+q = "\"portfolio optimization\" in:readme"
+domains = ["finance", "investment"]
+methods = ["portfolio-optimization", "asset-allocation"]
+
+[[queries]]
+id = "applied.customer-segmentation"
+q = "\"customer segmentation\" in:readme"
+domains = ["marketing", "customer-analytics"]
+methods = ["customer-segmentation", "clustering"]

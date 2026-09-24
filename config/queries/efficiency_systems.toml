@@ -77,6 +77,30 @@ domains = ["distributed-ml", "ml-systems"]
 methods = ["distributed-training", "data-parallelism", "model-parallelism"]
 
 [[queries]]
+id = "efficiency.mixed-precision-training"
+q = "\"mixed precision training\" in:description"
+domains = ["efficient-ml", "ml-systems"]
+methods = ["mixed-precision", "training-optimization"]
+
+[[queries]]
+id = "efficiency.activation-checkpointing"
+q = "\"activation checkpointing\" in:description"
+domains = ["efficient-ml", "ml-systems"]
+methods = ["activation-checkpointing", "memory-optimization"]
+
+[[queries]]
+id = "efficiency.optimizer-state-sharding"
+q = "\"optimizer state sharding\" in:description"
+domains = ["distributed-ml", "ml-systems"]
+methods = ["optimizer-state-sharding", "distributed-training"]
+
+[[queries]]
+id = "efficiency.communication-efficient-training"
+q = "\"communication efficient training\" in:description"
+domains = ["distributed-ml", "ml-systems"]
+methods = ["communication-optimization", "distributed-training"]
+
+[[queries]]
 id = "efficiency.inference-systems"
 q = "\"inference engine\" in:description"
 domains = ["ml-systems", "inference-systems"]

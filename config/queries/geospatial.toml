@@ -135,3 +135,27 @@ id = "geo.precipitation-forecasting"
 q = "\"precipitation forecasting\" in:description,readme"
 domains = ["geospatial", "hydrology", "meteorology"]
 methods = ["forecasting", "spatiotemporal-modeling", "scientific-machine-learning"]
+
+[[queries]]
+id = "geo.crop-monitoring"
+q = "\"crop yield prediction\" in:description,readme"
+domains = ["geospatial", "remote-sensing", "agriculture"]
+methods = ["yield-prediction", "time-series-analysis", "earth-observation"]
+
+[[queries]]
+id = "geo.wildfire-mapping"
+q = "\"wildfire detection\" in:description,readme"
+domains = ["geospatial", "remote-sensing", "disaster-response"]
+methods = ["wildfire-detection", "segmentation", "change-detection"]
+
+[[queries]]
+id = "geo.ocean-remote-sensing"
+q = "\"ocean remote sensing\" in:description,readme"
+domains = ["geospatial", "remote-sensing", "oceanography"]
+methods = ["remote-sensing", "ocean-modeling", "image-analysis"]
+
+[[queries]]
+id = "geo.building-footprints"
+q = "\"building footprint extraction\" in:description,readme"
+domains = ["geospatial", "remote-sensing", "urban-computing"]
+methods = ["building-detection", "semantic-segmentation", "object-detection"]

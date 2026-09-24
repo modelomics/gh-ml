@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from gh_ml.discovery import discover, discover_backfill, discover_sample
+from gh_ml.discovery import discover, discover_backfill, discover_historical_sample, discover_sample
 from gh_ml.schema import QuerySpec
 
 
@@ -352,3 +352,67 @@ def test_sample_cursor_rejects_changed_catalog_and_invalid_position():
     invalid = dict(first.next_cursor, query_index=5)
     with pytest.raises(ValueError, match="outside"):
         discover_sample(client, [query, spec("later")], start="2024-01-01", end="2024-01-02", max_requests=0, cursor=invalid)
+
+
+def test_historical_sample_uses_reverse_annual_windows_and_round_robin_order():
+    queries = [spec("vision.b"), spec("nlp.a"), spec("vision.a"), spec("bio.a")]
+    ordered_ids = ["bio.a", "nlp.a", "vision.a", "vision.b"]
+    responses = {}
+    for year in (2023, 2022):
+        finish = "2023-04-03" if year == 2023 else f"{year}-12-31"
+        for index, query_id in enumerate(ordered_ids):
+            query = next(item for item in queries if item.id == query_id)
+            search = f"{query.q} fork:true created:{year}-01-01..{finish}"
+            responses[(search, 1)] = SearchResult(1, False, [repo(100 + index)])
+    client = FakeGitHubClient(responses)
+
+    outcome = discover_historical_sample(client, queries, start_year=2022, end="2023-04-03", max_requests=8)
+
+    assert [call[0].split(" created:")[1] for call in client.calls] == [
+        "2023-01-01..2023-04-03", "2023-01-01..2023-04-03",
+        "2023-01-01..2023-04-03", "2023-01-01..2023-04-03",
+        "2022-01-01..2022-12-31", "2022-01-01..2022-12-31",
+        "2022-01-01..2022-12-31", "2022-01-01..2022-12-31",
+    ]
+    assert [row["query_id"] for row in outcome.coverage[:4]] == ordered_ids
+    assert [row["year"] for row in outcome.coverage] == [2023] * 4 + [2022] * 4
+    assert outcome.next_cursor is None
+
+
+def test_historical_sample_budget_resume_with_json_cursor_and_boundary():
+    queries = [spec("a.one"), spec("b.one")]
+    responses = {}
+    for year in (2024, 2023):
+        for item in queries:
+            search = f"{item.q} fork:true created:{year}-01-01..{year}-12-31"
+            responses[(search, 1)] = SearchResult(1, False, [repo(5)])
+    client = FakeGitHubClient(responses)
+
+    first = discover_historical_sample(client, queries, start_year=2023, end="2024-12-31", max_requests=1)
+    assert first.next_cursor["year"] == 2024
+    assert first.next_cursor["query_cursor"]["query_id"] == "b.one"
+    resumed_cursor = __import__("json").loads(__import__("json").dumps(first.next_cursor))
+    second = discover_historical_sample(client, queries, start_year=2023, end="2024-12-31", max_requests=1, cursor=resumed_cursor)
+    assert second.next_cursor["year"] == 2023
+    assert second.next_cursor["query_cursor"]["query_id"] == "a.one"
+    third = discover_historical_sample(client, queries, start_year=2023, end="2024-12-31", max_requests=2, cursor=second.next_cursor)
+    assert third.next_cursor is None
+    assert [row["year"] for row in third.coverage] == [2023, 2023]
+    assert third.matched_query_ids[5] == ["a.one", "b.one"]
+
+
+def test_historical_sample_zero_budget_and_cursor_identity():
+    queries = [spec("one")]
+    client = FakeGitHubClient({})
+    empty = discover_historical_sample(client, queries, end="2024-05-06", max_requests=0)
+    assert empty.requests_used == 0
+    assert empty.coverage == []
+    assert empty.next_cursor["year"] == 2024
+    with pytest.raises(ValueError, match="cursor specs does not match this discovery run"):
+        discover_historical_sample(
+            client, [spec("one", "topic:changed")], end="2024-05-06", max_requests=0,
+            cursor=empty.next_cursor,
+        )
+    malformed = dict(empty.next_cursor, year=2023)
+    with pytest.raises(ValueError, match="year"):
+        discover_historical_sample(client, queries, end="2024-05-06", max_requests=0, cursor=malformed)

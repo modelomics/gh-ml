@@ -135,3 +135,21 @@ id = "bio.chemical-biology"
 q = "\"protein function prediction\" in:description,readme"
 domains = ["biology", "computational-biology", "bioinformatics"]
 methods = ["function-prediction", "protein-language-model", "representation-learning"]
+
+[[queries]]
+id = "bio.rna-structure"
+q = "\"RNA structure prediction\" in:description,readme"
+domains = ["biology", "bioinformatics", "computational-biology"]
+methods = ["structure-prediction", "rna-modeling", "sequence-model"]
+
+[[queries]]
+id = "bio.microscopy-cell-analysis"
+q = "\"cell segmentation\" microscopy in:description,readme"
+domains = ["biology", "computational-biology", "microscopy"]
+methods = ["cell-segmentation", "image-analysis", "computer-vision"]
+
+[[queries]]
+id = "bio.regulatory-sequence-modeling"
+q = "enhancer prediction genomics in:description,readme"
+domains = ["biology", "genomics", "computational-biology"]
+methods = ["regulatory-genomics", "sequence-model", "prediction"]

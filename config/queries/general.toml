@@ -135,3 +135,21 @@ id = "general.automated-machine-learning"
 q = "\"automated machine learning\" in:readme"
 domains = ["automl", "optimization"]
 methods = ["automl", "feature-engineering"]
+
+[[queries]]
+id = "general.semi-supervised-learning"
+q = "\"semi-supervised learning\" in:description,readme"
+domains = ["general-ml", "representation-learning"]
+methods = ["semi-supervised-learning", "representation-learning"]
+
+[[queries]]
+id = "general.transfer-learning"
+q = "\"transfer learning\" in:description,readme"
+domains = ["general-ml", "representation-learning"]
+methods = ["transfer-learning", "fine-tuning"]
+
+[[queries]]
+id = "general.meta-learning"
+q = "\"meta-learning\" in:description,readme"
+domains = ["general-ml", "automl"]
+methods = ["meta-learning", "few-shot-learning"]

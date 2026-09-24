@@ -272,6 +272,111 @@ def discover_sample(
     return DiscoveryOutcome(repositories, matched, coverage, requests_used, None)
 
 
+def discover_historical_sample(
+    client: Any,
+    specs: Sequence[QuerySpec],
+    *,
+    start_year: int = 2008,
+    end: str,
+    max_requests: int,
+    cursor: dict[str, Any] | None = None,
+    per_page: int = 100,
+) -> DiscoveryOutcome:
+    """Sample one page per query in each year, newest year first.
+
+    Query order is interleaved by the prefix before the first dot in each ID,
+    giving a bounded run breadth across domains before it spends requests on a
+    second query from the same domain.
+    """
+    if isinstance(start_year, bool) or not isinstance(start_year, int):
+        raise ValueError("start_year must be an integer")
+    if start_year < 1:
+        raise ValueError("start_year must be a positive year")
+    if isinstance(max_requests, bool) or not isinstance(max_requests, int) or max_requests < 0:
+        raise ValueError("max_requests must be a non-negative integer")
+    if isinstance(per_page, bool) or not isinstance(per_page, int) or not 1 <= per_page <= 100:
+        raise ValueError("per_page must be between 1 and 100")
+    end_date = _parse_bound(end)[0]
+    if end_date.year < start_year:
+        raise ValueError("start_year must not be after end year")
+
+    ordered_specs = _round_robin_specs(specs)
+    year_index = 0
+    query_cursor = None
+    if cursor is not None:
+        required = ("mode", "version", "start_year", "end", "per_page", "specs", "year_index", "year", "query_cursor")
+        for key in required:
+            if key not in cursor:
+                raise ValueError(f"cursor is missing {key}")
+        if cursor["mode"] != "historical_sample" or cursor["version"] != 1:
+            raise ValueError("cursor does not match this discovery mode")
+        if cursor["start_year"] != start_year:
+            raise ValueError("cursor start_year does not match this discovery run")
+        if cursor["end"] != end_date.isoformat():
+            raise ValueError("cursor end does not match this discovery run")
+        if cursor["per_page"] != per_page:
+            raise ValueError("cursor per_page does not match this discovery run")
+        if cursor["specs"] != _spec_signature(ordered_specs):
+            raise ValueError("cursor specs does not match this discovery run")
+        year_index = _cursor_int(cursor, "year_index", 0)
+        if year_index > end_date.year - start_year:
+            raise ValueError("cursor year_index is outside the configured year sequence")
+        year = end_date.year - year_index
+        if cursor["year"] != year:
+            raise ValueError("cursor year does not match its year_index")
+        query_cursor = cursor["query_cursor"]
+        if query_cursor is not None and not isinstance(query_cursor, dict):
+            raise ValueError("cursor query_cursor must be an object or null")
+
+    repositories: dict[int, dict[str, Any]] = {}
+    matched: dict[int, list[str]] = {}
+    coverage: list[dict[str, Any]] = []
+    requests_used = 0
+    while year_index <= end_date.year - start_year:
+        year = end_date.year - year_index
+        year_end = end_date.isoformat() if year == end_date.year else f"{year:04d}-12-31"
+        outcome = discover_sample(
+            client, ordered_specs, start=f"{year:04d}-01-01", end=year_end,
+            max_requests=max_requests - requests_used, cursor=query_cursor,
+            per_page=per_page,
+        )
+        requests_used += outcome.requests_used
+        for repository_id, repository in outcome.repositories.items():
+            repositories.setdefault(repository_id, repository)
+        for repository_id, ids in outcome.matched_query_ids.items():
+            current = matched.setdefault(repository_id, [])
+            for query_id in ids:
+                if query_id not in current:
+                    current.append(query_id)
+        coverage.extend({**row, "year": year} for row in outcome.coverage)
+        if outcome.next_cursor is not None:
+            next_cursor = {
+                "mode": "historical_sample", "version": 1,
+                "start_year": start_year, "end": end_date.isoformat(),
+                "per_page": per_page, "specs": _spec_signature(ordered_specs),
+                "year_index": year_index, "year": year,
+                "query_cursor": outcome.next_cursor,
+            }
+            return DiscoveryOutcome(repositories, matched, coverage, requests_used, next_cursor)
+        year_index += 1
+        query_cursor = None
+
+    return DiscoveryOutcome(repositories, matched, coverage, requests_used, None)
+
+
+def _round_robin_specs(specs: Sequence[QuerySpec]) -> list[QuerySpec]:
+    groups: dict[str, list[QuerySpec]] = {}
+    for spec in specs:
+        groups.setdefault(str(spec.id).split(".", 1)[0], []).append(spec)
+    for group in groups.values():
+        group.sort(key=lambda item: str(item.id))
+    ordered = []
+    keys = sorted(groups)
+    for index in range(max((len(group) for group in groups.values()), default=0)):
+        ordered.extend(groups[key][index] for key in keys if index < len(groups[key]))
+    return ordered
+
+
 def _discover_partitioned(
     client: Any,
     specs: Sequence[QuerySpec],

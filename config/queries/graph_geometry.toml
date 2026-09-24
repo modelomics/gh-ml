@@ -141,3 +141,21 @@ id = "graph.manifold-learning"
 q = "\"manifold learning\" in:description"
 domains = ["geometric-learning", "unsupervised-learning"]
 methods = ["manifold-learning", "dimensionality-reduction"]
+
+[[queries]]
+id = "graph.temporal-learning"
+q = "\"temporal graph\" in:description,readme"
+domains = ["graph-learning", "time-series"]
+methods = ["temporal-graph-learning", "dynamic-graph-learning"]
+
+[[queries]]
+id = "graph.graph-anomaly-detection"
+q = "\"graph anomaly detection\" in:description,readme"
+domains = ["graph-learning", "anomaly-detection"]
+methods = ["graph-anomaly-detection", "anomaly-detection"]
+
+[[queries]]
+id = "graph.signal-processing"
+q = "\"graph signal processing\" in:description,readme"
+domains = ["graph-learning", "signal-processing"]
+methods = ["graph-signal-processing", "spectral-graph-learning"]

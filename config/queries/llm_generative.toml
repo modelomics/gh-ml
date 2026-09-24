@@ -147,3 +147,15 @@ id = "llm-text-to-speech"
 q = "\"text-to-speech\" \"language model\" in:readme"
 domains = ["language", "audio", "speech", "generative-ai"]
 methods = ["text-to-speech", "speech-generation"]
+
+[[queries]]
+id = "llm.evaluation"
+q = "\"LLM evaluation\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["evaluation", "benchmarking"]
+
+[[queries]]
+id = "llm.test-time-compute"
+q = "\"test-time compute\" \"language model\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["test-time-compute", "inference-scaling"]

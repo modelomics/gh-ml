@@ -153,3 +153,21 @@ id = "trust.causal-representation-learning"
 q = "\"causal representation learning\" in:description"
 domains = ["causal-ml", "representation-learning"]
 methods = ["causal-representation-learning", "causal-discovery"]
+
+[[queries]]
+id = "trust.membership-inference"
+q = "\"membership inference\" in:description"
+domains = ["privacy-ml", "trustworthy-ml"]
+methods = ["membership-inference", "privacy-auditing"]
+
+[[queries]]
+id = "trust.algorithmic-recourse"
+q = "\"algorithmic recourse\" in:description"
+domains = ["trustworthy-ml", "explainable-ai"]
+methods = ["algorithmic-recourse", "counterfactual-explanations"]
+
+[[queries]]
+id = "trust.causal-mediation"
+q = "\"causal mediation analysis\" in:description"
+domains = ["causal-ml", "economics"]
+methods = ["causal-mediation", "treatment-effect-estimation"]

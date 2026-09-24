@@ -135,3 +135,27 @@ id = "audio-audio-super-resolution"
 q = "\"audio super-resolution\" in:readme"
 domains = ["audio"]
 methods = ["audio-super-resolution", "restoration"]
+
+[[queries]]
+id = "audio-keyword-spotting"
+q = "\"keyword spotting\" audio in:readme"
+domains = ["audio", "speech"]
+methods = ["keyword-spotting", "speech-understanding"]
+
+[[queries]]
+id = "audio-anomaly-detection"
+q = "\"audio anomaly detection\" in:readme"
+domains = ["audio", "anomaly-detection"]
+methods = ["anomaly-detection", "audio-classification"]
+
+[[queries]]
+id = "audio-music-source-separation"
+q = "\"music source separation\" in:readme"
+domains = ["audio", "music"]
+methods = ["source-separation", "music-understanding"]
+
+[[queries]]
+id = "audio-music-recommendation"
+q = "\"music recommendation\" in:readme"
+domains = ["audio", "music", "information-retrieval"]
+methods = ["recommendation", "music-information-retrieval"]

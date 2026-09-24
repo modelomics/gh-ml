@@ -117,3 +117,21 @@ id = "robotics.slam"
 q = "SLAM robotics in:description"
 domains = ["robotics", "computer-vision"]
 methods = ["simultaneous-localization-and-mapping", "visual-odometry"]
+
+[[queries]]
+id = "robotics.robot-foundation-model"
+q = "robot foundation model in:description,readme"
+domains = ["robotics", "embodied-ai", "multimodal"]
+methods = ["robot-foundation-model", "robot-learning"]
+
+[[queries]]
+id = "robotics.tactile-learning"
+q = "tactile robot learning in:description,readme"
+domains = ["robotics", "embodied-ai"]
+methods = ["tactile-sensing", "manipulation"]
+
+[[queries]]
+id = "robotics.teleoperation"
+q = "robot teleoperation learning in:description,readme"
+domains = ["robotics", "embodied-ai"]
+methods = ["teleoperation", "imitation-learning"]
