@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .candidate import CANDIDATE_RULE_VERSION, assess_candidate
 from .evidence import classify_repository_text
 from .selection import SELECTION_VERSION, assess_repository
 from .schema import normalize_method_label
@@ -18,7 +19,7 @@ from .schema import normalize_method_label
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _PARQUET_BATCH_ROWS = 2048
 # Bump whenever current-view rows or their Parquet projection changes.
-CURRENT_VIEW_PROJECTION_VERSION = 3
+CURRENT_VIEW_PROJECTION_VERSION = 4
 
 
 def export_current_view_parquet(
@@ -27,6 +28,7 @@ def export_current_view_parquet(
     *,
     compression: str = "zstd",
     selection_status: str | None = None,
+    candidate_eligible: bool | None = None,
 ) -> dict[str, int | str]:
     """Stream a current-view JSONL file to a typed Parquet file.
 
@@ -38,7 +40,8 @@ def export_current_view_parquet(
     Parquet footer is closed.
     """
     return _export_observation_parquet([jsonl_path], parquet_path, compression=compression,
-                                       selection_status=selection_status)
+                                       selection_status=selection_status,
+                                       candidate_eligible=candidate_eligible)
 
 
 def export_observations_parquet(
@@ -62,6 +65,7 @@ def _export_observation_parquet(
     *,
     compression: str,
     selection_status: str | None = None,
+    candidate_eligible: bool | None = None,
 ) -> dict[str, int | str]:
     try:
         import pyarrow as pa
@@ -84,6 +88,9 @@ def _export_observation_parquet(
         pa.field("all_query_ids", strings),
         pa.field("archived", pa.bool_()),
         pa.field("candidate_status", string),
+        pa.field("candidate_rule_version", string),
+        pa.field("candidate_eligible", pa.bool_()),
+        pa.field("candidate_reason", string),
         pa.field("created_at", string),
         pa.field("description", string),
         pa.field("domains", strings),
@@ -139,6 +146,8 @@ def _export_observation_parquet(
                         if not isinstance(row, dict):
                             raise ValueError(f"{source}:{line_number}: observation must be a JSON object")
                         if selection_status is not None and row.get("selection_status") != selection_status:
+                            continue
+                        if candidate_eligible is not None and row.get("candidate_eligible") != candidate_eligible:
                             continue
                         github_id = row.get("github_id")
                         if (isinstance(github_id, bool) or not isinstance(github_id, int)
@@ -338,6 +347,7 @@ def materialize_current_view(
                             row[output_field] = all_labels[source_field]
                         row.update(classify_repository_text(row))
                         row.update(assess_repository(row))
+                        row.update(assess_candidate(row))
                         stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False, sort_keys=True,
                                                 separators=(",", ":")) + "\n")
                     stream.flush()
@@ -347,6 +357,7 @@ def materialize_current_view(
                     "format": "gh_ml_current_view",
                     "version": CURRENT_VIEW_PROJECTION_VERSION,
                     "selection_version": SELECTION_VERSION,
+                    "candidate_rule_version": CANDIDATE_RULE_VERSION,
                     "selection": "maximum observed_at instant; equal instants choose lexicographically greatest canonical JSON row",
                     "aggregation": "sorted label unions across all observations; methods normalized to canonical slugs",
                     "ordering": "ascending github_id",

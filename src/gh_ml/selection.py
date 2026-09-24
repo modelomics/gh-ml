@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-SELECTION_VERSION = "ml-contribution-v1"
+SELECTION_VERSION = "ml-contribution-v2"
 
 _METHOD_PATTERNS = (
     r"\btransformers?\b", r"\bdiffusion(?: models?)?\b", r"\bflow matching\b",
@@ -29,6 +29,13 @@ _METHOD_PATTERNS = (
     r"\bprotein(?: language| folding)? models?\b", r"\bmolecular (?:graph )?(?:neural )?networks?\b",
     r"\bmolecular (?:property prediction|docking|dynamics)\b", r"\bdrug discovery models?\b",
     r"\brobot(?:ic)? (?:polic(?:y|ies)|control|manipulation)\b", r"\bvision language action\b",
+    r"\b(?:visual )?autoregressive (?:modeling|models?|generation)\b",
+    r"\btime.series (?:imputation|forecasting|prediction|models?)\b",
+    r"\b(?:long.term|multivariate) time.series (?:imputation|forecasting|prediction)\b",
+    r"\b(?:imputation|forecasting|prediction) for (?:multivariate )?time.series\b",
+    r"\bvideo (?:creation|editing|generation|synthesis|generative modeling)\b",
+    r"\bmultimodal (?:large language )?models?\b", r"\bany.to.any multimodal\b",
+    r"\bagentic reinforcement learning\b", r"\bpolicy optimization\b",
 )
 _AMBIGUOUS_METHOD = re.compile(
     r"\b(?:lora|quantization|causal inference|(?:bayesian )?optimization)\b", re.I,
@@ -52,7 +59,15 @@ _CONTRIBUTION = re.compile(
     r"evaluat(?:e|es|ed|ing|ion)|reproduc(?:e|es|ed|ing|tion))\b", re.I,
 )
 _PAPER = re.compile(r"\b(?:paper|arxiv|doi)\b|10\.\d{4,9}/", re.I)
-_CODE = re.compile(r"\b(?:official )?(?:source )?code\b|\bcode for\b|\bimplementation\b|\bgithub repo(?:sitory)?\b", re.I)
+_CODE = re.compile(r"\b(?:official )?(?:source )?code\b|\bcode for\b|\bimpl(?:ementation)?s?\b|\bgithub repo(?:sitory)?\b", re.I)
+_OFFICIAL_PAPER = re.compile(
+    r"\bour\s+(?:[a-z0-9]+\s+){0,5}(?:paper|work|method|approach)\b|"
+    r"\bofficial\s+paper\b|\bpaper\s+(?:introduces?|proposes?|presents?)\b|"
+    r"\bofficial(?:\s+[a-z]+){0,3}\s+(?:implementation|impl|code)(?:s)?\b|"
+    r"\bcode(?:\s+and\s+models?)?\s+for\s+(?:(?:icml|neurips|iclr|cvpr|iccv|aaai|acl)\s+20\d{2}\s+)?paper\b",
+    re.I,
+)
+_VENUE_YEAR = re.compile(r"\b(?:icml|neurips|nips|iclr|cvpr|iccv|eccv|acl|emnlp|naacl|aaai|ijcai|kdd|www|sigir|interspeech|icassp|miccai|eccv|acm mm|ieee t[op]ami)\s*['’]?(?:19|20)?\d{2}\b", re.I)
 _EXPLICIT_EXCLUDE = re.compile(
     r"\b(?:homework\d*|assignments?|lab assignments?|textbook|book|awesome list|curated list|portfolio)\b|"
     r"\b(?:cs|eecs)\s?\d{3,4}[a-z]?\b|\bntu[- ]?ee\d{4}\b|\bllm ?book\b", re.I,
@@ -74,7 +89,8 @@ _SURVEY_CUE = re.compile(
 _NON_ML_SIGNAL = re.compile(r"\bdigital filter design\b", re.I)
 _TUTORIAL = re.compile(r"\btutorial\b", re.I)
 _REVIEW_ONLY_CUE = re.compile(
-    r"\b(?:overviews?|reflections?|replications?|reproductions?|reimplementations?|"
+    r"\b(?:overviews?|reflections?|replications?|"
+    r"reproduc(?:e|es|ed|ing|tion)(?:s)?|reimplement(?:s|ed|ing|ation)(?:s)?|"
     r"codes and reflections)\b", re.I,
 )
 _DATASET_CUE = re.compile(r"\bdatasets?\b", re.I)
@@ -133,12 +149,7 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         return result("exclude", "fork")
 
     parts = name.strip().split("/")
-    if len(parts) >= 2 and parts[-1].casefold() in {parts[-2].casefold(), ".github"}:
-        signals.add("owner-profile-repository")
-        return result("exclude", "owner-profile-repository")
-    if len(parts) == 1 and parts[0].casefold() == ".github":
-        signals.add("owner-profile-repository")
-        return result("exclude", "owner-profile-repository")
+    profile_repository = (len(parts) >= 2 and parts[-1].casefold() in {parts[-2].casefold(), ".github"}) or (len(parts) == 1 and parts[0].casefold() == ".github")
 
     fields = [
         " ".join(_strings(row.get(key)))
@@ -170,8 +181,28 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         for field in novelty_fields
         for sentence in re.split(r"[.!?;\n]+", field.casefold().replace("-", " ").replace("_", " "))
     )
-    paper_code = bool(_PAPER.search(text) and _CODE.search(text))
     description = " ".join(_strings(row.get("description"))).strip()
+    description_sentences = re.split(
+        r"(?<!\d)\.(?!\d)|[!?;\n]+",
+        re.sub(r"\b(impl|e\.g|i\.e)\.", r"\1", description.casefold().replace("-", " ").replace("_", " ")),
+    )
+    official_paper_description = any(
+        (claim := _OFFICIAL_PAPER.search(sentence))
+        and (paper := (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence)))
+        and (code := _CODE.search(sentence))
+        and max(claim.start(), paper.start(), code.start()) - min(claim.start(), paper.start(), code.start()) <= 180
+        and (_METHOD.search(sentence) or (_AMBIGUOUS_METHOD.search(sentence) and _ML_CONTEXT.search(sentence)) or (_DOMAIN_METHOD.search(sentence) and _ML_CONTEXT.search(sentence)) or (_ML_CONTEXT.search(sentence) and re.search(r"\b(?:model|modeling|method|approach|optimization|generation|imputation|forecasting)\b", sentence, re.I)))
+        for sentence in description_sentences
+    )
+    research_name_topics = " ".join(_strings(row.get("name")) + _strings(row.get("full_name")) + _strings(row.get("topics")))
+    official_paper_code = official_paper_description or (any(
+        (claim := _OFFICIAL_PAPER.search(sentence))
+        and (paper := (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence)))
+        and (code := _CODE.search(sentence))
+        and max(claim.start(), paper.start(), code.start()) - min(claim.start(), paper.start(), code.start()) <= 180
+        for sentence in description_sentences
+    ) and bool(_METHOD.search(research_name_topics)))
+    paper_code = bool(_PAPER.search(text) and _CODE.search(text))
     tutorial = bool(
         _TUTORIAL.search(" ".join(_strings(row.get("name")) + _strings(row.get("full_name")) + _strings(row.get("topics"))))
         or _TUTORIAL.search(description)
@@ -188,7 +219,9 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
     if tutorial:
         signals.add("tutorial-cue")
         return result("exclude", "tutorial-repository")
-    review_only_cue = bool(_REVIEW_ONLY_CUE.search(text) or _DATASET_CUE.search(text))
+    # Dataset topics often describe the application domain of an original model.
+    # Only repository name/description can indicate that this repository is a dataset.
+    review_only_cue = bool(_REVIEW_ONLY_CUE.search(text) or _DATASET_CUE.search(" ".join(_strings(row.get("name")) + _strings(row.get("full_name")) + _strings(row.get("description")))))
     if method:
         signals.add("ml-method-cue")
     elif ml_context:
@@ -199,6 +232,8 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         signals.add("method-tied-novelty-claim")
     if paper_code:
         signals.add("paper-and-code-cue")
+    if official_paper_code:
+        signals.add("official-paper-implementation-cue")
     if tutorial:
         signals.add("tutorial-cue")
     if review_only_cue:
@@ -213,7 +248,11 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         signals.add("non-ml-utility-cue")
         return result("exclude", "non-ml-utility")
 
-    strong_contribution = method_novelty
+    if profile_repository and not official_paper_code:
+        signals.add("owner-profile-repository")
+        return result("exclude", "owner-profile-repository")
+
+    strong_contribution = method_novelty or official_paper_code
     if _BACKTESTING.search(text):
         return result("review", "non-ml-utility-with-ml-contribution-cue") if strong_contribution else result("exclude", "non-ml-utility")
     if (course_cue or utility_cue) and not method_novelty:
@@ -223,7 +262,7 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
     if review_only_cue:
         return result("review", "overview-reproduction-or-dataset")
     if strong_contribution:
-        return result("include", "specific-method-with-novelty-claim")
+        return result("include", "official-paper-method-implementation" if official_paper_code else "specific-method-with-novelty-claim")
     if method or ml_context or _GENERIC_AI.search(text):
         return result("review", "ml-relevance-without-clear-contribution")
     return result("review", "insufficient-repository-evidence")

@@ -45,9 +45,10 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "observation_count": 2, "first_observed_at": "2025-01-01T00:00:00Z",
          "all_query_ids": [], "all_domains": [], "all_methods": [], "all_novelty_signals": [],
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
-         "evidence_signals": [], "selection_version": "ml-contribution-v1",
+             "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": []},
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v2",
+         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
         {**_row(20, "2026-09-24T12:00:00Z", stars=50, extra={"kept": True},
                 query_ids=["new.query"], domains=["Vision"], methods=["K means"],
                 novelty_signals=["new-signal"]),
@@ -56,14 +57,17 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "all_methods": ["k-means", "transformer"],
          "all_novelty_signals": ["new-signal", "paper-reference"],
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
-         "evidence_signals": [], "selection_version": "ml-contribution-v1",
+             "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": []},
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v2",
+         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
     ]
     assert report["observation_count"] == 4
     assert report["current_view_count"] == 2
-    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 3
-    assert json.loads((tmp_path / "view.jsonl.manifest.json").read_text())["input_files"][1]["observations"] == 2
+    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 4
+    manifest = json.loads((tmp_path / "view.jsonl.manifest.json").read_text())
+    assert manifest["candidate_rule_version"] == "ml-candidate-v2"
+    assert manifest["input_files"][1]["observations"] == 2
     assert repeat.read_bytes() == output.read_bytes()
 
 
@@ -329,3 +333,56 @@ def test_parquet_selection_columns_are_typed_and_optional_filter_preserves_local
     assert pa.types.is_string(table.schema.field("selection_reason").type)
     assert pa.types.is_list(table.schema.field("selection_signals").type)
     assert table.to_pylist()[0]["github_id"] == 1
+
+
+def test_candidate_assessment_is_applied_to_latest_deduped_observation(tmp_path):
+    eligible_old_and_latest = _write(tmp_path / "eligible.jsonl", [
+        _row(41, "2025-01-01T00:00:00Z", name="transformer-project",
+             description="Awesome list of transformer projects"),
+        _row(41, "2026-01-01T00:00:00Z", name="transformer-project",
+             description="Transformer model implementation; paper and code are available for this machine learning project."),
+    ])
+    hard_negative = _write(tmp_path / "negative.jsonl", [
+        _row(42, "2026-01-01T00:00:00Z", name="awesome-transformers",
+             description="Awesome list of transformer projects"),
+    ])
+    output = tmp_path / "current.jsonl"
+
+    materialize_current_view([eligible_old_and_latest, hard_negative], output)
+    rows = _read(output)
+
+    assert rows[0]["github_id"] == 41
+    assert rows[0]["observation_count"] == 2
+    assert rows[0]["candidate_eligible"] is True
+    assert rows[0]["candidate_reason"] == "review-with-repository-evidence"
+    assert rows[1]["github_id"] == 42
+    assert rows[1]["selection_status"] == "exclude"
+    assert rows[1]["candidate_eligible"] is False
+    assert rows[1]["candidate_reason"] == "not-selected-or-reviewable"
+
+
+def test_candidate_parquet_columns_are_typed_and_filter_is_independent_of_selection(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    source = _write(tmp_path / "view.jsonl", [
+        {"github_id": 1, "observed_at": "2026-01-01T00:00:00Z", "selection_status": "review",
+         "candidate_rule_version": "ml-candidate-v2", "candidate_eligible": True,
+         "candidate_reason": "review-with-repository-evidence"},
+        {"github_id": 2, "observed_at": "2026-01-02T00:00:00Z", "selection_status": "review",
+         "candidate_rule_version": "ml-candidate-v2", "candidate_eligible": False,
+         "candidate_reason": "insufficient-repository-evidence"},
+        {"github_id": 3, "observed_at": "2026-01-03T00:00:00Z", "selection_status": "include",
+         "candidate_rule_version": "ml-candidate-v2", "candidate_eligible": True,
+         "candidate_reason": "selected-by-current-rule"},
+    ])
+    output = tmp_path / "eligible.parquet"
+
+    result = export_current_view_parquet(source, output, candidate_eligible=True,
+                                         selection_status="review")
+    table = pq.read_table(output)
+
+    assert result["row_count"] == 1
+    assert [row["github_id"] for row in table.to_pylist()] == [1]
+    assert pa.types.is_string(table.schema.field("candidate_rule_version").type)
+    assert pa.types.is_boolean(table.schema.field("candidate_eligible").type)
+    assert pa.types.is_string(table.schema.field("candidate_reason").type)

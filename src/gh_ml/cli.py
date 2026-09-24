@@ -36,6 +36,19 @@ DEFAULT_CENSUS_OUTPUT = Path.home() / ".local" / "share" / "modelomics-gh-ml" / 
 SEARCH_POLICY_VERSION = 2
 
 
+def _is_fair_recent_cursor(cursor: Any) -> bool:
+    """Return whether a daily cursor belongs to fair recent discovery."""
+    return (
+        isinstance(cursor, dict)
+        and cursor.get("version") == 1
+        and cursor.get("field") == "pushed"
+        and "since" in cursor
+        and "until" in cursor
+        and isinstance(cursor.get("lanes"), dict)
+        and isinstance(cursor.get("next_index"), int)
+    )
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC).replace(microsecond=0)
 
@@ -130,7 +143,7 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
     run.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG, help="directory of TOML query files")
     run.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT, help="local run and checkpoint directory")
-    run.add_argument("--max-requests", type=int, default=100, help="maximum GitHub search API requests per invocation")
+    run.add_argument("--max-requests", type=int, default=600, help="maximum GitHub search API requests per invocation")
     run.add_argument("--since-days", type=int, default=1, help="lookback interval when starting a new sweep")
     run.add_argument("--no-publish", action="store_true", help="write local files without publishing to Hugging Face")
     run.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
@@ -304,6 +317,13 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         state = _read_state(state_path, requested_end)
     else:
         state = _read_state(state_path, initial_since)
+    # Daily used a serial query/page cursor before fair scheduling. Keep its
+    # frozen window, but discard that cursor so it cannot be misread as lanes.
+    # Remember this across policy migration, which may itself clear old cursors.
+    daily_legacy_cursor = (
+        mode == "daily" and state.get("cursor") is not None
+        and not _is_fair_recent_cursor(state.get("cursor"))
+    )
     state = _apply_search_policy(state)
     specs = None
     if mode == "historical-sample":
@@ -327,6 +347,10 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         remote_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "backfill-fair": "state/backfill-fair.json", "sample": "state/sample.json", "historical-sample": "state/historical-sample.json"}[mode]
         remote_checkpoint = load_checkpoint(args.repo, hf_token, checkpoint_path=remote_path)
         if not state["initialized"] and isinstance(remote_checkpoint, dict):
+            daily_legacy_cursor = (
+                mode == "daily" and remote_checkpoint.get("cursor") is not None
+                and not _is_fair_recent_cursor(remote_checkpoint.get("cursor"))
+            )
             remote_checkpoint = _apply_search_policy(remote_checkpoint)
             state.update(remote_checkpoint)
             state["since"] = remote_checkpoint.get("since", initial_since)
@@ -334,6 +358,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             if mode in {"backfill", "backfill-fair"}:
                 state["start"] = remote_checkpoint.get("start", args.start)
                 state["end"] = remote_checkpoint.get("end", args.end)
+    if daily_legacy_cursor:
+        state["cursor"] = None
     if specs is None:
         specs = load_queries(args.config_dir)
     if not specs:
@@ -401,7 +427,11 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     elif mode in {"daily", "sample"}:
         # A new sweep gets a fresh upper bound; a truncated sweep retains
         # the exact bound alongside its cursor so it can resume safely.
-        until = state.get("until") if state.get("cursor") is not None else now.date().isoformat()
+        until = (
+            (state.get("until") or now.date().isoformat())
+            if state.get("cursor") is not None or daily_legacy_cursor
+            else now.date().isoformat()
+        )
         state["until"] = until
         if mode == "sample":
             discover_run = lambda cursor: discover_sample(
@@ -409,13 +439,11 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
                 max_requests=args.max_requests, cursor=cursor,
             )
         else:
-            discover_run = lambda cursor: discover(
-                client,
-                specs,
-                since=state["since"],
-                until=until,
-                max_requests=args.max_requests,
-                cursor=cursor,
+            from .fair_recent import discover_fair_recent
+
+            discover_run = lambda cursor: discover_fair_recent(
+                client, specs, since=state["since"], until=until,
+                max_requests=args.max_requests, cursor=cursor,
             )
     elif mode == "backfill-fair":
         from .fair_backfill import discover_fair_backfill

@@ -54,7 +54,7 @@ def test_method_and_substantive_contribution_are_required_for_include() -> None:
         "stargazers_count": 0,
     })
     assert result["selection_status"] == "include"
-    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v1"
+    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v2"
     assert result["selection_signals"] == sorted(result["selection_signals"])
 
 
@@ -72,7 +72,7 @@ def test_generic_ml_or_query_match_alone_never_includes() -> None:
 def test_paper_code_alone_goes_to_review() -> None:
     result = assess_repository({
         "name": "lab/paper-implementation",
-        "description": "Official code for the diffusion model paper, arXiv:2401.12345.",
+        "description": "Code for a diffusion model paper, arXiv:2401.12345.",
     })
     assert result["selection_status"] == "review"
     assert "paper-and-code-cue" in result["selection_signals"]
@@ -289,6 +289,15 @@ def test_temporal_fusion_transformer_overview_stays_in_review() -> None:
     assert result["selection_reason"] == "overview-reproduction-or-dataset"
 
 
+def test_hpo_rl_paper_result_reproduction_stays_in_review() -> None:
+    result = assess_repository({
+        "name": "automl/HPO_for_RL",
+        "description": "Code of reproducing the results of a paper on hyperparameter optimization for reinforcement learning.",
+    })
+    assert result["selection_status"] == "review"
+    assert result["selection_reason"] == "overview-reproduction-or-dataset"
+
+
 def test_novel_dataset_is_not_included_as_a_method_contribution() -> None:
     result = assess_repository({
         "name": "tsinghua/visual-tactile-dataset",
@@ -404,3 +413,51 @@ def test_results_depend_only_on_repository_owned_text_and_fork_flag() -> None:
         "license": "MIT",
     }
     assert assess_repository(base) == assess_repository(noisy)
+
+
+
+def test_official_paper_implementations_are_included_without_novel_wording() -> None:
+    rows = (
+        ("FoundationVision/VAR", "[NeurIPS 2024 Best Paper Award] Official impl. of Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction.", ["autoregressive-image-generation"]),
+        ("WenjieDu/SAITS", "The official PyTorch implementation of the paper SAITS: Self-Attention-based Imputation for Time Series (arXiv:2202.08516).", ["time-series-imputation"]),
+        ("cure-lab/LTSF-Linear", "[AAAI-23 Oral] Official implementation of LTSF-Linear: Are Transformers Effective for Time Series Forecasting?", ["time-series-forecasting"]),
+        ("langfengQ/verl-agent", "Official code for the paper Group-in-Group Policy Optimization for Multi-Turn LLM Agents (arXiv:2505.11435).", ["agentic-reinforcement-learning"]),
+        ("yujinie98/PatchTST", "Official code for the PatchTST paper on long-term forecasting with time series transformers (ICLR 2023).", ["time-series-forecasting"]),
+        ("ali-vilab/VACE", "[ICCV 2025] Official implementations for paper: VACE: All-in-One Video Creation and Editing.", ["video-generation", "video-editing"]),
+        ("NExT-GPT/NExT-GPT", "Code and models for ICML 2024 paper, NExT-GPT: Any-to-Any Multimodal Large Language Model.", ["multimodal-large-language-model"]),
+    )
+    for name, description, topics in rows:
+        result = assess_repository({"name": name, "description": description, "topics": topics, "fork": False})
+        assert result["selection_status"] == "include", (name, result)
+        assert "official-paper-implementation-cue" in result["selection_signals"]
+
+
+def test_official_paper_route_rejects_weak_or_unrelated_evidence() -> None:
+    rows = (
+        {"name": "user/bert-reproduction", "description": "Reproduction code for the BERT paper, arXiv:1810.04805."},
+        {"name": "student/course-project", "description": "Official implementation of our transformer paper, NeurIPS 2024. Course project."},
+        {"name": "lab/survey", "description": "Official code for our survey paper on diffusion, NeurIPS 2024."},
+        {"name": "lab/zipline", "description": "Official code for our transformer paper, NeurIPS 2024.", "fork": True},
+        {"name": "octocat/octocat", "description": "A machine learning project."},
+        {"name": "lab/lora", "description": "Official code for our paper on LoRa networking, NeurIPS 2024."},
+        {"name": "lab/gpt-skill-tree", "description": "Official implementation for our Codex skill tree paper about GPT, NeurIPS 2024."},
+        {"name": "lab/misc", "description": "Official code for our unrelated image compression paper, NeurIPS 2024."},
+        {"name": "lab/concatenated", "description": "Official code for our paper on data management. Separately, discusses transformers. NeurIPS 2024."},
+    )
+    for row in rows:
+        assert assess_repository(row)["selection_status"] != "include", row["name"]
+
+
+def test_owner_profile_can_pass_only_with_official_research_evidence() -> None:
+    result = assess_repository({"name": "lab/lab", "description": "Official implementation of our PatchTST paper on time series forecasting (ICLR 2023)."})
+    assert result["selection_status"] == "include"
+    assert assess_repository({"name": "lab/lab", "description": "Machine learning"})["selection_reason"] == "owner-profile-repository"
+
+
+def test_dataset_topic_does_not_block_original_model_implementation() -> None:
+    result = assess_repository({
+        "name": "lab/new-mamba-model",
+        "description": "We propose a novel Mamba architecture for time series forecasting.",
+        "topics": ["datasets", "transformer"],
+    })
+    assert result["selection_status"] == "include"
