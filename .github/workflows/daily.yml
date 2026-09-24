@@ -37,10 +37,10 @@ on:
         type: number
         default: 50
       topic_max_pages:
-        description: "Maximum GitHub topic pages to collect (1–100)"
+        description: "Maximum GitHub topic pages to collect (1–100; daily default 68)"
         required: false
         type: number
-        default: 60
+        default: 68
 
 permissions:
   contents: read
@@ -59,7 +59,7 @@ jobs:
       HISTORICAL_SAMPLE_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 200 || inputs.historical_sample_max_requests }}
       BACKFILL_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 700 || inputs.backfill_max_requests }}
       CENSUS_MAX_PAGES: ${{ github.event_name == 'schedule' && 50 || inputs.census_max_pages }}
-      TOPIC_MAX_PAGES: ${{ github.event_name == 'schedule' && 60 || inputs.topic_max_pages }}
+      TOPIC_MAX_PAGES: ${{ github.event_name == 'schedule' && 68 || inputs.topic_max_pages }}
     permissions:
       contents: read
       id-token: write

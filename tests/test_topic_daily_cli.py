@@ -117,6 +117,6 @@ def test_topic_daily_no_pages_and_unchanged_state_skips_publication(tmp_path, mo
 def test_topic_daily_parser_defaults(tmp_path):
     args = cli._parser().parse_args(["topic-breadth-daily", "--work-dir", str(tmp_path)])
     assert args.repo == "modelomics/gh-ml"
-    assert args.max_pages == 60
+    assert args.max_pages == 68
     assert args.topics_config is None
     assert not args.no_publish

@@ -30,4 +30,12 @@ topics = [
   "multimodal-deep-learning",
   "vision-language-model",
   "federated-learning",
+  "geospatial",
+  "remote-sensing",
+  "bioinformatics",
+  "cheminformatics",
+  "speech-recognition",
+  "text-to-speech",
+  "medical-imaging",
+  "recommender-system",
 ]

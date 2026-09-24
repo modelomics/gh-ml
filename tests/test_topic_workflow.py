@@ -8,9 +8,9 @@ def test_daily_workflow_configures_and_runs_topic_breadth_collector() -> None:
     workflow = WORKFLOW.read_text()
 
     assert "topic_max_pages:" in workflow
-    assert 'description: "Maximum GitHub topic pages to collect (1–100)"' in workflow
-    assert "type: number\n        default: 60" in workflow
-    assert "TOPIC_MAX_PAGES: ${{ github.event_name == 'schedule' && 60 || inputs.topic_max_pages }}" in workflow
+    assert 'description: "Maximum GitHub topic pages to collect (1–100; daily default 68)"' in workflow
+    assert "type: number\n        default: 68" in workflow
+    assert "TOPIC_MAX_PAGES: ${{ github.event_name == 'schedule' && 68 || inputs.topic_max_pages }}" in workflow
     assert '"TOPIC_MAX_PAGES": (1, 100)' in workflow
 
     census_step = workflow.index("id: census")

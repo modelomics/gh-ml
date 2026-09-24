@@ -5,7 +5,7 @@ import pytest
 from gh_ml.topic_catalog import load_topics
 
 
-EXPECTED_TOPICS = [
+EXISTING_TOPICS = [
     "deep-learning",
     "machine-learning",
     "computer-vision",
@@ -38,6 +38,17 @@ EXPECTED_TOPICS = [
     "federated-learning",
 ]
 
+ADDED_TOPICS = [
+    "geospatial",
+    "remote-sensing",
+    "bioinformatics",
+    "cheminformatics",
+    "speech-recognition",
+    "text-to-speech",
+    "medical-imaging",
+    "recommender-system",
+]
+
 
 def write_catalog(tmp_path: Path, topics: str, extra: str = "") -> Path:
     path = tmp_path / "topics.toml"
@@ -46,8 +57,13 @@ def write_catalog(tmp_path: Path, topics: str, extra: str = "") -> Path:
 
 
 def test_default_catalog_has_expected_topics_in_stable_order() -> None:
-    assert load_topics() == EXPECTED_TOPICS
-    assert len(load_topics()) == 30
+    topics = load_topics()
+    assert topics[: len(EXISTING_TOPICS)] == EXISTING_TOPICS
+    assert topics[-len(ADDED_TOPICS) :] == ADDED_TOPICS
+    assert len(topics) == 38
+    assert len(topics) == len(set(topics))
+    assert set(ADDED_TOPICS) <= set(topics)
+    assert {"computer-vision", "natural-language-processing", "bioinformatics", "medical-imaging"} <= set(topics)
 
 
 def test_load_topics_preserves_order(tmp_path: Path) -> None:

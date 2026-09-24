@@ -213,7 +213,7 @@ def _parser() -> argparse.ArgumentParser:
     topic_daily = subparsers.add_parser("topic-breadth-daily", help="collect and publish a bounded daily GitHub topic breadth run")
     topic_daily.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
     topic_daily.add_argument("--work-dir", type=Path, required=True, help="directory for isolated topic breadth run files")
-    topic_daily.add_argument("--max-pages", type=int, default=60, help="maximum GitHub pages to collect (default: 30 topic heads plus 30 deeper pages; capped at 100)")
+    topic_daily.add_argument("--max-pages", type=int, default=68, help="maximum GitHub pages to collect (default: 38 topic heads plus 30 deeper pages; capped at 100)")
     topic_daily.add_argument("--topics-config", type=Path, help="optional TOML topic catalog (default: bundled catalog)")
     topic_daily.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     topic_daily.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
