@@ -6,24 +6,29 @@ on:
     - cron: "17 9 * * *"
   workflow_dispatch:
     inputs:
+      snapshot_only:
+        description: "Publish the current-view snapshot without running collectors"
+        required: false
+        type: boolean
+        default: false
       recent_max_requests:
         description: "Maximum Search requests for recent collection (1–600)"
-        required: true
+        required: false
         type: number
         default: 600
       sample_max_requests:
         description: "Maximum Search requests for breadth sample (1–500)"
-        required: true
+        required: false
         type: number
         default: 500
       backfill_max_requests:
         description: "Maximum Search requests for fair historical backfill (1–700)"
-        required: true
+        required: false
         type: number
         default: 700
       historical_sample_max_requests:
         description: "Maximum Search requests for annual historical sample (1–200)"
-        required: true
+        required: false
         type: number
         default: 200
 
@@ -48,6 +53,7 @@ jobs:
       id-token: write
     steps:
       - name: Validate request limits
+        if: ${{ !inputs.snapshot_only }}
         shell: bash
         run: |
           python - <<'PY'
@@ -82,6 +88,7 @@ jobs:
         run: |
           uv run --frozen python -c 'import os; from huggingface_hub import get_token; token = os.environ.get("HF_TOKEN") or get_token(); assert token, "No Hugging Face token available from HF_TOKEN or the configured GitHub OIDC trusted publisher"'
       - name: Sample broad repository queries
+        if: ${{ !inputs.snapshot_only }}
         id: sample
         continue-on-error: true
         env:
@@ -90,6 +97,7 @@ jobs:
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml sample --max-requests "$SAMPLE_MAX_REQUESTS" --since-days 1
       - name: Collect recent repositories
+        if: ${{ !inputs.snapshot_only }}
         id: recent
         continue-on-error: true
         env:
@@ -98,6 +106,7 @@ jobs:
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml run --max-requests "$RECENT_MAX_REQUESTS"
       - name: Sample historical repositories by year
+        if: ${{ !inputs.snapshot_only }}
         id: historical_sample
         continue-on-error: true
         env:
@@ -106,6 +115,7 @@ jobs:
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml historical-sample --max-requests "$HISTORICAL_SAMPLE_MAX_REQUESTS"
       - name: Fair backfill historical repositories
+        if: ${{ !inputs.snapshot_only }}
         id: backfill
         continue-on-error: true
         env:

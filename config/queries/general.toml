@@ -60,7 +60,7 @@ methods = ["paper-implementation"]
 
 [[queries]]
 id = "general.research-code"
-q = "\"research code\" in:description"
+q = "\"research code\" \"machine learning\" in:description,readme"
 domains = ["general-ml"]
 methods = ["research-implementation"]
 
@@ -72,7 +72,7 @@ methods = ["model-architecture"]
 
 [[queries]]
 id = "general.arxiv"
-q = "arxiv in:description"
+q = "arxiv \"machine learning\" in:description,readme"
 domains = ["general-ml"]
 methods = ["paper-implementation"]
 
@@ -114,7 +114,7 @@ methods = ["bayesian-optimization", "black-box-optimization"]
 
 [[queries]]
 id = "general.clustering"
-q = "clustering in:description"
+q = "\"clustering algorithm\" \"machine learning\" in:description,readme"
 domains = ["classical-ml", "unsupervised-learning"]
 methods = ["clustering", "unsupervised-learning"]
 

@@ -54,7 +54,7 @@ methods = []
 
 [[queries]]
 id = "applied.algorithmic-trading"
-q = "\"algorithmic trading\" in:description"
+q = "\"algorithmic trading\" \"machine learning\" in:readme"
 domains = ["algorithmic-trading", "finance"]
 methods = []
 
@@ -72,7 +72,7 @@ methods = ["causal-inference"]
 
 [[queries]]
 id = "applied.fraud-detection"
-q = "\"fraud detection\" in:readme"
+q = "\"fraud detection\" \"machine learning\" in:description,readme"
 domains = ["fraud-detection"]
 methods = []
 
@@ -120,7 +120,7 @@ methods = []
 
 [[queries]]
 id = "applied.dynamic-pricing"
-q = "\"dynamic pricing\" in:readme"
+q = "\"dynamic pricing\" \"machine learning\" in:description,readme"
 domains = ["dynamic-pricing", "finance", "pricing", "retail"]
 methods = []
 
@@ -138,7 +138,7 @@ methods = []
 
 [[queries]]
 id = "applied.customer-segmentation"
-q = "\"customer segmentation\" in:readme"
+q = "\"customer segmentation\" \"machine learning\" in:description,readme"
 domains = ["customer-analytics", "customer-segmentation", "marketing"]
 methods = ["clustering"]
 

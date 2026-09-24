@@ -41,7 +41,7 @@ class FakeHub:
         assert kwargs["repo_type"] == "dataset"
         operations = kwargs["operations"]
         assert [op.path_in_repo for op in operations] == [
-            "data/current/repositories.parquet", "data/current/manifest.json"
+            "data/current/repositories.parquet", "data/current/manifest.json", "README.md"
         ]
         added = {op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in operations}
         self.files.update(added)
@@ -72,9 +72,10 @@ class FakeDownloader:
 def _hub(tmp_path, observations=None):
     observations = observations or {
         "data/observations/2026/09/24/run.jsonl": (
-            b'{"github_id":1,"observed_at":"2026-09-24T12:00:00Z","stars":4}\n'
+            b'{"github_id":1,"name":"org/model","description":"We propose a novel transformer architecture for efficient machine learning inference.","observed_at":"2026-09-24T12:00:00Z","stars":4}\n'
         )
     }
+    observations.setdefault("README.md", publisher._SOURCE_CARD.read_bytes())
     hub = FakeHub(observations)
     hub._temp_dir = tmp_path / "remote"
     return hub, FakeDownloader(hub)
@@ -82,10 +83,13 @@ def _hub(tmp_path, observations=None):
 
 @pytest.fixture(autouse=True)
 def fake_parquet(monkeypatch):
-    def export(jsonl, destination):
-        rows = Path(jsonl).read_bytes()
-        Path(destination).write_bytes(b"PARQUET\0" + rows)
-        return {"row_count": len(rows.splitlines())}
+    def export(jsonl, destination, *, selection_status=None):
+        rows = [json.loads(line) for line in Path(jsonl).read_text().split("\n") if line]
+        if selection_status is not None:
+            rows = [row for row in rows if row.get("selection_status") == selection_status]
+        encoded = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows).encode()
+        Path(destination).write_bytes(b"PARQUET\0" + encoded)
+        return {"row_count": len(rows)}
     monkeypatch.setattr(publisher, "export_current_view_parquet", export)
 
 
@@ -96,16 +100,55 @@ def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
     assert result["url"] == "https://hf.test/commit"
     assert result["source_revision"] == "rev-1"
     assert result["observation_count"] == result["current_view_count"] == 1
+    assert result["included_count"] == 1
+    assert result["review_count"] == result["excluded_count"] == 0
     assert result["already_current"] is False
     assert all(revision == "rev-1" for _, revision in downloader.calls)
     assert len(hub.commits) == 1
     assert hub.commits[0]["parent_commit"] == "rev-1"
     manifest = json.loads(hub.files["data/current/manifest.json"])
+    assert manifest["version"] == 4
+    assert manifest["projection_version"] == 3
+    assert manifest["selection_version"] == "ml-contribution-v1"
+    assert manifest["card_sha256"] == publisher._sha256(publisher._SOURCE_CARD.read_bytes())
+    assert hub.files["README.md"] == publisher._SOURCE_CARD.read_bytes()
+    assert sum(manifest["selection_reason_counts"].values()) == manifest["current_view_count"]
     assert manifest["observation_files"] == [{
         "path": "data/observations/2026/09/24/run.jsonl",
         "sha256": publisher._sha256(next(iter(hub.history["rev-1"].values()))),
     }]
     assert "output_file" not in manifest
+
+
+def test_snapshot_filters_forks_profiles_and_query_only_rows(tmp_path):
+    records = [
+        {"github_id": 1, "name": "zipline/zipline", "description": "Fork of a trading library.",
+         "fork": True, "observed_at": "2026-09-24T12:00:00Z"},
+        {"github_id": 2, "name": "research/transformer-paper",
+         "description": "We propose a novel transformer architecture for machine learning.",
+         "topics": ["deep-learning"], "observed_at": "2026-09-24T12:00:00Z"},
+        {"github_id": 3, "name": "student/coursework", "description": "CS 541 class project",
+         "observed_at": "2026-09-24T12:00:00Z"},
+        {"github_id": 4, "name": "query/only", "description": "",
+         "query_ids": ["transformer.research"], "observed_at": "2026-09-24T12:00:00Z"},
+        {"github_id": 5, "name": "research/research", "description": "Machine learning research",
+         "observed_at": "2026-09-24T12:00:00Z"},
+    ]
+    payload = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records).encode()
+    hub, downloader = _hub(tmp_path, {"data/observations/run.jsonl": payload})
+
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    manifest = json.loads(hub.files["data/current/manifest.json"])
+    parquet_payload = hub.files["data/current/repositories.parquet"].split(b"\0", 1)[1]
+    published = [json.loads(line) for line in parquet_payload.decode().splitlines()]
+    assert len(published) == result["included_count"] == manifest["included_count"] == 1
+    assert published[0]["github_id"] == 2
+    assert manifest["current_view_count"] == 5
+    assert manifest["review_count"] == 1
+    assert manifest["excluded_count"] == 3
+    assert sum(manifest["selection_reason_counts"].values()) == 5
+    assert result["included_count"] + result["review_count"] + result["excluded_count"] == 5
 
 
 def test_token_provider_refreshes_commit_credential_without_exposing_it(tmp_path):
@@ -161,8 +204,8 @@ def test_fresh_token_is_used_for_post_build_head_check(tmp_path, monkeypatch):
     hub, downloader = _hub(tmp_path)
     export = publisher.export_current_view_parquet
 
-    def export_then_expire(jsonl, destination):
-        report = export(jsonl, destination)
+    def export_then_expire(jsonl, destination, **kwargs):
+        report = export(jsonl, destination, **kwargs)
         hub.required_token = "refreshed"
         return report
 
@@ -180,8 +223,8 @@ def test_parquet_count_mismatch_stops_before_commit(tmp_path, monkeypatch):
     hub, downloader = _hub(tmp_path)
     original = publisher.export_current_view_parquet
 
-    def mismatched_export(jsonl_path, parquet_path):
-        report = original(jsonl_path, parquet_path)
+    def mismatched_export(jsonl_path, parquet_path, **kwargs):
+        report = original(jsonl_path, parquet_path, **kwargs)
         return {**report, "row_count": report["row_count"] + 1}
 
     monkeypatch.setattr(publisher, "export_current_view_parquet", mismatched_export)
@@ -206,6 +249,75 @@ def test_snapshot_commit_does_not_trigger_another_commit(tmp_path):
     assert second["already_current"] is True
     assert second["source_revision"] == "rev-1"
     assert len(hub.commits) == 1
+
+
+def test_card_change_publishes_card_with_snapshot_in_one_commit(tmp_path):
+    hub, downloader = _hub(tmp_path)
+    source_card = tmp_path / "README.md"
+    source_card.write_text("---\ntags:\n- dataset\n---\nFirst card\n", encoding="utf-8")
+    first = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub,
+                                 downloader=downloader, card_path=source_card)
+    assert first["already_current"] is False
+    source_card.write_text("---\ntags:\n- dataset\n---\nUpdated default config\n", encoding="utf-8")
+
+    second = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub,
+                                  downloader=downloader, card_path=source_card)
+
+    assert second["already_current"] is False
+    assert len(hub.commits) == 2
+    assert [op.path_in_repo for op in hub.commits[-1]["operations"]] == [
+        "data/current/repositories.parquet", "data/current/manifest.json", "README.md"
+    ]
+    assert hub.files["README.md"] == source_card.read_bytes()
+    manifest = json.loads(hub.files["data/current/manifest.json"])
+    assert manifest["card_sha256"] == publisher._sha256(source_card.read_bytes())
+
+
+def test_same_inputs_with_old_projection_version_rebuilds(tmp_path):
+    hub, downloader = _hub(tmp_path)
+    publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    manifest_path = "data/current/manifest.json"
+    old_manifest = json.loads(hub.files[manifest_path])
+    old_manifest["projection_version"] = 1
+    hub.files[manifest_path] = json.dumps(old_manifest).encode()
+    hub.history[hub.revision][manifest_path] = hub.files[manifest_path]
+
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    assert result["already_current"] is False
+    assert len(hub.commits) == 2
+    rebuilt = json.loads(hub.files[manifest_path])
+    assert rebuilt["projection_version"] == 3
+
+
+def test_same_inputs_with_old_selection_version_rebuilds(tmp_path):
+    hub, downloader = _hub(tmp_path)
+    publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    manifest_path = "data/current/manifest.json"
+    old_manifest = json.loads(hub.files[manifest_path])
+    old_manifest["selection_version"] = "old-rules"
+    hub.files[manifest_path] = json.dumps(old_manifest).encode()
+    hub.history[hub.revision][manifest_path] = hub.files[manifest_path]
+
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    assert result["already_current"] is False
+    assert len(hub.commits) == 2
+    assert json.loads(hub.files[manifest_path])["selection_version"] == "ml-contribution-v1"
+
+
+def test_changed_inputs_rebuild_current_projection(tmp_path):
+    hub, downloader = _hub(tmp_path)
+    publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    hub.files["data/observations/new.jsonl"] = b'{"github_id":2,"observed_at":"2026-09-25T00:00:00Z"}\n'
+    hub.revision = "rev-2"
+    hub.history[hub.revision] = dict(hub.files)
+
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    assert result["already_current"] is False
+    assert result["observation_count"] == 2
+    assert len(hub.commits) == 2
 
 
 def test_missing_parquet_with_matching_manifest_rebuilds_snapshot(tmp_path):
@@ -299,6 +411,23 @@ def test_lost_commit_response_is_confirmed_by_remote_manifest(tmp_path):
     hub.create_commit = lose_response
     result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
     assert result["already_current"] is True
+    assert len(hub.commits) == 1
+
+
+def test_lost_commit_response_requires_matching_remote_card(tmp_path):
+    hub, downloader = _hub(tmp_path)
+    original = hub.create_commit
+
+    def lose_response_with_wrong_card(**kwargs):
+        original(**kwargs)
+        hub.files["README.md"] = b"different card"
+        hub.history[hub.revision]["README.md"] = b"different card"
+        raise RuntimeError("response lost")
+
+    hub.create_commit = lose_response_with_wrong_card
+    with pytest.raises(RuntimeError, match="response lost"):
+        publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub,
+                             downloader=downloader, max_attempts=1)
     assert len(hub.commits) == 1
 
 

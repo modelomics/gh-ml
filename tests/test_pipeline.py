@@ -177,7 +177,7 @@ def test_sample_cli_writes_created_coverage_and_separate_local_state(tmp_path: P
     assert (coverage["since"], coverage["until"]) == ("2026-09-23", "2026-09-24")
     assert coverage["requests_used"] == 3 and coverage["complete_sweep"] is True
     assert calls[0]["start"] == "2026-09-23" and calls[0]["end"] == "2026-09-24"
-    assert state == {"since": "2026-09-24", "cursor": None, "checkpoint": None}
+    assert state == {"since": "2026-09-24", "cursor": None, "checkpoint": None, "search_policy_version": 2}
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8")) == run_state
     assert json.loads((tmp_path / "backfill-state.json").read_text(encoding="utf-8")) == backfill_state
 
@@ -185,6 +185,7 @@ def test_sample_cli_writes_created_coverage_and_separate_local_state(tmp_path: P
 def test_sample_cli_resumes_partial_window_and_publishes_sample_checkpoint(tmp_path: Path, monkeypatch) -> None:
     (tmp_path / "sample-state.json").write_text(json.dumps({
         "since": "2026-09-20", "until": "2026-09-22", "cursor": {"page": 2},
+        "search_policy_version": 2,
     }), encoding="utf-8")
     outcome = SimpleNamespace(
         repositories={}, matched_query_ids={}, next_cursor={"page": 3}, requests_used=4,
@@ -283,7 +284,7 @@ def test_historical_sample_resume_keeps_bound_and_publishes_state_checkpoint(tmp
     }
     (tmp_path / "historical-sample-state.json").write_text(json.dumps({
         "start_year": 2008, "end": "2025-12-31", "cursor": legacy_cursor,
-        "complete": False, "catalog_signature": catalog,
+        "complete": False, "catalog_signature": catalog, "search_policy_version": 2,
     }), encoding="utf-8")
     outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor={"version": 2, "complete": True, "lanes": {}}, requests_used=4,
                               coverage=[{"year": 2017, "status": "ok"}])
@@ -312,6 +313,7 @@ def test_historical_sample_completed_campaign_skips_discovery_and_publish(tmp_pa
     (tmp_path / "historical-sample-state.json").write_text(json.dumps({
         "start_year": 2008, "end": "2025-12-31", "cursor": None, "complete": True,
         "catalog_signature": [{"id": spec.id, "query": spec.q}],
+        "search_policy_version": 2,
     }), encoding="utf-8")
     monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
     monkeypatch.setattr(cli, "_github_token", lambda _: None)
@@ -331,6 +333,7 @@ def test_historical_sample_v2_completed_catalog_change_reconciles_cursor(tmp_pat
         "cursor": {"version": 2, "complete": True, "lanes": {"old-query/2008": {"done": True}}},
         "complete": True,
         "catalog_signature": [{"id": old.id, "query": old.q}],
+        "search_policy_version": 2,
     }), encoding="utf-8")
     outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor={"version": 2, "complete": False, "year": 2010}, requests_used=1,
                               coverage=[{"year": 2008, "status": "ok"}])
@@ -416,7 +419,7 @@ def test_cli_publishes_empty_sweep_checkpoint_for_ephemeral_runners(
     )
 
     assert status == 0
-    assert saved == [{"since": "2026-09-24", "cursor": None, "updated_at": "2026-09-24T00:00:00Z"}]
+    assert saved == [{"since": "2026-09-24", "cursor": None, "search_policy_version": 2, "updated_at": "2026-09-24T00:00:00Z"}]
     manifest = json.loads(next(tmp_path.glob("manifest-*.json")).read_text(encoding="utf-8"))
     assert manifest["published"] is True
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["since"] == "2026-09-24"
@@ -510,13 +513,13 @@ def test_oidc_failure_is_clear_and_does_not_print_exception(tmp_path: Path, monk
         (
             "run",
             "state.json",
-            {"since": "2026-09-20", "until": "2026-09-24", "cursor": {"page": 2}},
+            {"since": "2026-09-20", "until": "2026-09-24", "cursor": {"page": 2}, "search_policy_version": 2},
             {"since": "2026-09-20", "until": "2026-09-24"},
         ),
         (
             "backfill",
             "backfill-state.json",
-            {"start": "2020-01-01", "end": "2020-12-31", "cursor": {"page": 2}},
+            {"start": "2020-01-01", "end": "2020-12-31", "cursor": {"page": 2}, "search_policy_version": 2},
             {"start": "2020-01-01", "end": "2020-12-31"},
         ),
     ],
@@ -685,6 +688,7 @@ def test_fair_backfill_resumes_frozen_bounds_publishes_own_checkpoint_and_keeps_
     fair_cursor = {"lanes": {"fair-q": {"page": 3}}}
     fair_state = {
         "start": "2019-01-01", "end": "2020-12-31", "cursor": fair_cursor,
+        "search_policy_version": 2,
         # A changed catalog must reach fair discovery with the existing lane
         # cursor so it can preserve unchanged lanes and restart changed ones.
         "complete": False, "catalog_signature": [{"id": spec.id, "query": "old protein query"}],
@@ -735,6 +739,7 @@ def test_fair_backfill_completed_catalog_skips_and_changed_catalog_starts_new_sw
     (tmp_path / "backfill-fair-state.json").write_text(json.dumps({
         "start": "2018-01-01", "end": "2020-12-31", "cursor": None,
         "complete": True, "catalog_signature": [{"id": old_spec.id, "query": old_spec.q}],
+        "search_policy_version": 2,
     }), encoding="utf-8")
     monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
     monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())

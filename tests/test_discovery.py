@@ -44,10 +44,10 @@ def test_deduplicates_repositories_by_numeric_id_and_keeps_query_provenance():
     first, second = spec("first"), spec("second")
     client = FakeGitHubClient(
         {
-            (first.q + " fork:true pushed:>=2026-09-01", 1): SearchResult(
+            (first.q + " pushed:>=2026-09-01", 1): SearchResult(
                 1, False, [repo(42, "old-name/project")]
             ),
-            (second.q + " fork:true pushed:>=2026-09-01", 1): SearchResult(
+            (second.q + " pushed:>=2026-09-01", 1): SearchResult(
                 1, False, [repo(42, "new-name/project")]
             ),
         }
@@ -66,7 +66,7 @@ def test_deduplicates_repositories_by_numeric_id_and_keeps_query_provenance():
 
 def test_pagination_budget_cursor_resumes_at_exact_next_page():
     query = spec("paged")
-    search = query.q + " fork:true pushed:>=2026-09-01"
+    search = query.q + " pushed:>=2026-09-01"
     client = FakeGitHubClient(
         {
             (search, 1): SearchResult(3, False, [repo(1), repo(2)]),
@@ -94,10 +94,23 @@ def test_pagination_budget_cursor_resumes_at_exact_next_page():
     assert second.next_cursor is None
 
 
+def test_search_excludes_forks_by_default_and_preserves_explicit_fork_scope():
+    ordinary = spec("ordinary")
+    fork_only = spec("fork-only", "topic:methods fork:only")
+    client = FakeGitHubClient({})
+
+    discover(client, [ordinary, fork_only], since="2026-09-01", max_requests=2)
+
+    assert client.calls == [
+        (ordinary.q + " pushed:>=2026-09-01", 1, 100),
+        (fork_only.q + " pushed:>=2026-09-01", 1, 100),
+    ]
+
+
 def test_resumed_sweep_emits_only_coverage_completed_in_this_invocation():
     first_query, second_query = spec("first"), spec("second")
-    first_search = first_query.q + " fork:true pushed:>=2026-09-01"
-    second_search = second_query.q + " fork:true pushed:>=2026-09-01"
+    first_search = first_query.q + " pushed:>=2026-09-01"
+    second_search = second_query.q + " pushed:>=2026-09-01"
     client = FakeGitHubClient(
         {
             (first_search, 1): SearchResult(1, False, [repo(11)]),
@@ -122,7 +135,7 @@ def test_resumed_sweep_emits_only_coverage_completed_in_this_invocation():
 
 def test_regular_cursor_rejects_changed_filter_or_page_size():
     query = spec("identity")
-    search = query.q + " fork:true pushed:>=2026-09-01"
+    search = query.q + " pushed:>=2026-09-01"
     client = FakeGitHubClient({(search, 1): SearchResult(3, False, [repo(1), repo(2)])})
     first = discover(client, [query], since="2026-09-01", max_requests=1, per_page=2)
 
@@ -140,7 +153,7 @@ def test_regular_cursor_rejects_changed_filter_or_page_size():
 
 def test_github_search_1000_result_cap_is_reported_as_incomplete_coverage():
     query = spec("large")
-    search = query.q + " fork:true pushed:>=2026-09-01"
+    search = query.q + " pushed:>=2026-09-01"
 
     def result(page: int) -> SearchResult:
         start = (page - 1) * 100
@@ -159,7 +172,7 @@ def test_github_search_1000_result_cap_is_reported_as_incomplete_coverage():
 
 def test_github_incomplete_results_is_preserved_as_a_coverage_gap():
     query = spec("uncertain")
-    search = query.q + " fork:true pushed:>=2026-09-01"
+    search = query.q + " pushed:>=2026-09-01"
     client = FakeGitHubClient({(search, 1): SearchResult(1, True, [repo(99)])})
 
     outcome = discover(client, [query], since="2026-09-01", max_requests=1, cursor=None, per_page=10)
@@ -171,9 +184,9 @@ def test_github_incomplete_results_is_preserved_as_a_coverage_gap():
 
 def test_backfill_splits_dense_ranges_and_keeps_fork_repositories():
     query = spec("historical")
-    root = query.q + " fork:true created:2020-01-01..2020-01-04"
-    left = query.q + " fork:true created:2020-01-01..2020-01-02"
-    right = query.q + " fork:true created:2020-01-03..2020-01-04"
+    root = query.q + " created:2020-01-01..2020-01-04"
+    left = query.q + " created:2020-01-01..2020-01-02"
+    right = query.q + " created:2020-01-03..2020-01-04"
 
     # The parent range exceeds GitHub's result window and is split after its
     # first response. The children overlap on repo 2, which should deduplicate.
@@ -214,7 +227,7 @@ def test_backfill_splits_dense_ranges_and_keeps_fork_repositories():
 
 def test_backfill_cursor_resumes_at_exact_page_and_range():
     query = spec("backfill-resume")
-    search = query.q + " fork:true created:2021-01-01..2021-01-02"
+    search = query.q + " created:2021-01-01..2021-01-02"
     client = FakeGitHubClient(
         {
             (search, 1): SearchResult(3, False, [repo(201), repo(202)]),
@@ -249,7 +262,7 @@ def test_backfill_cursor_resumes_at_exact_page_and_range():
 
 def test_backfill_cursor_rejects_changed_page_size_or_query():
     query = spec("backfill-identity")
-    search = query.q + " fork:true created:2021-01-01..2021-01-02"
+    search = query.q + " created:2021-01-01..2021-01-02"
     client = FakeGitHubClient({(search, 1): SearchResult(3, False, [repo(301), repo(302)])})
     first = discover_backfill(
         client, [query], start="2021-01-01", end="2021-01-02", max_requests=1, per_page=2
@@ -269,8 +282,8 @@ def test_backfill_cursor_rejects_changed_page_size_or_query():
 
 def test_backfill_cursor_does_not_republish_prior_partition_coverage():
     query = spec("partition-coverage")
-    root = query.q + " fork:true created:2020-01-01..2020-01-04"
-    left = query.q + " fork:true created:2020-01-01..2020-01-02"
+    root = query.q + " created:2020-01-01..2020-01-04"
+    left = query.q + " created:2020-01-01..2020-01-02"
     client = FakeGitHubClient({
         (root, 1): SearchResult(1100, False, [repo(n + 1) for n in range(100)]),
         (left, 1): SearchResult(1, False, [repo(1)]),
@@ -294,7 +307,7 @@ def test_sample_scans_one_first_page_per_query_and_reports_sampling_gaps():
     queries = [spec(f"q{i}") for i in range(3)]
     responses = {}
     for i, query in enumerate(queries):
-        search = query.q + " fork:true created:2020-01-01..2020-01-31"
+        search = query.q + " created:2020-01-01..2020-01-31"
         responses[(search, 1)] = SearchResult(i + 1, False, [repo(i + 1)])
     client = FakeGitHubClient(responses)
 
@@ -312,7 +325,7 @@ def test_sample_scans_one_first_page_per_query_and_reports_sampling_gaps():
 def test_sample_budget_cursor_resumes_at_next_query():
     queries = [spec("a"), spec("b"), spec("c")]
     responses = {
-        (query.q + " fork:true created:2022-01-01..2022-01-02", 1): SearchResult(1, False, [repo(i + 1)])
+        (query.q + " created:2022-01-01..2022-01-02", 1): SearchResult(1, False, [repo(i + 1)])
         for i, query in enumerate(queries)
     }
     client = FakeGitHubClient(responses)
@@ -331,8 +344,8 @@ def test_sample_budget_cursor_resumes_at_next_query():
 def test_sample_deduplicates_by_numeric_id_and_keeps_query_provenance():
     first, second = spec("first"), spec("second")
     client = FakeGitHubClient({
-        (first.q + " fork:true created:2023-01-01..2023-01-01", 1): SearchResult(1, False, [repo(77)]),
-        (second.q + " fork:true created:2023-01-01..2023-01-01", 1): SearchResult(2, True, [repo(77), repo(88)]),
+        (first.q + " created:2023-01-01..2023-01-01", 1): SearchResult(1, False, [repo(77)]),
+        (second.q + " created:2023-01-01..2023-01-01", 1): SearchResult(2, True, [repo(77), repo(88)]),
     })
     outcome = discover_sample(client, [first, second], start="2023-01-01", end="2023-01-01", max_requests=2)
 
@@ -362,7 +375,7 @@ def test_historical_sample_uses_reverse_annual_windows_and_round_robin_order():
         finish = "2023-04-03" if year == 2023 else f"{year}-12-31"
         for index, query_id in enumerate(ordered_ids):
             query = next(item for item in queries if item.id == query_id)
-            search = f"{query.q} fork:true created:{year}-01-01..{finish}"
+            search = f"{query.q} created:{year}-01-01..{finish}"
             responses[(search, 1)] = SearchResult(1, False, [repo(100 + index)])
     client = FakeGitHubClient(responses)
 
@@ -384,7 +397,7 @@ def test_historical_sample_budget_resume_with_json_cursor_and_boundary():
     responses = {}
     for year in (2024, 2023):
         for item in queries:
-            search = f"{item.q} fork:true created:{year}-01-01..{year}-12-31"
+            search = f"{item.q} created:{year}-01-01..{year}-12-31"
             responses[(search, 1)] = SearchResult(1, False, [repo(5)])
     client = FakeGitHubClient(responses)
 

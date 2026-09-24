@@ -43,17 +43,26 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
     assert _read(output) == [
         {**_row(5, "2026-09-24T12:00:00+00:00", stars=3),
          "observation_count": 2, "first_observed_at": "2025-01-01T00:00:00Z",
-         "all_query_ids": [], "all_domains": [], "all_methods": [], "all_novelty_signals": []},
+         "all_query_ids": [], "all_domains": [], "all_methods": [], "all_novelty_signals": [],
+         "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
+         "evidence_signals": [], "selection_version": "ml-contribution-v1",
+         "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
+         "selection_signals": []},
         {**_row(20, "2026-09-24T12:00:00Z", stars=50, extra={"kept": True},
                 query_ids=["new.query"], domains=["Vision"], methods=["K means"],
                 novelty_signals=["new-signal"]),
          "observation_count": 2, "first_observed_at": "2020-01-01T00:00:00Z",
          "all_query_ids": ["new.query", "old.query"], "all_domains": ["Vision", "health"],
          "all_methods": ["k-means", "transformer"],
-         "all_novelty_signals": ["new-signal", "paper-reference"]},
+         "all_novelty_signals": ["new-signal", "paper-reference"],
+         "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
+         "evidence_signals": [], "selection_version": "ml-contribution-v1",
+         "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
+         "selection_signals": []},
     ]
     assert report["observation_count"] == 4
     assert report["current_view_count"] == 2
+    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 3
     assert json.loads((tmp_path / "view.jsonl.manifest.json").read_text())["input_files"][1]["observations"] == 2
     assert repeat.read_bytes() == output.read_bytes()
 
@@ -188,10 +197,78 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
 
     row = pq.read_table(parquet).to_pylist()[0]
     extra = json.loads(row["extra_json"])
-    assert extra["all_query_ids"] == ["new", "old"]
-    assert extra["all_domains"] == ["bio", "ml"]
-    assert extra["all_methods"] == ["k-means", "transformer"]
-    assert extra["all_novelty_signals"] == ["paper", "topics"]
-    assert extra["observation_count"] == 2
-    assert extra["first_observed_at"] == "2024-01-01T00:00:00Z"
+    assert row["all_query_ids"] == ["new", "old"]
+    assert row["all_domains"] == ["bio", "ml"]
+    assert row["all_methods"] == ["k-means", "transformer"]
+    assert row["all_novelty_signals"] == ["paper", "topics"]
+    assert row["observation_count"] == 2
+    assert row["first_observed_at"] == "2024-01-01T00:00:00Z"
     assert extra["candidate_evidence"] == [{"source": "census"}]
+
+
+def test_current_view_adds_evidence_only_from_latest_repository_text(tmp_path):
+    old = _write(tmp_path / "old.jsonl", [
+        _row(31, "2025-01-01T00:00:00Z", description="machine learning project",
+             domains=["finance"], query_ids=["finance.ml"]),
+    ])
+    latest = _write(tmp_path / "latest.jsonl", [
+        _row(31, "2026-01-01T00:00:00Z", name="trading-strategy",
+             description="Financial backtesting framework", domains=["finance"],
+             methods=["machine-learning"], query_ids=["finance.ml"]),
+    ])
+    output = tmp_path / "view.jsonl"
+
+    materialize_current_view([old, latest], output)
+    row = _read(output)[0]
+
+    assert row["evidence_version"] == "gh-ml-relevance-v1"
+    assert row["evidence_tier"] == "no_text_signal"
+    assert row["evidence_signals"] == []
+    assert row["all_methods"] == ["machine-learning"]
+
+
+def test_parquet_exposes_evidence_and_accumulated_fields_as_typed_columns(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    source = _write(tmp_path / "view.jsonl", [{
+        "github_id": 8, "name": "ml-transformer", "description": "",
+        "observed_at": "2026-01-01T00:00:00Z", "first_observed_at": "2025-01-01T00:00:00Z",
+        "observation_count": 2, "all_query_ids": ["one"], "all_domains": ["vision"],
+        "all_methods": ["transformer"], "all_novelty_signals": [],
+        "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "direct_ml_text",
+        "evidence_signals": ["machine-learning", "transformer"],
+    }])
+    output = tmp_path / "view.parquet"
+
+    export_current_view_parquet(source, output)
+    table = pq.read_table(output)
+    row = table.to_pylist()[0]
+
+    assert pa.types.is_list(table.schema.field("all_methods").type)
+    assert pa.types.is_list(table.schema.field("evidence_signals").type)
+    assert pa.types.is_int64(table.schema.field("observation_count").type)
+    assert row["all_methods"] == ["transformer"]
+    assert row["evidence_tier"] == "direct_ml_text"
+    assert row["evidence_signals"] == ["machine-learning", "transformer"]
+    assert row["extra_json"] is None
+
+
+def test_parquet_selection_columns_are_typed_and_optional_filter_preserves_local_export(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    source = _write(tmp_path / "view.jsonl", [
+        {"github_id": 1, "observed_at": "2026-01-01T00:00:00Z", "selection_version": "v1",
+         "selection_status": "include", "selection_reason": "strong", "selection_signals": ["paper"]},
+        {"github_id": 2, "observed_at": "2026-01-02T00:00:00Z", "selection_version": "v1",
+         "selection_status": "exclude", "selection_reason": "fork", "selection_signals": ["fork"]},
+    ])
+    all_output, included_output = tmp_path / "all.parquet", tmp_path / "included.parquet"
+
+    assert export_current_view_parquet(source, all_output)["row_count"] == 2
+    assert export_current_view_parquet(source, included_output, selection_status="include")["row_count"] == 1
+    table = pq.read_table(included_output)
+    assert pa.types.is_string(table.schema.field("selection_version").type)
+    assert pa.types.is_string(table.schema.field("selection_status").type)
+    assert pa.types.is_string(table.schema.field("selection_reason").type)
+    assert pa.types.is_list(table.schema.field("selection_signals").type)
+    assert table.to_pylist()[0]["github_id"] == 1

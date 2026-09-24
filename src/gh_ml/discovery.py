@@ -623,16 +623,9 @@ def _gap_reason(capped: bool, incomplete: bool) -> str | None:
 
 
 def _search_query(query: str, qualifier: str) -> str:
-    # GitHub excludes forks by default. Include them unless a query deliberately
-    # scopes forks itself; duplicate IDs are collapsed by the observation layer.
-    import re
-
-    fork_qualified = re.search(r"(?:^|\s)fork:(?:true|only|false)(?:\s|$)", query) is not None
-    terms = [query.strip()]
-    if not fork_qualified:
-        terms.append("fork:true")
-    terms.append(qualifier)
-    return " ".join(terms)
+    # GitHub excludes forks by default. Preserve an explicit fork qualifier in
+    # the catalog when a query intentionally opts into or out of forks.
+    return " ".join((query.strip(), qualifier))
 
 
 def _field(value: Any, name: str, default: Any) -> Any:

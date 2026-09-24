@@ -8,11 +8,18 @@ import re
 from pathlib import Path
 from typing import Any, Callable
 
-from .current_view import export_current_view_parquet, materialize_current_view
+from .current_view import (
+    CURRENT_VIEW_PROJECTION_VERSION,
+    export_current_view_parquet,
+    materialize_current_view,
+)
+from .selection import SELECTION_VERSION
 
 _OBSERVATIONS = re.compile(r"^data/observations/.+\.jsonl$")
 _PARQUET = "data/current/repositories.parquet"
 _MANIFEST = "data/current/manifest.json"
+_CARD = "README.md"
+_SOURCE_CARD = Path(__file__).resolve().parents[2] / "dataset" / "README.md"
 
 
 def publish_current_view(
@@ -24,12 +31,14 @@ def publish_current_view(
     downloader: Callable[..., str] | None = None,
     max_attempts: int = 2,
     token_provider: Callable[[], str | None] | None = None,
+    card_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build and atomically publish current-view Parquet and its manifest.
+    """Build and atomically publish the filtered Parquet, manifest, and card.
 
     Each attempt pins the input listing and downloads to one Hub revision. A
     changed head causes a fresh build. Idempotency follows the observation
-    path/hash fingerprint, because this publisher's own commit moves HEAD.
+    fingerprint, projection and selection versions, and source card hash,
+    because this publisher's own commit moves HEAD.
     """
     if not isinstance(repo_id, str) or not repo_id.strip():
         raise ValueError("repo_id is required")
@@ -52,6 +61,7 @@ def publish_current_view(
 
     work = Path(work_dir)
     work.mkdir(parents=True, exist_ok=True)
+    source_card = Path(card_path) if card_path is not None else _SOURCE_CARD
     for attempt in range(max_attempts):
         revision = _head_sha(api, repo_id, token=token)
         if not revision:
@@ -72,32 +82,55 @@ def publish_current_view(
             sources.append({"path": remote_path, "sha256": input_hash})
         fingerprint = _fingerprint(sources)
 
+        staged_card = work / "dataset-card.md"
+        try:
+            card_bytes = source_card.read_bytes()
+        except OSError as exc:
+            raise ValueError(f"cannot read source dataset card {source_card}: {exc}") from exc
+        staged_card.write_bytes(card_bytes)
+        card_hash = _sha256(card_bytes)
+
         manifest_token = _fresh_token(token, token_provider)
         remote_manifest = _read_remote_manifest(downloader, repo_id, revision, manifest_token)
         if (_PARQUET in remote_paths and remote_manifest
                 and remote_manifest.get("input_fingerprint") == fingerprint
-                and _remote_parquet_matches(downloader, repo_id, revision, manifest_token, remote_manifest)):
+                and remote_manifest.get("projection_version") == CURRENT_VIEW_PROJECTION_VERSION
+                and remote_manifest.get("selection_version") == SELECTION_VERSION
+                and remote_manifest.get("card_sha256") == card_hash
+                and _remote_parquet_matches(downloader, repo_id, revision, manifest_token, remote_manifest)
+                and _remote_card_matches(downloader, repo_id, revision, manifest_token, remote_manifest)):
             return _result(repo_id, remote_manifest, already_current=True)
 
         jsonl_path = work / "repositories.jsonl"
         parquet_path = work / "repositories.parquet"
         report = materialize_current_view(local_inputs, jsonl_path)
-        parquet_report = export_current_view_parquet(jsonl_path, parquet_path)
-        if parquet_report.get("row_count") != report["current_view_count"]:
+        selection_counts, reason_counts = _selection_summary(jsonl_path)
+        included_count = selection_counts["include"]
+        parquet_report = export_current_view_parquet(
+            jsonl_path, parquet_path, selection_status="include"
+        )
+        if parquet_report.get("row_count") != included_count:
             raise ValueError(
-                "Parquet row count does not match current-view count: "
-                f"{parquet_report.get('row_count')} != {report['current_view_count']}"
+                "Parquet row count does not match included selection count: "
+                f"{parquet_report.get('row_count')} != {included_count}"
             )
         parquet_hash = _sha256_file(parquet_path)
         manifest = {
             "format": "gh_ml_current_view_snapshot",
-            "version": 1,
+            "version": 4,
+            "projection_version": CURRENT_VIEW_PROJECTION_VERSION,
+            "selection_version": SELECTION_VERSION,
             "source_revision": revision,
             "input_fingerprint": fingerprint,
             "observation_files": sources,
             "observation_count": int(report["observation_count"]),
             "current_view_count": int(report["current_view_count"]),
+            "included_count": selection_counts["include"],
+            "review_count": selection_counts["review"],
+            "excluded_count": selection_counts["exclude"],
+            "selection_reason_counts": reason_counts,
             "parquet_sha256": parquet_hash,
+            "card_sha256": card_hash,
         }
         manifest_path = work / "manifest.json"
         manifest_path.write_text(
@@ -114,7 +147,7 @@ def publish_current_view(
                 break
             continue
 
-        operations = _commit_operations(parquet_path, manifest_path)
+        operations = _commit_operations(parquet_path, manifest_path, staged_card)
         try:
             response = api.create_commit(
                 repo_id=repo_id,
@@ -134,7 +167,11 @@ def publish_current_view(
                 confirmed = _read_remote_manifest(downloader, repo_id, latest, commit_token)
                 if (_PARQUET in set(_list_repo_files(api, repo_id, latest, token=commit_token))
                         and confirmed and confirmed.get("input_fingerprint") == fingerprint
-                        and _remote_parquet_matches(downloader, repo_id, latest, commit_token, confirmed)):
+                        and confirmed.get("projection_version") == CURRENT_VIEW_PROJECTION_VERSION
+                        and confirmed.get("selection_version") == SELECTION_VERSION
+                        and confirmed.get("card_sha256") == card_hash
+                        and _remote_parquet_matches(downloader, repo_id, latest, commit_token, confirmed)
+                        and _remote_card_matches(downloader, repo_id, latest, commit_token, confirmed)):
                     return _result(repo_id, confirmed, already_current=True)
                 if attempt + 1 < max_attempts and latest != revision:
                     continue
@@ -203,6 +240,22 @@ def _remote_parquet_matches(
     return actual == expected
 
 
+def _remote_card_matches(
+    downloader: Callable[..., str], repo_id: str, revision: str, token: str | None,
+    manifest: dict[str, Any],
+) -> bool:
+    expected = manifest.get("card_sha256")
+    if not isinstance(expected, str) or not expected:
+        return False
+    try:
+        actual = _sha256_file(Path(_download(downloader, repo_id, _CARD, revision, token)))
+    except Exception as exc:
+        if _is_missing(exc):
+            return False
+        raise
+    return actual == expected
+
+
 def _copy_validate_jsonl(source: Path, destination: Path, remote_path: str) -> str:
     """Copy and validate one source in bounded memory, preserving its bytes."""
     digest = hashlib.sha256()
@@ -249,7 +302,7 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _commit_operations(parquet_path: Path, manifest_path: Path) -> list[Any]:
+def _commit_operations(parquet_path: Path, manifest_path: Path, card_path: Path) -> list[Any]:
     try:
         from huggingface_hub import CommitOperationAdd
     except ImportError:  # pragma: no cover
@@ -263,6 +316,7 @@ def _commit_operations(parquet_path: Path, manifest_path: Path) -> list[Any]:
     return [
         CommitOperationAdd(path_in_repo=_PARQUET, path_or_fileobj=str(parquet_path)),
         CommitOperationAdd(path_in_repo=_MANIFEST, path_or_fileobj=str(manifest_path)),
+        CommitOperationAdd(path_in_repo=_CARD, path_or_fileobj=str(card_path)),
     ]
 
 
@@ -272,7 +326,12 @@ def _result(repo_id: str, manifest: dict[str, Any], *, already_current: bool) ->
         "source_revision": manifest.get("source_revision"),
         "observation_count": manifest.get("observation_count"),
         "current_view_count": manifest.get("current_view_count"),
+        "included_count": manifest.get("included_count"),
+        "review_count": manifest.get("review_count"),
+        "excluded_count": manifest.get("excluded_count"),
+        "selection_reason_counts": manifest.get("selection_reason_counts"),
         "parquet_sha256": manifest.get("parquet_sha256"),
+        "card_sha256": manifest.get("card_sha256"),
         "already_current": already_current,
     }
 
@@ -281,3 +340,22 @@ def _is_missing(exc: Exception) -> bool:
     name = type(exc).__name__
     status = getattr(getattr(exc, "response", None), "status_code", None)
     return isinstance(exc, FileNotFoundError) or name in {"EntryNotFoundError", "RemoteEntryNotFoundError"} or status == 404
+
+
+def _selection_summary(path: Path) -> tuple[dict[str, int], dict[str, int]]:
+    counts = {"include": 0, "review": 0, "exclude": 0}
+    reasons: dict[str, int] = {}
+    with path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            status = row.get("selection_status")
+            if status not in counts:
+                raise ValueError(f"{path}:{line_number}: invalid selection_status {status!r}")
+            counts[status] += 1
+            reason = row.get("selection_reason")
+            if not isinstance(reason, str) or not reason:
+                raise ValueError(f"{path}:{line_number}: selection_reason must be a non-empty string")
+            reasons[reason] = reasons.get(reason, 0) + 1
+    return counts, dict(sorted(reasons.items()))

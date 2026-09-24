@@ -33,6 +33,7 @@ DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "queries"
 DEFAULT_OUTPUT = Path.home() / ".local" / "share" / "modelomics-gh-ml" / "runs"
 DEFAULT_CURRENT_VIEW_OUTPUT = Path.home() / ".local" / "share" / "modelomics-gh-ml" / "current-view.jsonl"
 DEFAULT_CENSUS_OUTPUT = Path.home() / ".local" / "share" / "modelomics-gh-ml" / "census"
+SEARCH_POLICY_VERSION = 2
 
 
 def _utc_now() -> datetime:
@@ -60,6 +61,19 @@ def _read_state(path: Path, default_since: str) -> dict[str, Any]:
         "checkpoint": state.get("checkpoint"),
         "initialized": True,
     }
+
+
+def _apply_search_policy(state: dict[str, Any]) -> dict[str, Any]:
+    """Restart search progress when its filtering policy changes."""
+    if state.get("search_policy_version") == SEARCH_POLICY_VERSION:
+        return state
+    migrated = dict(state)
+    # Cursors can encode page offsets, partition positions, or completed-year
+    # ledgers. None of those are valid under a changed query/filter policy.
+    migrated["cursor"] = None
+    migrated.pop("complete", None)
+    migrated["search_policy_version"] = SEARCH_POLICY_VERSION
+    return migrated
 
 
 def _write_json(path: Path, value: Any) -> None:
@@ -290,13 +304,15 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         state = _read_state(state_path, requested_end)
     else:
         state = _read_state(state_path, initial_since)
+    state = _apply_search_policy(state)
     specs = None
     if mode == "historical-sample":
         specs = load_queries(args.config_dir)
         if not specs:
             raise ValueError(f"no queries found in {args.config_dir}")
         current_signature = [{"id": spec.id, "query": spec.q} for spec in specs]
-        if (state.get("complete") and state.get("catalog_signature") == current_signature
+        if (state.get("search_policy_version") == SEARCH_POLICY_VERSION
+                and state.get("complete") and state.get("catalog_signature") == current_signature
                 and state.get("start_year") == args.start_year):
             print("Historical sample already complete for this query catalog; skipping.")
             return 0
@@ -311,6 +327,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         remote_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "backfill-fair": "state/backfill-fair.json", "sample": "state/sample.json", "historical-sample": "state/historical-sample.json"}[mode]
         remote_checkpoint = load_checkpoint(args.repo, hf_token, checkpoint_path=remote_path)
         if not state["initialized"] and isinstance(remote_checkpoint, dict):
+            remote_checkpoint = _apply_search_policy(remote_checkpoint)
             state.update(remote_checkpoint)
             state["since"] = remote_checkpoint.get("since", initial_since)
             state["cursor"] = remote_checkpoint.get("cursor")
@@ -325,7 +342,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     catalog_signature = [{"id": spec.id, "query": spec.q} for spec in specs]
     if mode == "historical-sample":
         matches = state.get("catalog_signature") == catalog_signature and state.get("start_year") == args.start_year
-        if state.get("complete") and matches:
+        if (state.get("search_policy_version") == SEARCH_POLICY_VERSION
+                and state.get("complete") and matches):
             print("Historical sample already complete for this query catalog; skipping.")
             return 0
         # Keep the original campaign bounds and cursor when the query catalog
@@ -519,6 +537,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         }
     else:
         next_state = {"start": state["start"], "end": state["end"], "cursor": outcome.next_cursor}
+    next_state["search_policy_version"] = SEARCH_POLICY_VERSION
     failures = [row for row in outcome.coverage if row.get("error") or row.get("status") == "error"]
     if failures:
         print("Search reported failures; retaining state for retry and skipping publish.", file=sys.stderr)
@@ -540,7 +559,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
                 f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login"
             )
         checkpoint_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "backfill-fair": "state/backfill-fair.json", "sample": "state/sample.json", "historical-sample": "state/historical-sample.json"}[mode]
-        checkpoint = {**(remote_checkpoint or {}), **next_state, "updated_at": observed_at}
+        checkpoint = {**(remote_checkpoint or {}), **next_state,
+                      "search_policy_version": SEARCH_POLICY_VERSION, "updated_at": observed_at}
         url = publish_run(
             args.repo,
             hf_token,

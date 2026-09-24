@@ -34,7 +34,7 @@ def repo(repo_id: int) -> dict:
 
 
 def search(specification: QuerySpec, start="2020-01-01", end="2020-01-02"):
-    return f"{specification.q} fork:true created:{start}..{end}"
+    return f"{specification.q} created:{start}..{end}"
 
 
 def test_global_budget_round_robins_lanes_and_resumes_exact_pages_without_duplicate_coverage():

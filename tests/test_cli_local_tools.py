@@ -3,7 +3,77 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from gh_ml import cli
+
+
+@pytest.mark.parametrize(
+    "mode,state",
+    [
+        ("daily", {"since": "2026-09-01", "until": "2026-09-24", "cursor": {"page": 9}}),
+        ("sample", {"since": "2026-09-01", "until": "2026-09-24", "cursor": {"page": 9}}),
+        ("backfill", {"start": "2008-01-01", "end": "2020-12-31", "cursor": {"page": 9}}),
+        ("backfill-fair", {"start": "2008-01-01", "end": "2020-12-31", "cursor": {"partition": 9}, "complete": True}),
+        (
+            "historical-sample",
+            {"start_year": 2008, "end": "2020-12-31", "cursor": {"annual_ledger": {"2008": True}}, "complete": True},
+        ),
+    ],
+)
+def test_old_search_policy_resets_progress_but_keeps_campaign_bounds(mode, state) -> None:
+    migrated = cli._apply_search_policy(state)
+
+    assert migrated["search_policy_version"] == cli.SEARCH_POLICY_VERSION
+    assert migrated["cursor"] is None
+    assert "complete" not in migrated
+    for bound in ("since", "until", "start", "end", "start_year"):
+        if bound in state:
+            assert migrated[bound] == state[bound]
+
+
+def test_current_search_policy_resumes_saved_cursor() -> None:
+    state = {"cursor": {"page": 9}, "complete": False,
+             "search_policy_version": cli.SEARCH_POLICY_VERSION}
+
+    assert cli._apply_search_policy(state) is state
+    assert state["cursor"] == {"page": 9}
+
+
+@pytest.mark.parametrize(
+    "checkpoint",
+    [
+        {"since": "2026-09-10", "until": "2026-09-12", "cursor": None,
+         "search_policy_version": cli.SEARCH_POLICY_VERSION},
+        {"since": "2026-09-10", "until": "2026-09-12", "cursor": {"page": 8}},
+    ],
+    ids=["completed-v2-checkpoint", "old-v1-cursor"],
+)
+def test_sample_policy_reset_uses_current_upper_bound(
+    tmp_path: Path, monkeypatch, checkpoint: dict,
+) -> None:
+    outcome = type("Outcome", (), {
+        "repositories": {}, "matched_query_ids": {}, "next_cursor": None,
+        "requests_used": 1, "coverage": [{"query_id": "q", "success": True}],
+    })()
+    calls: list[dict] = []
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: checkpoint)
+    monkeypatch.setattr(
+        cli, "discover_sample", lambda *args, **kwargs: calls.append(kwargs) or outcome,
+    )
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: "https://example.test/run")
+
+    assert cli.main([
+        "sample", "--config-dir", str(Path(__file__).parents[1] / "config" / "queries"),
+        "--output-dir", str(tmp_path),
+    ]) == 0
+
+    assert calls[0]["cursor"] is None
+    assert calls[0]["start"] == "2026-09-10"
+    assert calls[0]["end"] == "2026-09-24"
 
 
 def test_current_view_cli_reads_local_download_and_writes_manifest(tmp_path: Path) -> None:

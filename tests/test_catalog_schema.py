@@ -72,6 +72,10 @@ def test_applied_application_labels_are_domains_not_methods() -> None:
         assert domain in by_id[query_id].domains
         assert by_id[query_id].methods == ()
 
+    assert by_id["applied.algorithmic-trading"].q == (
+        '"algorithmic trading" "machine learning" in:readme'
+    )
+
 
 def _repository(**overrides: object) -> dict[str, object]:
     repo: dict[str, object] = {

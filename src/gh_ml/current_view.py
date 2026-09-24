@@ -10,11 +10,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
+from .evidence import classify_repository_text
+from .selection import SELECTION_VERSION, assess_repository
 from .schema import normalize_method_label
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _PARQUET_BATCH_ROWS = 2048
+# Bump whenever current-view rows or their Parquet projection changes.
+CURRENT_VIEW_PROJECTION_VERSION = 3
 
 
 def export_current_view_parquet(
@@ -22,6 +26,7 @@ def export_current_view_parquet(
     parquet_path: str | Path,
     *,
     compression: str = "zstd",
+    selection_status: str | None = None,
 ) -> dict[str, int | str]:
     """Stream a current-view JSONL file to a typed Parquet file.
 
@@ -46,11 +51,19 @@ def export_current_view_parquet(
     string = pa.string()
     strings = pa.list_(pa.string())
     schema = pa.schema([
+        pa.field("all_domains", strings),
+        pa.field("all_methods", strings),
+        pa.field("all_novelty_signals", strings),
+        pa.field("all_query_ids", strings),
         pa.field("archived", pa.bool_()),
         pa.field("candidate_status", string),
         pa.field("created_at", string),
         pa.field("description", string),
         pa.field("domains", strings),
+        pa.field("evidence_signals", strings),
+        pa.field("evidence_tier", string),
+        pa.field("evidence_version", string),
+        pa.field("first_observed_at", string),
         pa.field("fork", pa.bool_()),
         pa.field("forks", pa.int64()),
         pa.field("github_id", pa.int64()),
@@ -60,9 +73,14 @@ def export_current_view_parquet(
         pa.field("methods", strings),
         pa.field("name", string),
         pa.field("novelty_signals", strings),
+        pa.field("observation_count", pa.int64()),
         pa.field("observed_at", string),
         pa.field("pushed_at", string),
         pa.field("query_ids", strings),
+        pa.field("selection_reason", string),
+        pa.field("selection_signals", strings),
+        pa.field("selection_status", string),
+        pa.field("selection_version", string),
         pa.field("stars", pa.int64()),
         pa.field("topics", strings),
         pa.field("updated_at", string),
@@ -88,6 +106,8 @@ def export_current_view_parquet(
                         raise ValueError(f"{source}:{line_number}: invalid JSON: {exc.msg}") from exc
                     if not isinstance(row, dict):
                         raise ValueError(f"{source}:{line_number}: observation must be a JSON object")
+                    if selection_status is not None and row.get("selection_status") != selection_status:
+                        continue
                     github_id = row.get("github_id")
                     if (isinstance(github_id, bool) or not isinstance(github_id, int)
                             or not 0 < github_id <= 9_223_372_036_854_775_807):
@@ -284,6 +304,8 @@ def materialize_current_view(
                             all_labels[source_field].append(label)
                         for source_field, output_field in _AGGREGATED_LABEL_FIELDS.items():
                             row[output_field] = all_labels[source_field]
+                        row.update(classify_repository_text(row))
+                        row.update(assess_repository(row))
                         stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False, sort_keys=True,
                                                 separators=(",", ":")) + "\n")
                     stream.flush()
@@ -291,7 +313,8 @@ def materialize_current_view(
                 row_count = connection.execute("SELECT COUNT(*) FROM chosen").fetchone()[0]
                 report = {
                     "format": "gh_ml_current_view",
-                    "version": 1,
+                    "version": CURRENT_VIEW_PROJECTION_VERSION,
+                    "selection_version": SELECTION_VERSION,
                     "selection": "maximum observed_at instant; equal instants choose lexicographically greatest canonical JSON row",
                     "aggregation": "sorted label unions across all observations; methods normalized to canonical slugs",
                     "ordering": "ascending github_id",

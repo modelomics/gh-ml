@@ -102,7 +102,7 @@ methods = ["communication-optimization", "distributed-training"]
 
 [[queries]]
 id = "efficiency.inference-systems"
-q = "\"inference engine\" in:description"
+q = "\"inference engine\" \"machine learning\" in:description,readme"
 domains = ["ml-systems", "inference-systems"]
 methods = ["inference-optimization", "inference-serving", "kernel-optimization"]
 

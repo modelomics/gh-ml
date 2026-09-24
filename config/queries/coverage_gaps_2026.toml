@@ -1,0 +1,173 @@
+[[queries]]
+id = "gap2026.neuroimaging-fmri"
+q = '"fMRI machine learning" in:description,readme'
+domains = ["neuroimaging", "neuroscience"]
+methods = ["brain-imaging", "representation-learning"]
+
+[[queries]]
+id = "gap2026.neuroimaging-connectome"
+q = '"connectome prediction" machine learning in:description,readme'
+domains = ["connectomics", "neuroimaging", "neuroscience"]
+methods = ["graph-learning", "prediction"]
+
+[[queries]]
+id = "gap2026.neuroimaging-eeg"
+q = '"EEG deep learning" in:description,readme'
+domains = ["neuroimaging", "neuroscience"]
+methods = ["deep-learning", "signal-processing"]
+
+[[queries]]
+id = "gap2026.neuroimaging-neural-decoding"
+q = '"neural decoding" machine learning in:description,readme'
+domains = ["neuroimaging", "neuroscience"]
+methods = ["decoding", "representation-learning"]
+
+[[queries]]
+id = "gap2026.clinical-ehr-representation"
+q = '"electronic health record" representation learning in:description,readme'
+domains = ["clinical-research", "healthcare"]
+methods = ["representation-learning", "self-supervised-learning"]
+
+[[queries]]
+id = "gap2026.clinical-risk-prediction"
+q = '"clinical risk prediction" machine learning in:description,readme'
+domains = ["clinical-research", "healthcare"]
+methods = ["risk-prediction", "supervised-learning"]
+
+[[queries]]
+id = "gap2026.clinical-treatment-effect"
+q = '"treatment effect estimation" clinical in:description,readme'
+domains = ["clinical-research", "healthcare"]
+methods = ["causal-inference", "treatment-effect-estimation"]
+
+[[queries]]
+id = "gap2026.clinical-survival-ml"
+q = '"survival analysis" deep learning clinical in:description,readme'
+domains = ["clinical-research", "healthcare"]
+methods = ["deep-learning", "survival-analysis"]
+
+[[queries]]
+id = "gap2026.clinical-trial-matching"
+q = '"clinical trial matching" machine learning in:description,readme'
+domains = ["clinical-research", "healthcare"]
+methods = ["information-retrieval", "matching"]
+
+[[queries]]
+id = "gap2026.green-ai-energy"
+q = '"energy efficient machine learning" in:description,readme'
+domains = ["green-ai", "sustainable-computing"]
+methods = ["energy-efficiency", "efficient-training"]
+
+[[queries]]
+id = "gap2026.green-ai-carbon"
+q = '"carbon emissions" machine learning training in:description,readme'
+domains = ["green-ai", "sustainable-computing"]
+methods = ["carbon-accounting", "efficient-training"]
+
+[[queries]]
+id = "gap2026.green-ai-carbon-aware-scheduling"
+q = '"carbon-aware" machine learning scheduling in:description,readme'
+domains = ["green-ai", "sustainable-computing"]
+methods = ["carbon-aware-computing", "scheduling"]
+
+[[queries]]
+id = "gap2026.green-ai-efficient-inference"
+q = '"energy efficient inference" neural network in:description,readme'
+domains = ["green-ai", "sustainable-computing"]
+methods = ["efficient-inference", "model-compression"]
+
+[[queries]]
+id = "gap2026.econometrics-double-ml"
+q = '"double machine learning" econometrics in:description,readme'
+domains = ["econometrics", "economics"]
+methods = ["causal-inference", "double-machine-learning"]
+
+[[queries]]
+id = "gap2026.econometrics-causal-forest"
+q = '"causal forest" econometrics in:description,readme'
+domains = ["econometrics", "economics"]
+methods = ["causal-forest", "treatment-effect-estimation"]
+
+[[queries]]
+id = "gap2026.econometrics-policy-learning"
+q = '"policy learning" causal machine learning economics in:description,readme'
+domains = ["econometrics", "economics"]
+methods = ["causal-inference", "policy-learning"]
+
+[[queries]]
+id = "gap2026.econometrics-heterogeneous-effects"
+q = '"heterogeneous treatment effects" machine learning economics in:description,readme'
+domains = ["econometrics", "economics"]
+methods = ["heterogeneous-treatment-effects", "causal-inference"]
+
+[[queries]]
+id = "gap2026.physics-differentiable-simulation"
+q = '"differentiable physics simulation" in:description,readme'
+domains = ["physics", "scientific-computing"]
+methods = ["differentiable-simulation", "physics-informed-learning"]
+
+[[queries]]
+id = "gap2026.physics-neural-pde-solver"
+q = '"neural PDE solver" in:description,readme'
+domains = ["physics", "scientific-computing"]
+methods = ["neural-operator", "partial-differential-equations"]
+
+[[queries]]
+id = "gap2026.physics-inverse-problem"
+q = '"inverse problems" neural network physics in:description,readme'
+domains = ["physics", "scientific-computing"]
+methods = ["inverse-problems", "scientific-machine-learning"]
+
+[[queries]]
+id = "gap2026.physics-quantum-ml"
+q = '"quantum machine learning" physics in:description,readme'
+domains = ["physics", "quantum-computing"]
+methods = ["quantum-machine-learning", "variational-circuits"]
+
+[[queries]]
+id = "gap2026.math-learned-optimization"
+q = '"learned optimizer" optimization algorithm in:description,readme'
+domains = ["mathematics", "optimization"]
+methods = ["learned-optimization", "meta-learning"]
+
+[[queries]]
+id = "gap2026.math-neural-combinatorial-optimization"
+q = '"neural combinatorial optimization" in:description,readme'
+domains = ["mathematics", "operations-research"]
+methods = ["combinatorial-optimization", "neural-network"]
+
+[[queries]]
+id = "gap2026.forecasting-intermittent-demand"
+q = '"intermittent demand forecasting" machine learning in:description,readme'
+domains = ["forecasting", "supply-chain"]
+methods = ["demand-forecasting", "probabilistic-forecasting"]
+
+[[queries]]
+id = "gap2026.forecasting-quantile"
+q = '"neural quantile forecasting" in:description,readme'
+domains = ["forecasting", "time-series"]
+methods = ["probabilistic-forecasting", "quantile-regression"]
+
+[[queries]]
+id = "gap2026.forecasting-hierarchical"
+q = '"hierarchical time series forecasting" machine learning in:description,readme'
+domains = ["forecasting", "time-series"]
+methods = ["hierarchical-forecasting", "time-series-modeling"]
+
+[[queries]]
+id = "gap2026.forecasting-count-data"
+q = '"count time series forecasting" neural in:description,readme'
+domains = ["forecasting", "time-series"]
+methods = ["count-modeling", "probabilistic-forecasting"]
+
+[[queries]]
+id = "gap2026.climate-downscaling"
+q = '"machine learning climate downscaling" in:description,readme'
+domains = ["climate-science", "earth-science"]
+methods = ["downscaling", "super-resolution"]
+
+[[queries]]
+id = "gap2026.archaeology-ml"
+q = '"machine learning archaeology" in:description,readme'
+domains = ["archaeology", "digital-humanities"]
+methods = ["classification", "machine-learning"]
