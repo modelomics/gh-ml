@@ -13,6 +13,8 @@ from pathlib import Path
 from shutil import copyfile
 from typing import Any
 
+from huggingface_hub.errors import HfHubHTTPError
+
 from .classification import classify_repository
 from .discovery import discover, discover_sample
 from .historical_ledger import discover_historical_ledger
@@ -23,6 +25,7 @@ from .schema import observation_from_repository, write_jsonl
 from .pwc import DEFAULT_DIR as DEFAULT_PWC_DIR, import_pwc
 from .current_view import materialize_current_view, export_current_view_parquet
 from .census import collect_census
+from .snapshot_publish import publish_current_view
 
 DEFAULT_REPO = "modelomics/gh-ml"
 DISPLAY_NAME = "GitHub ML"
@@ -172,6 +175,12 @@ def _parser() -> argparse.ArgumentParser:
     census.add_argument("--since", type=int, help="GitHub repository ID cursor (default: resume local checkpoint)")
     census.add_argument("--max-pages", type=int, default=1, help="maximum Core pages to collect per invocation")
     census.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    snapshot = subparsers.add_parser(
+        "publish-current-view",
+        help="publish a current-view Parquet snapshot derived from the Hub observation history",
+    )
+    snapshot.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
+    snapshot.add_argument("--work-dir", type=Path, required=True, help="temporary directory for downloaded history and generated snapshot")
     return parser
 
 
@@ -210,6 +219,30 @@ def _census(args: argparse.Namespace) -> int:
     )
     print(f"Census checkpoint: {args.output_dir / 'checkpoint.json'}")
     print(f"Next GitHub ID cursor: {checkpoint.get('next_since')}")
+    return 0
+
+
+def _publish_current_view(args: argparse.Namespace) -> int:
+    # OIDC exchanges are short-lived. Resolve credentials immediately before
+    # publication, after collection has completed in the scheduled workflow.
+    token = _hf_token("HF_TOKEN")
+    if not token:
+        raise ValueError("Hugging Face token missing from HF_TOKEN or Hugging Face CLI login")
+    try:
+        result = publish_current_view(
+            args.repo,
+            token,
+            work_dir=args.work_dir,
+            token_provider=lambda: _hf_token("HF_TOKEN"),
+        )
+    except HfHubHTTPError as exc:
+        # Hub HTTP exception messages may contain response bodies. Report only
+        # the status for this expected remote failure, without echoing details.
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        status_text = str(status) if isinstance(status, int) else "unknown"
+        raise ValueError(f"Hugging Face snapshot publication failed (HTTP {status_text})") from None
+    print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
 
@@ -565,6 +598,8 @@ def main(argv: list[str] | None = None) -> int:
             return _current_view(args)
         if args.command == "census":
             return _census(args)
+        if args.command == "publish-current-view":
+            return _publish_current_view(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

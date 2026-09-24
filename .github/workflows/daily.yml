@@ -72,7 +72,7 @@ jobs:
         with:
           enable-cache: true
       - name: Install locked dependencies
-        run: uv sync --locked --extra dev
+        run: uv sync --locked --extra dev --extra parquet
       - name: Run tests
         run: uv run --frozen pytest
       - name: Verify Hugging Face publishing credentials
@@ -113,6 +113,12 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml backfill-fair --max-requests "$BACKFILL_MAX_REQUESTS"
-      - name: Fail if any collection pass failed
-        if: steps.sample.outcome == 'failure' || steps.recent.outcome == 'failure' || steps.historical_sample.outcome == 'failure' || steps.backfill.outcome == 'failure'
+      - name: Publish current-view snapshot
+        id: snapshot
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
+        run: uv run --frozen --extra parquet gh-ml publish-current-view --work-dir "$RUNNER_TEMP/gh-ml-current-view"
+      - name: Fail if any collection or snapshot step failed
+        if: always() && (steps.sample.outcome == 'failure' || steps.recent.outcome == 'failure' || steps.historical_sample.outcome == 'failure' || steps.backfill.outcome == 'failure' || steps.snapshot.outcome == 'failure')
         run: exit 1
