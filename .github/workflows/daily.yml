@@ -11,6 +11,11 @@ on:
         required: true
         type: number
         default: 600
+      sample_max_requests:
+        description: "Maximum Search requests for breadth sample (1–500)"
+        required: true
+        type: number
+        default: 500
       backfill_max_requests:
         description: "Maximum Search requests for historical backfill (1–900)"
         required: true
@@ -29,6 +34,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 300
     env:
+      SAMPLE_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 500 || inputs.sample_max_requests }}
       RECENT_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 600 || inputs.recent_max_requests }}
       BACKFILL_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 900 || inputs.backfill_max_requests }}
     permissions:
@@ -44,6 +50,7 @@ jobs:
           import sys
 
           limits = {
+              "SAMPLE_MAX_REQUESTS": (1, 500),
               "RECENT_MAX_REQUESTS": (1, 600),
               "BACKFILL_MAX_REQUESTS": (1, 900),
           }
@@ -67,6 +74,12 @@ jobs:
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: |
           uv run --frozen python -c 'import os; from huggingface_hub import get_token; token = os.environ.get("HF_TOKEN") or get_token(); assert token, "No Hugging Face token available from HF_TOKEN or the configured GitHub OIDC trusted publisher"'
+      - name: Sample broad repository queries
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
+        run: uv run --frozen gh-ml sample --max-requests "$SAMPLE_MAX_REQUESTS" --since-days 1
       - name: Collect recent repositories
         env:
           GITHUB_TOKEN: ${{ github.token }}

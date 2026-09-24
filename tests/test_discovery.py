@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import pytest
 
-from gh_ml.discovery import discover, discover_backfill
+from gh_ml.discovery import discover, discover_backfill, discover_sample
 from gh_ml.schema import QuerySpec
 
 
@@ -288,3 +288,67 @@ def test_backfill_cursor_does_not_republish_prior_partition_coverage():
     )
     assert [row["status"] for row in resumed.coverage] == ["complete"]
     assert resumed.coverage[0]["range_start"] == "2020-01-01"
+
+
+def test_sample_scans_one_first_page_per_query_and_reports_sampling_gaps():
+    queries = [spec(f"q{i}") for i in range(3)]
+    responses = {}
+    for i, query in enumerate(queries):
+        search = query.q + " fork:true created:2020-01-01..2020-01-31"
+        responses[(search, 1)] = SearchResult(i + 1, False, [repo(i + 1)])
+    client = FakeGitHubClient(responses)
+
+    outcome = discover_sample(client, queries, start="2020-01-01", end="2020-01-31", max_requests=10, per_page=10)
+
+    assert len(client.calls) == 3
+    assert all(page == 1 for _, page, _ in client.calls)
+    assert [row["query_id"] for row in outcome.coverage] == ["q0", "q1", "q2"]
+    assert outcome.coverage[0]["status"] == "complete"
+    assert outcome.coverage[1]["status"] == "sampled"
+    assert outcome.coverage[1]["coverage_gap_reason"] == "first_page_sample_only"
+    assert outcome.coverage[1]["sampled_first_page"] is True
+
+
+def test_sample_budget_cursor_resumes_at_next_query():
+    queries = [spec("a"), spec("b"), spec("c")]
+    responses = {
+        (query.q + " fork:true created:2022-01-01..2022-01-02", 1): SearchResult(1, False, [repo(i + 1)])
+        for i, query in enumerate(queries)
+    }
+    client = FakeGitHubClient(responses)
+    first = discover_sample(client, queries, start="2022-01-01", end="2022-01-02", max_requests=2)
+
+    assert first.requests_used == 2
+    assert [row["query_id"] for row in first.coverage] == ["a", "b"]
+    assert first.next_cursor["field"] == "created"
+    assert first.next_cursor["query_index"] == 2
+    assert first.next_cursor["query_id"] == "c"
+    second = discover_sample(client, queries, start="2022-01-01", end="2022-01-02", max_requests=1, cursor=first.next_cursor)
+    assert [row["query_id"] for row in second.coverage] == ["c"]
+    assert second.next_cursor is None
+
+
+def test_sample_deduplicates_by_numeric_id_and_keeps_query_provenance():
+    first, second = spec("first"), spec("second")
+    client = FakeGitHubClient({
+        (first.q + " fork:true created:2023-01-01..2023-01-01", 1): SearchResult(1, False, [repo(77)]),
+        (second.q + " fork:true created:2023-01-01..2023-01-01", 1): SearchResult(2, True, [repo(77), repo(88)]),
+    })
+    outcome = discover_sample(client, [first, second], start="2023-01-01", end="2023-01-01", max_requests=2)
+
+    assert list(outcome.repositories) == [77, 88]
+    assert outcome.matched_query_ids[77] == ["first", "second"]
+    assert outcome.coverage[1]["status"] == "sampled"
+    assert outcome.coverage[1]["coverage_gap_reason"] == "incomplete_results"
+    assert outcome.coverage[1]["search_limit_reached"] is False
+
+
+def test_sample_cursor_rejects_changed_catalog_and_invalid_position():
+    query = spec("resume")
+    client = FakeGitHubClient({})
+    first = discover_sample(client, [query, spec("later")], start="2024-01-01", end="2024-01-02", max_requests=0)
+    with pytest.raises(ValueError, match="specs"):
+        discover_sample(client, [spec("resume", "topic:changed"), spec("later")], start="2024-01-01", end="2024-01-02", max_requests=0, cursor=first.next_cursor)
+    invalid = dict(first.next_cursor, query_index=5)
+    with pytest.raises(ValueError, match="outside"):
+        discover_sample(client, [query, spec("later")], start="2024-01-01", end="2024-01-02", max_requests=0, cursor=invalid)

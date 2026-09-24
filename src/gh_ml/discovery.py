@@ -161,6 +161,117 @@ def discover_backfill(
     )
 
 
+def discover_sample(
+    client: Any,
+    specs: Sequence[QuerySpec],
+    *,
+    start: str,
+    end: str,
+    max_requests: int,
+    cursor: dict[str, Any] | None = None,
+    per_page: int = 100,
+) -> DiscoveryOutcome:
+    """Take one first-page breadth sample for each query in a created range.
+
+    A query is attempted once, even when GitHub reports more matching
+    repositories than fit on that page. Coverage records that limitation so
+    callers can distinguish a sample from an exhaustive search.
+    """
+    if isinstance(max_requests, bool) or not isinstance(max_requests, int) or max_requests < 0:
+        raise ValueError("max_requests must be a non-negative integer")
+    if isinstance(per_page, bool) or not isinstance(per_page, int) or not 1 <= per_page <= 100:
+        raise ValueError("per_page must be between 1 and 100")
+    bounds = _normalize_range(start, end)
+    start, end = bounds["start"], bounds["end"]
+
+    if cursor is not None:
+        for key in ("field", "start", "end", "per_page", "specs", "query_index", "query_id"):
+            if key not in cursor:
+                raise ValueError(f"cursor is missing {key}")
+        if cursor["field"] != "created":
+            raise ValueError("cursor field does not match this discovery mode")
+        if cursor["start"] != start:
+            raise ValueError("cursor start bound does not match this discovery run")
+        if cursor["end"] != end:
+            raise ValueError("cursor end bound does not match this discovery run")
+        _validate_cursor_identity(
+            cursor, field="created", start=start, end=end,
+            per_page=per_page, specs=specs,
+        )
+
+    query_index = _cursor_int(cursor, "query_index", 0)
+    if query_index > len(specs):
+        raise ValueError("cursor is outside the configured query sequence")
+    if query_index < len(specs) and cursor is not None:
+        if cursor["query_id"] != str(specs[query_index].id):
+            raise ValueError("cursor query_id does not match configured query sequence")
+
+    repositories: dict[int, dict[str, Any]] = {}
+    matched: dict[int, list[str]] = {}
+    coverage: list[dict[str, Any]] = []
+    requests_used = 0
+    while query_index < len(specs):
+        if requests_used >= max_requests:
+            spec = specs[query_index]
+            next_cursor = {
+                "field": "created",
+                "start": start,
+                "end": end,
+                "per_page": per_page,
+                "specs": _spec_signature(specs),
+                "query_index": query_index,
+                "query_id": str(spec.id),
+            }
+            return DiscoveryOutcome(repositories, matched, coverage, requests_used, next_cursor)
+
+        spec = specs[query_index]
+        spec_id = str(spec.id)
+        query = _search_query(spec.q, f"created:{start}..{end}")
+        result = client.search_repositories(query, page=1, per_page=per_page)
+        requests_used += 1
+        items = _field(result, "items", ())
+        if not isinstance(items, Sequence) or isinstance(items, (str, bytes)):
+            raise TypeError("GitHub search result items must be a sequence")
+        total_count = _nonnegative_int(_field(result, "total_count", None), "total_count")
+        incomplete = bool(_field(result, "incomplete_results", False))
+        observed = 0
+        for item in items:
+            if not isinstance(item, Mapping):
+                continue
+            repository_id = item.get("id")
+            if isinstance(repository_id, bool) or not isinstance(repository_id, int):
+                continue
+            repositories.setdefault(repository_id, dict(item))
+            query_ids = matched.setdefault(repository_id, [])
+            if spec_id not in query_ids:
+                query_ids.append(spec_id)
+            observed += 1
+
+        capped = total_count > _SEARCH_RESULT_LIMIT
+        gap = total_count > observed or incomplete
+        reasons = []
+        if total_count > observed:
+            reasons.append("first_page_sample_only")
+        if incomplete:
+            reasons.append("incomplete_results")
+        coverage.append({
+            "query_id": spec_id,
+            "query": query,
+            "total_count": total_count,
+            "pages_scanned": 1,
+            "repositories_observed_on_last_page": observed,
+            "incomplete_results": incomplete,
+            "search_limit_reached": capped,
+            "sampled_first_page": True,
+            "status": "sampled" if gap else "complete",
+            "coverage_gap": gap,
+            "coverage_gap_reason": "; ".join(reasons) or None,
+        })
+        query_index += 1
+
+    return DiscoveryOutcome(repositories, matched, coverage, requests_used, None)
+
+
 def _discover_partitioned(
     client: Any,
     specs: Sequence[QuerySpec],

@@ -149,6 +149,103 @@ def test_cli_dry_run_writes_candidate_without_publishing(tmp_path: Path, monkeyp
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["cursor"] is None
 
 
+def test_sample_cli_writes_created_coverage_and_separate_local_state(tmp_path: Path, monkeypatch) -> None:
+    run_state = {"since": "2026-09-10", "cursor": {"page": 8}}
+    backfill_state = {"start": "2020-01-01", "end": "2020-12-31", "cursor": {"page": 4}}
+    (tmp_path / "state.json").write_text(json.dumps(run_state), encoding="utf-8")
+    (tmp_path / "backfill-state.json").write_text(json.dumps(backfill_state), encoding="utf-8")
+    outcome = SimpleNamespace(
+        repositories={}, matched_query_ids={}, next_cursor=None, requests_used=3,
+        coverage=[{"query_id": "q", "success": True}],
+    )
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "discover_sample", lambda *args, **kwargs: calls.append(kwargs) or outcome)
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    assert cli.main([
+        "sample", "--no-publish", "--config-dir",
+        str(Path(__file__).parents[1] / "config" / "queries"), "--output-dir", str(tmp_path),
+    ]) == 0
+
+    manifest = json.loads(next(tmp_path.glob("manifest-*.json")).read_text(encoding="utf-8"))
+    coverage = json.loads((tmp_path / manifest["coverage_file"]).read_text(encoding="utf-8"))
+    state = json.loads((tmp_path / "sample-state.json").read_text(encoding="utf-8"))
+    assert manifest["mode"] == coverage["mode"] == "sample"
+    assert coverage["date_field"] == "created"
+    assert (coverage["since"], coverage["until"]) == ("2026-09-23", "2026-09-24")
+    assert coverage["requests_used"] == 3 and coverage["complete_sweep"] is True
+    assert calls[0]["start"] == "2026-09-23" and calls[0]["end"] == "2026-09-24"
+    assert state == {"since": "2026-09-24", "cursor": None, "checkpoint": None}
+    assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8")) == run_state
+    assert json.loads((tmp_path / "backfill-state.json").read_text(encoding="utf-8")) == backfill_state
+
+
+def test_sample_cli_resumes_partial_window_and_publishes_sample_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / "sample-state.json").write_text(json.dumps({
+        "since": "2026-09-20", "until": "2026-09-22", "cursor": {"page": 2},
+    }), encoding="utf-8")
+    outcome = SimpleNamespace(
+        repositories={}, matched_query_ids={}, next_cursor={"page": 3}, requests_used=4,
+        coverage=[{"query_id": "q", "success": True}],
+    )
+    calls: list[dict] = []
+    published: list[dict] = []
+    remote_paths: list[str] = []
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: remote_paths.append(kwargs["checkpoint_path"]) or None)
+    monkeypatch.setattr(cli, "discover_sample", lambda *args, **kwargs: calls.append(kwargs) or outcome)
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: published.append(kwargs) or "https://example.test/run")
+
+    assert cli.main([
+        "sample", "--config-dir", str(Path(__file__).parents[1] / "config" / "queries"),
+        "--output-dir", str(tmp_path),
+    ]) == 0
+
+    assert calls[0]["cursor"] == {"page": 2}
+    assert remote_paths == ["state/sample.json"]
+    assert calls[0]["start"] == "2026-09-20" and calls[0]["end"] == "2026-09-22"
+    assert published[0]["checkpoint_path"] == "state/sample.json"
+    assert published[0]["checkpoint"]["since"] == "2026-09-20"
+    assert published[0]["checkpoint"]["until"] == "2026-09-22"
+    assert published[0]["checkpoint"]["cursor"] == {"page": 3}
+    assert json.loads((tmp_path / "sample-state.json").read_text(encoding="utf-8"))["cursor"] == {"page": 3}
+    assert not (tmp_path / "state.json").exists()
+    assert not (tmp_path / "backfill-state.json").exists()
+
+
+def test_sample_cli_uses_real_discovery_with_created_date_query(tmp_path: Path, monkeypatch) -> None:
+    spec = QuerySpec(id="sample-query", q="protein model", domains=(), methods=())
+    queries: list[tuple[str, int, int]] = []
+
+    class FakeGitHubClient:
+        def __init__(self, token=None):
+            pass
+
+        def search_repositories(self, query: str, *, page: int, per_page: int):
+            queries.append((query, page, per_page))
+            return SimpleNamespace(items=[], total_count=0, incomplete_results=False)
+
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "_github_token", lambda _: None)
+    monkeypatch.setattr(cli, "GitHubClient", FakeGitHubClient)
+    monkeypatch.setattr(cli, "load_queries", lambda _: [spec])
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    assert cli.main(["sample", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+
+    assert len(queries) == 1
+    assert "created:2026-09-23..2026-09-24" in queries[0][0]
+    assert queries[0][1:] == (1, 100)
+    manifest = json.loads(next(tmp_path.glob("manifest-*.json")).read_text(encoding="utf-8"))
+    coverage = json.loads((tmp_path / manifest["coverage_file"]).read_text(encoding="utf-8"))
+    assert coverage["mode"] == "sample" and coverage["date_field"] == "created"
+    assert coverage["requests_used"] == 1 and coverage["complete_sweep"] is True
+
+
 def test_cli_publishes_empty_sweep_checkpoint_for_ephemeral_runners(
     tmp_path: Path, monkeypatch
 ) -> None:

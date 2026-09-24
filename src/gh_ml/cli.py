@@ -14,7 +14,7 @@ from shutil import copyfile
 from typing import Any
 
 from .classification import classify_repository
-from .discovery import discover
+from .discovery import discover, discover_sample
 from .github import GitHubAPIError, GitHubClient, SearchProgress
 from .hub import load_checkpoint, publish_run
 from .query_catalog import load_queries
@@ -112,6 +112,15 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("--no-publish", action="store_true", help="write local files without publishing to Hugging Face")
     run.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     run.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
+    sample = subparsers.add_parser("sample", help="sample newly created GitHub ML repositories")
+    sample.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
+    sample.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG, help="directory of TOML query files")
+    sample.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT, help="local run and checkpoint directory")
+    sample.add_argument("--max-requests", type=int, default=500, help="maximum GitHub search API requests per invocation")
+    sample.add_argument("--since-days", type=int, default=1, help="lookback interval when starting a new sample window")
+    sample.add_argument("--no-publish", action="store_true", help="write local files without publishing to Hugging Face")
+    sample.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    sample.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
     backfill = subparsers.add_parser("backfill", help="backfill historical GitHub ML repository candidates")
     backfill.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
     backfill.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG, help="directory of TOML query files")
@@ -133,17 +142,21 @@ def _backfill(args: argparse.Namespace) -> int:
     return _collect(args, mode="backfill")
 
 
+def _sample(args: argparse.Namespace) -> int:
+    return _collect(args, mode="sample")
+
+
 def _collect(args: argparse.Namespace, *, mode: str) -> int:
     if args.max_requests < 1:
         raise ValueError("--max-requests must be at least 1")
-    if mode == "daily" and args.since_days < 1:
+    if mode in {"daily", "sample"} and args.since_days < 1:
         raise ValueError("--since-days must be at least 1")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     now = _utc_now()
     run_id = _run_id(now)
-    state_path = args.output_dir / ("state.json" if mode == "daily" else "backfill-state.json")
-    initial_since = (now - timedelta(days=args.since_days)).date().isoformat() if mode == "daily" else args.start
+    state_path = args.output_dir / ({"daily": "state.json", "backfill": "backfill-state.json", "sample": "sample-state.json"}[mode])
+    initial_since = (now - timedelta(days=args.since_days)).date().isoformat() if mode in {"daily", "sample"} else args.start
     state = _read_state(state_path, initial_since)
     github_token = _github_token(args.github_token_env)
     hf_token = _hf_token(args.hf_token_env)
@@ -153,9 +166,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             raise ValueError(
                 f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login"
             )
-        remote_checkpoint = load_checkpoint(
-            args.repo, hf_token, **({"checkpoint_path": "state/backfill.json"} if mode == "backfill" else {})
-        )
+        remote_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "sample": "state/sample.json"}[mode]
+        remote_checkpoint = load_checkpoint(args.repo, hf_token, checkpoint_path=remote_path)
         if not state["initialized"] and isinstance(remote_checkpoint, dict):
             state.update(remote_checkpoint)
             state["since"] = remote_checkpoint.get("since", initial_since)
@@ -190,19 +202,25 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         set_progress_callback(report_search_progress)
     backfill_start = state.get("start", args.start) if mode == "backfill" else None
     backfill_end = state.get("end", args.end or now.date().isoformat()) if mode == "backfill" else None
-    if mode == "daily":
+    if mode in {"daily", "sample"}:
         # A new sweep gets a fresh upper bound; a truncated sweep retains
         # the exact bound alongside its cursor so it can resume safely.
         until = state.get("until") if state.get("cursor") is not None else now.date().isoformat()
         state["until"] = until
-        discover_run = lambda cursor: discover(
-            client,
-            specs,
-            since=state["since"],
-            until=until,
-            max_requests=args.max_requests,
-            cursor=cursor,
-        )
+        if mode == "sample":
+            discover_run = lambda cursor: discover_sample(
+                client, specs, start=state["since"], end=until,
+                max_requests=args.max_requests, cursor=cursor,
+            )
+        else:
+            discover_run = lambda cursor: discover(
+                client,
+                specs,
+                since=state["since"],
+                until=until,
+                max_requests=args.max_requests,
+                cursor=cursor,
+            )
     else:
         from .discovery import discover_backfill
 
@@ -229,8 +247,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
                 raise
             print(
                 f"Query catalog changed; restarting {mode} window "
-                f"from the beginning ({state.get('since') if mode == 'daily' else backfill_start}"
-                f"..{until if mode == 'daily' else backfill_end}).",
+                f"from the beginning ({state.get('since') if mode in {'daily', 'sample'} else backfill_start}"
+                f"..{until if mode in {'daily', 'sample'} else backfill_end}).",
                 file=sys.stderr,
             )
             outcome = discover_run(None)
@@ -241,7 +259,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             {
                 "run_id": run_id,
                 "started_at": now.isoformat().replace("+00:00", "Z"),
-                **({"since": state["since"], "until": state.get("until")} if mode == "daily" else {"start": backfill_start, "end": backfill_end}),
+                **({"since": state["since"], "until": state.get("until")} if mode in {"daily", "sample"} else {"start": backfill_start, "end": backfill_end}),
+                **({"mode": "sample", "date_field": "created"} if mode == "sample" else {}),
                 "requests_used": None,
                 "complete_sweep": False,
                 "queries": [{"status": "error", "error": str(exc)}],
@@ -275,7 +294,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     coverage = {
         "run_id": run_id,
         "started_at": observed_at,
-        **({"since": state["since"], "until": state["until"]} if mode == "daily" else {"start": state["start"], "end": state["end"]}),
+        **({"since": state["since"], "until": state["until"]} if mode in {"daily", "sample"} else {"start": state["start"], "end": state["end"]}),
+        **({"mode": "sample", "date_field": "created"} if mode == "sample" else {}),
         "requests_used": outcome.requests_used,
         "complete_sweep": outcome.next_cursor is None,
         "queries": outcome.coverage,
@@ -293,7 +313,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             encoding="utf-8",
         )
 
-    if mode == "daily":
+    if mode in {"daily", "sample"}:
         if outcome.next_cursor is None:
             # Start the next daily pass at the previous upper bound (inclusive
             # overlap) and choose its upper bound when that pass begins.
@@ -322,7 +342,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             raise ValueError(
                 f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login"
             )
-        checkpoint_path = "state/checkpoint.json" if mode == "daily" else "state/backfill.json"
+        checkpoint_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "sample": "state/sample.json"}[mode]
         checkpoint = {**(remote_checkpoint or {}), **next_state, "updated_at": observed_at}
         url = publish_run(
             args.repo,
@@ -332,7 +352,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             coverage_path=coverage_path,
             checkpoint=checkpoint,
             card_path=card_path,
-            **({"checkpoint_path": checkpoint_path} if mode == "backfill" else {}),
+            checkpoint_path=checkpoint_path,
         )
         print(f"Published {len(observations)} observations to {url}")
 
@@ -369,6 +389,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run(args)
         if args.command == "backfill":
             return _backfill(args)
+        if args.command == "sample":
+            return _sample(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
