@@ -551,3 +551,34 @@ def test_metadata_readme_synergy_rejects_generic_apps_and_unrelated_mentions() -
     for row in rows:
         result = assess_repository({**row, "readme_status": "ok"})
         assert result["selection_status"] == "review", (row["name"], result)
+
+
+def test_official_codebase_with_readme_paper_code_relation_promotes_without_novelty_wording() -> None:
+    pinned = {
+        "name": "facebookresearch/ijepa",
+        "description": (
+            "Official codebase for I-JEPA, the Image-based Joint-Embedding Predictive Architecture. "
+            'First outlined in the CVPR paper, "Self-supervised learning from images with a '
+            'joint-embedding predictive architecture."'
+        ),
+        "topics": [],
+        "fork": False,
+    }
+    signals = ["paper-reference", "ml-method-context", "paper-code-relationship"]
+    assert assess_repository(pinned)["selection_status"] == "review"
+    result = assess_repository({
+        **pinned, "readme_status": "ok", "readme_signals": signals,
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "readme-supported-paper-method-implementation"
+
+
+def test_official_applied_codebase_without_local_readme_paper_relation_stays_review() -> None:
+    result = assess_repository({
+        "name": "lab/official-dashboard",
+        "description": "Official PyTorch codebase for an operations dashboard, with a transformer paper citation (CVPR 2024).",
+        "topics": ["transformer", "dashboard"],
+        "readme_status": "ok",
+        "readme_signals": ["paper-reference", "ml-method-context"],
+    })
+    assert result["selection_status"] == "review"

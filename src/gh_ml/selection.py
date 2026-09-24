@@ -279,7 +279,7 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
     # code-for-paper claim. Keep this relationship local to one metadata
     # sentence so an unrelated citation cannot lend credibility to an app.
     code_claim = re.compile(
-        r"\b(?:official\s+(?:(?:source\s+)?code|implementations?)|"
+        r"\b(?:official\s+(?:(?:(?:pytorch|tensorflow|jax)\s+)?(?:source\s+)?code(?:base)?|implementations?)|"
         r"code\s+for\s+(?:the\s+)?paper)\b", re.I,
     )
     metadata_code_paper = any(
@@ -294,9 +294,19 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         re.search(r"\b(?:gans?|generative adversarial networks?)\b", topic_text, re.I)
     )
     metadata_official_implementation = bool(re.search(
-        r"\bofficial\s+(?:(?:source\s+)?code|implementations?)\b",
+        r"\bofficial\s+(?:(?:source\s+)?code(?:base)?|implementations?)\b",
         " ".join(fields), re.I,
     ))
+    metadata_codebase_claim = bool(re.search(
+        r"\bofficial\s+(?:(?:pytorch|tensorflow|jax)\s+)?codebase\b",
+        " ".join(fields), re.I,
+    ))
+    description_text = " ".join(_strings(row.get("description"))).casefold().replace("-", " ").replace("_", " ")
+    metadata_codebase_paper_method = (
+        bool(re.search(r"\bofficial\s+(?:(?:pytorch|tensorflow|jax)\s+)?codebase\b", description_text, re.I))
+        and bool(_PAPER.search(description_text) or _VENUE_YEAR.search(description_text))
+        and bool(_METHOD.search(description_text))
+    )
     readme_supports_metadata_paper = (
         readme_active and readme_ml and readme_paper
         and not (negative_readme & readme_signals)
@@ -304,12 +314,16 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
             # DragGAN-like rows tie official code to a named venue and expose
             # the method family in repository topics, while the README carries
             # paper and ML context without proposal wording.
-            (metadata_code_paper and metadata_method_topic)
+            (metadata_code_paper and metadata_method_topic and (not metadata_codebase_claim or readme_relation))
             # GPT-2-like code-for-paper rows have an explicit README relation.
             or (metadata_code_paper and readme_relation)
             # Some official implementations document the method in a separate
             # README paragraph; require a contribution signal as extra support.
             or (metadata_official_implementation and readme_contribution)
+            # An official codebase description may connect the method and paper
+            # across sentences. Require the README to provide the local code,
+            # paper, and ML relation before using that metadata evidence.
+            or (metadata_codebase_paper_method and readme_relation)
         )
     )
     readme_supports_standalone_method = (
