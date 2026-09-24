@@ -15,7 +15,7 @@ from typing import Any
 
 from .classification import classify_repository
 from .discovery import discover
-from .github import GitHubAPIError, GitHubClient
+from .github import GitHubAPIError, GitHubClient, SearchProgress
 from .hub import load_checkpoint, publish_run
 from .query_catalog import load_queries
 from .schema import observation_from_repository, write_jsonl
@@ -168,6 +168,26 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         raise ValueError(f"no queries found in {args.config_dir}")
 
     client = GitHubClient(token=github_token)
+
+    def report_search_progress(progress: SearchProgress) -> None:
+        if progress.completed % 25:
+            return
+        elapsed = progress.elapsed_seconds
+        details = []
+        if progress.status is not None:
+            details.append(f"HTTP {progress.status}")
+        if progress.remaining is not None:
+            details.append(f"rate remaining {progress.remaining}")
+        suffix = f" ({', '.join(details)})" if details else ""
+        print(
+            f"GitHub Search: {progress.completed} requests completed in {elapsed:.1f}s{suffix}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    set_progress_callback = getattr(client, "set_progress_callback", None)
+    if callable(set_progress_callback):
+        set_progress_callback(report_search_progress)
     backfill_start = state.get("start", args.start) if mode == "backfill" else None
     backfill_end = state.get("end", args.end or now.date().isoformat()) if mode == "backfill" else None
     if mode == "daily":

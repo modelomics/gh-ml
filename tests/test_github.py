@@ -7,12 +7,15 @@ from urllib.error import HTTPError
 
 import pytest
 
-from gh_ml.github import GitHubAPIError, GitHubClient
+from gh_ml.github import GitHubAPIError, GitHubClient, SearchProgress
 
 
 class FakeResponse:
-    def __init__(self, payload: object, status: int = 200) -> None:
+    def __init__(
+        self, payload: object, status: int = 200, headers: dict[str, str] | None = None
+    ) -> None:
         self.status = status
+        self.headers = headers or {}
         self._body = json.dumps(payload).encode("utf-8")
 
     def __enter__(self) -> FakeResponse:
@@ -59,6 +62,29 @@ def test_search_encodes_query_and_returns_requested_page() -> None:
         "q=%22state+space%22+OR+diffusion&page=2&per_page=50"
     )
     assert calls[0][1] == 30.0
+
+
+def test_search_progress_callback_is_opt_in_and_contains_only_safe_metadata() -> None:
+    payload = {"total_count": 0, "incomplete_results": False, "items": []}
+    response = FakeResponse(payload, headers={"X-RateLimit-Remaining": "17"})
+    client = GitHubClient(
+        token="ghp-secret-test-value",
+        opener=lambda request, *, timeout: response,
+        sleeper=lambda _: None,
+    )
+    client.search_repositories("private query")
+
+    progress: list[SearchProgress] = []
+    client.set_progress_callback(progress.append)
+    client.search_repositories("private query")
+
+    assert len(progress) == 1
+    assert progress[0].completed == 1
+    assert progress[0].elapsed_seconds >= 0
+    assert progress[0].status == 200
+    assert progress[0].remaining == 17
+    assert "private query" not in repr(progress[0])
+    assert "ghp-secret-test-value" not in repr(progress[0])
 
 
 @pytest.mark.parametrize("status", [403, 429])

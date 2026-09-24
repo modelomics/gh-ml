@@ -34,6 +34,16 @@ class SearchResult:
     items: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True, slots=True)
+class SearchProgress:
+    """Sanitized progress for one completed Search API response."""
+
+    completed: int
+    elapsed_seconds: float
+    status: int | None
+    remaining: int | None
+
+
 class GitHubClient:
     """GitHub REST client with bounded retry for transient and rate-limit errors.
 
@@ -60,6 +70,15 @@ class GitHubClient:
         self._opener = opener or urlopen
         self._sleep = sleeper
         self._next_search_at = 0.0
+        self._started_at = time.monotonic()
+        self._search_requests_completed = 0
+        self._progress_callback: Callable[[SearchProgress], None] | None = None
+
+    def set_progress_callback(
+        self, callback: Callable[[SearchProgress], None] | None
+    ) -> None:
+        """Set an optional callback for completed Search API responses."""
+        self._progress_callback = callback
 
     def search_repositories(
         self, query: str, page: int = 1, per_page: int = 100
@@ -132,6 +151,7 @@ class GitHubClient:
                         raise GitHubAPIError(status, "unexpected HTTP status")
                 if is_search:
                     self._pace_search_from_headers(response_headers)
+                    self._report_search_progress(status, response_headers)
                 try:
                     return json.loads(body.decode("utf-8"))
                 except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -156,6 +176,25 @@ class GitHubClient:
                 self._sleep(min(2**attempt, _MAX_RETRY_SLEEP))
         assert last_error is not None
         raise last_error
+
+    def _report_search_progress(self, status: int | None, headers: Any) -> None:
+        callback = self._progress_callback
+        if callback is None:
+            return
+        self._search_requests_completed += 1
+        try:
+            remaining_raw = headers.get("X-RateLimit-Remaining")
+            remaining = int(remaining_raw) if remaining_raw is not None else None
+        except (AttributeError, TypeError, ValueError):
+            remaining = None
+        callback(
+            SearchProgress(
+                completed=self._search_requests_completed,
+                elapsed_seconds=max(0.0, time.monotonic() - self._started_at),
+                status=status,
+                remaining=remaining,
+            )
+        )
 
     def _pace_search(self) -> None:
         now = time.monotonic()
