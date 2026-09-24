@@ -1,0 +1,89 @@
+[[queries]]
+id = "multimodal.vision-language"
+q = "\"vision-language\" in:description"
+domains = ["multimodal", "vision", "language"]
+methods = ["vision-language-model", "contrastive-learning"]
+
+[[queries]]
+id = "multimodal.vlm"
+q = "\"vision-language model\" in:description"
+domains = ["multimodal", "vision", "language"]
+methods = ["vision-language-model", "image-text"]
+
+[[queries]]
+id = "multimodal.image-text"
+q = "\"image-text\" in:description"
+domains = ["multimodal", "vision", "language"]
+methods = ["image-text", "pretraining"]
+
+[[queries]]
+id = "multimodal.text-to-video"
+q = "\"text-to-video\" in:description"
+domains = ["multimodal", "video", "generative-ai"]
+methods = ["text-to-video", "video-generation"]
+
+[[queries]]
+id = "multimodal.video-understanding"
+q = "\"video-language\" in:description"
+domains = ["multimodal", "video", "language"]
+methods = ["video-understanding", "video-language-model"]
+
+[[queries]]
+id = "multimodal.3d-reconstruction"
+q = "\"3D reconstruction\" in:description"
+domains = ["multimodal", "computer-vision", "3d"]
+methods = ["3d-reconstruction", "neural-reconstruction"]
+
+[[queries]]
+id = "multimodal.neural-rendering"
+q = "\"neural rendering\" in:description"
+domains = ["computer-vision", "graphics", "3d"]
+methods = ["neural-rendering", "novel-view-synthesis"]
+
+[[queries]]
+id = "multimodal.nerf"
+q = "topic:nerf"
+domains = ["computer-vision", "graphics", "3d"]
+methods = ["neural-rendering", "radiance-fields"]
+
+[[queries]]
+id = "multimodal.scene-understanding"
+q = "\"scene understanding\" in:description"
+domains = ["computer-vision", "robotics", "3d"]
+methods = ["scene-understanding", "3d-perception"]
+
+[[queries]]
+id = "multimodal.world-models"
+q = "\"world model\" in:description"
+domains = ["multimodal", "reinforcement-learning", "robotics"]
+methods = ["world-model", "environment-modeling"]
+
+[[queries]]
+id = "multimodal.text-to-image"
+q = "\"text-to-image\" in:description"
+domains = ["multimodal", "vision", "generative-ai"]
+methods = ["text-to-image", "image-generation"]
+
+[[queries]]
+id = "multimodal.visual-question-answering"
+q = "\"visual question answering\" in:description"
+domains = ["multimodal", "vision", "language"]
+methods = ["visual-question-answering", "vision-language-model"]
+
+[[queries]]
+id = "multimodal.gaussian-splatting"
+q = "\"Gaussian splatting\" in:description"
+domains = ["computer-vision", "graphics", "3d"]
+methods = ["gaussian-splatting", "neural-rendering"]
+
+[[queries]]
+id = "multimodal.point-cloud"
+q = "\"point cloud\" in:description"
+domains = ["computer-vision", "robotics", "3d"]
+methods = ["point-cloud-learning", "3d-perception"]
+
+[[queries]]
+id = "multimodal.embodied-world-models"
+q = "\"embodied world model\" in:description"
+domains = ["multimodal", "robotics", "reinforcement-learning"]
+methods = ["world-model", "embodied-ai"]

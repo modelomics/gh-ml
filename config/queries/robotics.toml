@@ -1,0 +1,89 @@
+[[queries]]
+id = "robotics.robotics-topic"
+q = "topic:robotics"
+domains = ["robotics"]
+methods = ["robot-learning"]
+
+[[queries]]
+id = "robotics.robot-learning"
+q = "\"robot learning\" in:description"
+domains = ["robotics", "reinforcement-learning"]
+methods = ["robot-learning"]
+
+[[queries]]
+id = "robotics.imitation-learning"
+q = "\"imitation learning\" in:description"
+domains = ["robotics", "reinforcement-learning"]
+methods = ["imitation-learning"]
+
+[[queries]]
+id = "robotics.behavior-cloning"
+q = "\"behavior cloning\" in:description"
+domains = ["robotics", "reinforcement-learning"]
+methods = ["behavior-cloning", "imitation-learning"]
+
+[[queries]]
+id = "robotics.manipulation"
+q = "\"robot manipulation\" in:description"
+domains = ["robotics", "embodied-ai"]
+methods = ["manipulation"]
+
+[[queries]]
+id = "robotics.grasping"
+q = "\"robot grasping\" in:description"
+domains = ["robotics", "embodied-ai"]
+methods = ["grasping", "manipulation"]
+
+[[queries]]
+id = "robotics.locomotion"
+q = "\"robot locomotion\" in:description"
+domains = ["robotics", "embodied-ai"]
+methods = ["locomotion", "control"]
+
+[[queries]]
+id = "robotics.navigation"
+q = "\"robot navigation\" in:description"
+domains = ["robotics", "embodied-ai"]
+methods = ["navigation"]
+
+[[queries]]
+id = "robotics.autonomous-driving"
+q = "\"autonomous driving\" in:description"
+domains = ["robotics", "autonomous-driving"]
+methods = ["perception", "planning"]
+
+[[queries]]
+id = "robotics.sim2real"
+q = "\"sim-to-real\" in:description"
+domains = ["robotics", "reinforcement-learning"]
+methods = ["sim-to-real"]
+
+[[queries]]
+id = "robotics.domain-randomization"
+q = "\"domain randomization\" in:description"
+domains = ["robotics", "reinforcement-learning"]
+methods = ["domain-randomization", "sim-to-real"]
+
+[[queries]]
+id = "robotics.embodied-ai"
+q = "\"embodied AI\" in:description"
+domains = ["robotics", "embodied-ai"]
+methods = ["embodied-ai"]
+
+[[queries]]
+id = "robotics.visuomotor-policy"
+q = "\"visuomotor policy\" in:description"
+domains = ["robotics", "computer-vision", "embodied-ai"]
+methods = ["visuomotor-policy", "imitation-learning"]
+
+[[queries]]
+id = "robotics.robot-control"
+q = "\"robot control\" in:description"
+domains = ["robotics", "control"]
+methods = ["control"]
+
+[[queries]]
+id = "robotics.robotics-reinforcement-learning"
+q = "\"robotics reinforcement learning\" in:description"
+domains = ["robotics", "reinforcement-learning"]
+methods = ["reinforcement-learning", "robot-learning"]

@@ -1,0 +1,89 @@
+[[queries]]
+id = "chem-cheminformatics"
+q = "topic:cheminformatics"
+domains = ["chemistry"]
+methods = ["cheminformatics", "machine-learning"]
+
+[[queries]]
+id = "chem-molecular-generation"
+q = "\"molecular generation\" in:description,readme"
+domains = ["chemistry", "drug-discovery"]
+methods = ["generative-modeling", "molecular-design"]
+
+[[queries]]
+id = "chem-drug-discovery"
+q = "\"drug discovery\" in:description,readme"
+domains = ["chemistry", "drug-discovery"]
+methods = ["virtual-screening", "ranking", "representation-learning"]
+
+[[queries]]
+id = "chem-virtual-screening"
+q = "\"virtual screening\" in:description,readme"
+domains = ["chemistry", "drug-discovery"]
+methods = ["virtual-screening", "ranking"]
+
+[[queries]]
+id = "chem-property-prediction"
+q = "\"molecular property prediction\" in:description,readme"
+domains = ["chemistry", "drug-discovery"]
+methods = ["property-prediction", "qsar", "supervised-learning"]
+
+[[queries]]
+id = "chem-admet"
+q = "\"ADMET prediction\" in:description,readme"
+domains = ["chemistry", "drug-discovery"]
+methods = ["property-prediction", "toxicity-prediction"]
+
+[[queries]]
+id = "chem-binding-affinity"
+q = "\"binding affinity prediction\" in:description,readme"
+domains = ["chemistry", "drug-discovery", "structural-biology"]
+methods = ["property-prediction", "protein-ligand-modeling"]
+
+[[queries]]
+id = "chem-molecular-docking"
+q = "\"molecular docking\" in:description,readme"
+domains = ["chemistry", "drug-discovery", "structural-biology"]
+methods = ["docking", "structure-prediction"]
+
+[[queries]]
+id = "chem-retrosynthesis"
+q = "\"computer aided synthesis planning\" in:description,readme"
+domains = ["chemistry", "organic-chemistry"]
+methods = ["reaction-prediction", "planning"]
+
+[[queries]]
+id = "chem-reaction-prediction"
+q = "\"reaction prediction\" in:description,readme"
+domains = ["chemistry", "organic-chemistry"]
+methods = ["reaction-prediction", "representation-learning"]
+
+[[queries]]
+id = "chem-reaction-yield"
+q = "\"reaction yield prediction\" in:description,readme"
+domains = ["chemistry", "organic-chemistry"]
+methods = ["property-prediction", "reaction-prediction"]
+
+[[queries]]
+id = "materials-informatics"
+q = "\"materials informatics\" in:description,readme"
+domains = ["materials-science", "chemistry"]
+methods = ["property-prediction", "materials-discovery"]
+
+[[queries]]
+id = "materials-crystal-generation"
+q = "\"crystal structure generation\" in:description,readme"
+domains = ["materials-science", "chemistry"]
+methods = ["generative-modeling", "inverse-design"]
+
+[[queries]]
+id = "chem-interatomic-potentials"
+q = "\"machine learning interatomic potential\" in:description,readme"
+domains = ["chemistry", "materials-science", "computational-chemistry"]
+methods = ["interatomic-potentials", "molecular-dynamics", "simulation"]
+
+[[queries]]
+id = "chem-catalyst-discovery"
+q = "\"catalyst discovery\" in:description,readme"
+domains = ["chemistry", "materials-science", "catalysis"]
+methods = ["catalyst-discovery", "property-prediction", "materials-design"]

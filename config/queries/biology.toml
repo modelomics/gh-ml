@@ -1,0 +1,89 @@
+[[queries]]
+id = "bio.protein-structure"
+q = "\"protein structure prediction\" in:description"
+domains = ["biology", "computational-biology", "structural-biology"]
+methods = ["protein-language-model", "structure-prediction", "representation-learning"]
+
+[[queries]]
+id = "bio.protein-folding"
+q = "\"protein folding\" in:readme"
+domains = ["biology", "computational-biology", "structural-biology"]
+methods = ["protein-folding", "structure-prediction"]
+
+[[queries]]
+id = "bio.protein-design"
+q = "\"protein design\" in:description"
+domains = ["biology", "computational-biology", "protein-engineering"]
+methods = ["protein-design", "generative-modeling"]
+
+[[queries]]
+id = "bio.inverse-folding"
+q = "\"inverse folding\" in:readme"
+domains = ["biology", "computational-biology", "protein-engineering"]
+methods = ["inverse-folding", "protein-design"]
+
+[[queries]]
+id = "bio.genomics"
+q = "\"genomics\" in:description"
+domains = ["biology", "genomics", "computational-biology"]
+methods = ["machine-learning", "genomics"]
+
+[[queries]]
+id = "bio.variant-effects"
+q = "\"variant effect prediction\" in:readme"
+domains = ["biology", "genomics", "computational-biology"]
+methods = ["variant-effect-prediction", "sequence-model"]
+
+[[queries]]
+id = "bio.single-cell"
+q = "\"single-cell\" in:description"
+domains = ["biology", "single-cell", "computational-biology"]
+methods = ["foundation-model", "representation-learning"]
+
+[[queries]]
+id = "bio.scrna-seq"
+q = "\"scRNA-seq\" in:readme"
+domains = ["biology", "single-cell", "computational-biology"]
+methods = ["cell-type-annotation", "representation-learning"]
+
+[[queries]]
+id = "bio.dna-language-models"
+q = "\"DNA language model\" in:description"
+domains = ["biology", "genomics", "bioinformatics"]
+methods = ["sequence-model", "language-model", "self-supervised-learning"]
+
+[[queries]]
+id = "bio.rna-language-models"
+q = "\"RNA language model\" in:description"
+domains = ["biology", "computational-biology", "bioinformatics"]
+methods = ["sequence-model", "language-model"]
+
+[[queries]]
+id = "bio.molecular-dynamics"
+q = "\"molecular dynamics\" in:description"
+domains = ["biology", "chemistry", "computational-biology"]
+methods = ["molecular-dynamics", "scientific-machine-learning"]
+
+[[queries]]
+id = "bio.molecular-force-fields"
+q = "\"machine learning force field\" in:readme"
+domains = ["biology", "chemistry", "computational-biology"]
+methods = ["force-field", "scientific-machine-learning"]
+
+[[queries]]
+id = "bio.protein-interactions"
+q = "\"protein-protein interaction prediction\" in:readme"
+domains = ["biology", "computational-biology"]
+methods = ["interaction-prediction", "graph-neural-network"]
+
+[[queries]]
+id = "bio.phylogenetics"
+q = "\"phylogenetics\" in:description"
+domains = ["biology", "evolutionary-biology", "computational-biology"]
+methods = ["phylogenetics", "tree-inference", "sequence-model"]
+
+[[queries]]
+id = "bio.transcriptomics"
+q = "\"transcriptomics\" in:description"
+domains = ["biology", "computational-biology", "transcriptomics"]
+methods = ["gene-expression-modeling", "representation-learning"]

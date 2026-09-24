@@ -1,0 +1,89 @@
+[[queries]]
+id = "llm.language-models"
+q = "topic:large-language-models"
+domains = ["language", "generative-ai"]
+methods = ["language-model", "pretraining"]
+
+[[queries]]
+id = "llm.transformers"
+q = "\"transformer\" in:description"
+domains = ["language", "generative-ai"]
+methods = ["transformer", "language-model"]
+
+[[queries]]
+id = "llm.diffusion"
+q = "topic:diffusion-model"
+domains = ["generative-ai", "vision"]
+methods = ["diffusion"]
+
+[[queries]]
+id = "llm.generative-ai"
+q = "\"generative AI\" in:description"
+domains = ["generative-ai"]
+methods = ["generative-model"]
+
+[[queries]]
+id = "llm.agents"
+q = "topic:ai-agents"
+domains = ["language", "reinforcement-learning"]
+methods = ["agent", "tool-use"]
+
+[[queries]]
+id = "llm.alignment"
+q = "\"alignment\" in:description"
+domains = ["language", "safety"]
+methods = ["alignment", "reinforcement-learning"]
+
+[[queries]]
+id = "llm.synthetic-data"
+q = "\"synthetic data\" in:description"
+domains = ["language", "data-centric-ai"]
+methods = ["synthetic-data", "language-model"]
+
+[[queries]]
+id = "llm.foundation-models"
+q = "\"foundation model\" in:description"
+domains = ["foundation-models", "generative-ai"]
+methods = ["pretraining", "multimodal"]
+
+[[queries]]
+id = "llm.finetuning"
+q = "\"fine-tuning\" in:description"
+domains = ["language", "generative-ai"]
+methods = ["fine-tuning", "parameter-efficient-fine-tuning"]
+
+[[queries]]
+id = "llm.multimodal"
+q = "\"multimodal language model\" in:description"
+domains = ["language", "multimodal"]
+methods = ["multimodal", "language-model"]
+
+[[queries]]
+id = "llm.language-model"
+q = "\"language model\" in:description"
+domains = ["language"]
+methods = ["language-model"]
+
+[[queries]]
+id = "llm.large-language-model"
+q = "\"large language model\" in:description"
+domains = ["language", "generative-ai"]
+methods = ["language-model", "pretraining"]
+
+[[queries]]
+id = "llm.diffusion-phrase"
+q = "\"diffusion model\" in:description"
+domains = ["generative-ai"]
+methods = ["diffusion"]
+
+[[queries]]
+id = "llm.ai-agent"
+q = "\"AI agent\" in:description"
+domains = ["language", "reinforcement-learning"]
+methods = ["agent", "tool-use"]
+
+[[queries]]
+id = "llm.synthetic-data-generation"
+q = "\"synthetic data generation\" in:description"
+domains = ["language", "data-centric-ai"]
+methods = ["synthetic-data"]

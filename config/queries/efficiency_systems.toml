@@ -1,0 +1,89 @@
+[[queries]]
+id = "efficiency.quantization"
+q = "quantization in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["quantization"]
+
+[[queries]]
+id = "efficiency.quantization-aware-training"
+q = "\"quantization-aware training\" in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["quantization-aware-training"]
+
+[[queries]]
+id = "efficiency.post-training-quantization"
+q = "\"post-training quantization\" in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["post-training-quantization"]
+
+[[queries]]
+id = "efficiency.pruning"
+q = "pruning in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["neural-network-pruning", "structured-pruning"]
+
+[[queries]]
+id = "efficiency.sparse-neural-networks"
+q = "\"sparse neural network\" in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["sparsity", "sparse-neural-network"]
+
+[[queries]]
+id = "efficiency.knowledge-distillation"
+q = "\"knowledge distillation\" in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["knowledge-distillation"]
+
+[[queries]]
+id = "efficiency.model-compression"
+q = "\"model compression\" in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["model-compression"]
+
+[[queries]]
+id = "efficiency.low-rank-factorization"
+q = "\"low-rank factorization\" in:description"
+domains = ["efficient-ml", "model-compression"]
+methods = ["low-rank-factorization"]
+
+[[queries]]
+id = "efficiency.neural-architecture-search"
+q = "\"neural architecture search\" in:description"
+domains = ["automl", "efficient-ml"]
+methods = ["neural-architecture-search"]
+
+[[queries]]
+id = "efficiency.automl"
+q = "AutoML in:description"
+domains = ["automl", "optimization"]
+methods = ["automl"]
+
+[[queries]]
+id = "efficiency.hyperparameter-optimization"
+q = "\"hyperparameter optimization\" in:description"
+domains = ["automl", "optimization"]
+methods = ["hyperparameter-optimization"]
+
+[[queries]]
+id = "efficiency.gradient-optimization"
+q = "\"gradient-based optimization\" in:description"
+domains = ["optimization", "deep-learning"]
+methods = ["gradient-optimization", "optimization-algorithm"]
+
+[[queries]]
+id = "efficiency.distributed-training"
+q = "\"distributed training\" in:description"
+domains = ["distributed-ml", "ml-systems"]
+methods = ["distributed-training", "data-parallelism", "model-parallelism"]
+
+[[queries]]
+id = "efficiency.inference-systems"
+q = "\"inference engine\" in:description"
+domains = ["ml-systems", "inference-systems"]
+methods = ["inference-optimization", "inference-serving", "kernel-optimization"]
+
+[[queries]]
+id = "efficiency.edge-ai"
+q = "\"edge AI\" in:description"
+domains = ["edge-ai", "efficient-ml"]
+methods = ["edge-inference", "on-device-learning", "embedded-machine-learning"]

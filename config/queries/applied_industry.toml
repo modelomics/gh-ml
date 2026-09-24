@@ -1,0 +1,89 @@
+[[queries]]
+id = "applied.recommender-systems"
+q = "\"recommender system\" in:readme"
+domains = ["recommender-systems"]
+methods = ["recommendation"]
+
+[[queries]]
+id = "applied.collaborative-filtering"
+q = "\"collaborative filtering\" in:description"
+domains = ["recommender-systems"]
+methods = ["collaborative-filtering"]
+
+[[queries]]
+id = "applied.click-through-rate"
+q = "\"click-through rate prediction\" in:readme"
+domains = ["advertising", "recommender-systems"]
+methods = ["click-through-rate-prediction"]
+
+[[queries]]
+id = "applied.ad-ranking"
+q = "\"ad ranking\" in:description"
+domains = ["advertising"]
+methods = ["ad-ranking"]
+
+[[queries]]
+id = "applied.search-ranking"
+q = "\"search ranking\" in:readme"
+domains = ["search", "information-retrieval"]
+methods = ["search-ranking"]
+
+[[queries]]
+id = "applied.learning-to-rank"
+q = "\"learning to rank\" in:description"
+domains = ["search", "information-retrieval"]
+methods = ["learning-to-rank"]
+
+[[queries]]
+id = "applied.tabular-ml"
+q = "\"tabular data\" in:readme"
+domains = ["tabular-ml"]
+methods = ["tabular-learning"]
+
+[[queries]]
+id = "applied.time-series-forecasting"
+q = "\"time series forecasting\" in:description"
+domains = ["time-series", "forecasting"]
+methods = ["time-series-forecasting"]
+
+[[queries]]
+id = "applied.quantitative-finance"
+q = "\"quantitative finance\" in:readme"
+domains = ["finance"]
+methods = ["quantitative-finance"]
+
+[[queries]]
+id = "applied.algorithmic-trading"
+q = "\"algorithmic trading\" in:description"
+domains = ["finance"]
+methods = ["algorithmic-trading"]
+
+[[queries]]
+id = "applied.ml-econometrics"
+q = "\"machine learning econometrics\" in:readme"
+domains = ["economics"]
+methods = ["machine-learning-econometrics"]
+
+[[queries]]
+id = "applied.causal-inference"
+q = "\"causal inference\" in:description"
+domains = ["economics", "causal-inference"]
+methods = ["causal-inference"]
+
+[[queries]]
+id = "applied.fraud-detection"
+q = "\"fraud detection\" in:readme"
+domains = ["fraud-detection"]
+methods = ["fraud-detection"]
+
+[[queries]]
+id = "applied.predictive-maintenance"
+q = "\"predictive maintenance\" in:description"
+domains = ["industrial-ml", "manufacturing"]
+methods = ["predictive-maintenance"]
+
+[[queries]]
+id = "applied.supply-chain-optimization"
+q = "\"supply chain optimization\" in:readme"
+domains = ["supply-chain", "operations-research"]
+methods = ["supply-chain-optimization"]

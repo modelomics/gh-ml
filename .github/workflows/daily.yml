@@ -1,0 +1,46 @@
+name: Daily GitHub repository collection
+
+on:
+  # Avoid the top of the hour, when GitHub Actions is most congested.
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gh-ml-daily
+  cancel-in-progress: false
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install locked dependencies
+        run: uv sync --locked --extra dev
+      - name: Run tests
+        run: uv run --frozen pytest
+      - name: Require Hugging Face write token
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "HF_TOKEN repository secret is required to publish the registry dataset." >&2
+            exit 1
+          fi
+      - name: Collect recent repositories
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: uv run --frozen gh-ml run --max-requests 120
+      - name: Backfill historical repositories
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: uv run --frozen gh-ml backfill --max-requests 30

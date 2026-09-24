@@ -1,0 +1,83 @@
+[[queries]]
+id = "general.topic-machine-learning"
+q = "topic:machine-learning"
+domains = ["general-ml"]
+methods = ["machine-learning"]
+
+[[queries]]
+id = "general.topic-deep-learning"
+q = "topic:deep-learning"
+domains = ["general-ml"]
+methods = ["deep-learning"]
+
+[[queries]]
+id = "general.topic-artificial-intelligence"
+q = "topic:artificial-intelligence"
+domains = ["general-ml"]
+methods = ["artificial-intelligence"]
+
+[[queries]]
+id = "general.machine-learning-description"
+q = "\"machine learning\" in:description"
+domains = ["general-ml"]
+methods = ["machine-learning"]
+
+[[queries]]
+id = "general.machine-learning-readme"
+q = "\"machine learning\" in:readme"
+domains = ["general-ml"]
+methods = ["machine-learning"]
+
+[[queries]]
+id = "general.deep-learning-description"
+q = "\"deep learning\" in:description"
+domains = ["general-ml"]
+methods = ["deep-learning"]
+
+[[queries]]
+id = "general.deep-learning-readme"
+q = "\"deep learning\" in:readme"
+domains = ["general-ml"]
+methods = ["deep-learning"]
+
+[[queries]]
+id = "general.artificial-intelligence-description"
+q = "\"artificial intelligence\" in:description"
+domains = ["general-ml"]
+methods = ["artificial-intelligence"]
+
+[[queries]]
+id = "general.neural-network"
+q = "\"neural network\" in:description"
+domains = ["general-ml"]
+methods = ["neural-network"]
+
+[[queries]]
+id = "general.paper-implementation"
+q = "\"paper implementation\" in:description"
+domains = ["general-ml"]
+methods = ["paper-implementation"]
+
+[[queries]]
+id = "general.research-code"
+q = "\"research code\" in:description"
+domains = ["general-ml"]
+methods = ["research-implementation"]
+
+[[queries]]
+id = "general.model-architecture"
+q = "\"model architecture\" in:description"
+domains = ["general-ml"]
+methods = ["model-architecture"]
+
+[[queries]]
+id = "general.arxiv"
+q = "arxiv in:description"
+domains = ["general-ml"]
+methods = ["paper-implementation"]
+
+[[queries]]
+id = "general.novel-method"
+q = "\"novel method\" in:description"
+domains = ["general-ml"]
+methods = ["novel-method"]

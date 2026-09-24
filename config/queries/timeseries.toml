@@ -1,0 +1,89 @@
+[[queries]]
+id = "timeseries.topic"
+q = "topic:time-series"
+domains = ["time-series"]
+methods = ["sequence-modeling"]
+
+[[queries]]
+id = "timeseries.forecasting"
+q = "\"time series forecasting\" in:description"
+domains = ["time-series", "forecasting"]
+methods = ["forecasting", "sequence-modeling"]
+
+[[queries]]
+id = "timeseries.long-horizon"
+q = "\"long horizon forecasting\" in:readme"
+domains = ["time-series", "forecasting"]
+methods = ["long-horizon-forecasting", "forecasting"]
+
+[[queries]]
+id = "timeseries.anomaly-detection"
+q = "\"time series anomaly detection\" in:description"
+domains = ["time-series", "anomaly-detection"]
+methods = ["anomaly-detection", "unsupervised-learning"]
+
+[[queries]]
+id = "timeseries.temporal-representation"
+q = "\"temporal representation learning\" in:readme"
+domains = ["time-series", "representation-learning"]
+methods = ["representation-learning", "self-supervised-learning"]
+
+[[queries]]
+id = "timeseries.foundation-models"
+q = "\"time series foundation model\" in:description"
+domains = ["time-series", "foundation-models"]
+methods = ["pretraining", "sequence-modeling"]
+
+[[queries]]
+id = "timeseries.state-space-models"
+q = "\"state space model\" in:description"
+domains = ["time-series", "sequence-modeling"]
+methods = ["state-space-model", "sequence-modeling"]
+
+[[queries]]
+id = "timeseries.streaming"
+q = "\"streaming time series\" in:readme"
+domains = ["time-series", "streaming"]
+methods = ["online-learning", "sequence-modeling"]
+
+[[queries]]
+id = "timeseries.sensor-data"
+q = "\"sensor time series\" in:description"
+domains = ["time-series", "sensor-data"]
+methods = ["classification", "forecasting"]
+
+[[queries]]
+id = "timeseries.predictive-maintenance"
+q = "\"predictive maintenance\" in:description"
+domains = ["time-series", "industrial-ml", "predictive-maintenance"]
+methods = ["remaining-useful-life", "anomaly-detection", "failure-prediction"]
+
+[[queries]]
+id = "timeseries.classification"
+q = "\"time series classification\" in:description"
+domains = ["time-series", "classification"]
+methods = ["classification", "sequence-modeling"]
+
+[[queries]]
+id = "timeseries.probabilistic-forecasting"
+q = "\"probabilistic forecasting\" in:readme"
+domains = ["time-series", "forecasting"]
+methods = ["probabilistic-forecasting", "uncertainty-estimation"]
+
+[[queries]]
+id = "timeseries.multivariate"
+q = "\"multivariate time series\" in:description"
+domains = ["time-series", "forecasting"]
+methods = ["multivariate-forecasting", "forecasting"]
+
+[[queries]]
+id = "timeseries.remaining-useful-life"
+q = "\"remaining useful life\" in:readme"
+domains = ["time-series", "predictive-maintenance"]
+methods = ["remaining-useful-life", "failure-prediction"]
+
+[[queries]]
+id = "timeseries.temporal-fusion-transformer"
+q = "\"temporal fusion transformer\" in:description"
+domains = ["time-series", "forecasting"]
+methods = ["transformer", "forecasting"]

@@ -1,0 +1,89 @@
+[[queries]]
+id = "rl.core"
+q = "topic:reinforcement-learning"
+domains = ["reinforcement-learning"]
+methods = ["reinforcement-learning", "policy-learning"]
+
+[[queries]]
+id = "rl.deep"
+q = "\"deep reinforcement learning\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["deep-reinforcement-learning", "policy-learning"]
+
+[[queries]]
+id = "rl.offline"
+q = "\"offline reinforcement learning\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["offline-reinforcement-learning", "batch-reinforcement-learning"]
+
+[[queries]]
+id = "rl.multiagent"
+q = "\"multi-agent reinforcement learning\" in:description"
+domains = ["reinforcement-learning", "multi-agent-systems"]
+methods = ["multi-agent-reinforcement-learning", "centralized-training"]
+
+[[queries]]
+id = "rl.exploration"
+q = "\"reinforcement learning exploration\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["exploration", "intrinsic-motivation"]
+
+[[queries]]
+id = "rl.planning"
+q = "\"reinforcement learning planning\" in:description"
+domains = ["reinforcement-learning", "planning"]
+methods = ["model-based-reinforcement-learning", "planning"]
+
+[[queries]]
+id = "rl.games"
+q = "topic:game-ai"
+domains = ["reinforcement-learning", "game-ai"]
+methods = ["game-playing", "self-play"]
+
+[[queries]]
+id = "rl.bandits"
+q = "\"multi-armed bandit\" in:description"
+domains = ["reinforcement-learning", "decision-making"]
+methods = ["multi-armed-bandits", "contextual-bandits"]
+
+[[queries]]
+id = "rl.model-based"
+q = "\"model-based reinforcement learning\" in:description"
+domains = ["reinforcement-learning", "robotics"]
+methods = ["model-based-reinforcement-learning", "world-model"]
+
+[[queries]]
+id = "rl.preference"
+q = "\"preference-based reinforcement learning\" in:description"
+domains = ["reinforcement-learning", "human-ai-interaction"]
+methods = ["preference-learning", "reinforcement-learning-from-human-feedback"]
+
+[[queries]]
+id = "rl.policy-gradient"
+q = "\"policy gradient\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["policy-gradient", "policy-optimization"]
+
+[[queries]]
+id = "rl.model-free"
+q = "\"model-free reinforcement learning\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["model-free-reinforcement-learning"]
+
+[[queries]]
+id = "rl.inverse"
+q = "\"inverse reinforcement learning\" in:description"
+domains = ["reinforcement-learning", "imitation-learning"]
+methods = ["inverse-reinforcement-learning", "imitation-learning"]
+
+[[queries]]
+id = "rl.hierarchical"
+q = "\"hierarchical reinforcement learning\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["hierarchical-reinforcement-learning", "options"]
+
+[[queries]]
+id = "rl.safe"
+q = "\"safe reinforcement learning\" in:description"
+domains = ["reinforcement-learning", "safety"]
+methods = ["safe-reinforcement-learning", "constrained-reinforcement-learning"]

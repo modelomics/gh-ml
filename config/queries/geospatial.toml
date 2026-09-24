@@ -1,0 +1,89 @@
+[[queries]]
+id = "geo.topic-remote-sensing"
+q = "topic:remote-sensing"
+domains = ["geospatial", "remote-sensing", "earth-observation"]
+methods = ["machine-learning", "deep-learning"]
+
+[[queries]]
+id = "geo.topic-earth-observation"
+q = "topic:earth-observation"
+domains = ["geospatial", "earth-observation"]
+methods = ["foundation-model", "representation-learning"]
+
+[[queries]]
+id = "geo.topic-geospatial"
+q = "topic:geospatial"
+domains = ["geospatial", "spatial-data-science"]
+methods = ["spatial-modeling", "machine-learning"]
+
+[[queries]]
+id = "geo.topic-gis"
+q = "topic:gis"
+domains = ["geospatial", "gis"]
+methods = ["spatial-analysis", "machine-learning"]
+
+[[queries]]
+id = "geo.satellite-imagery"
+q = "\"satellite imagery\" in:readme"
+domains = ["geospatial", "remote-sensing", "satellite-imagery"]
+methods = ["image-classification", "object-detection", "segmentation"]
+
+[[queries]]
+id = "geo.geospatial-foundation-models"
+q = "\"geospatial foundation model\" in:readme"
+domains = ["geospatial", "earth-observation"]
+methods = ["foundation-model", "self-supervised-learning"]
+
+[[queries]]
+id = "geo.earth-observation-models"
+q = "\"Earth observation model\" in:description"
+domains = ["geospatial", "earth-observation", "remote-sensing"]
+methods = ["representation-learning", "foundation-model"]
+
+[[queries]]
+id = "geo.land-cover"
+q = "\"land cover\" in:readme"
+domains = ["geospatial", "remote-sensing", "environmental-science"]
+methods = ["land-cover-classification", "semantic-segmentation"]
+
+[[queries]]
+id = "geo.land-use"
+q = "\"land use\" in:readme"
+domains = ["geospatial", "remote-sensing", "urban-computing"]
+methods = ["land-use-classification", "semantic-segmentation"]
+
+[[queries]]
+id = "geo.hydrology"
+q = "\"hydrology machine learning\" in:readme"
+domains = ["geospatial", "hydrology", "environmental-science"]
+methods = ["scientific-machine-learning", "time-series-forecasting"]
+
+[[queries]]
+id = "geo.flood-mapping"
+q = "\"flood mapping\" in:readme"
+domains = ["geospatial", "hydrology", "disaster-response"]
+methods = ["flood-mapping", "segmentation", "change-detection"]
+
+[[queries]]
+id = "geo.urban-sensing"
+q = "\"urban remote sensing\" in:readme"
+domains = ["geospatial", "urban-computing", "remote-sensing"]
+methods = ["urban-mapping", "object-detection", "segmentation"]
+
+[[queries]]
+id = "geo.environmental-monitoring"
+q = "\"environmental monitoring\" in:readme"
+domains = ["geospatial", "environmental-science", "remote-sensing"]
+methods = ["change-detection", "time-series-analysis", "anomaly-detection"]
+
+[[queries]]
+id = "geo.sar-imagery"
+q = "\"synthetic aperture radar\" in:readme"
+domains = ["geospatial", "remote-sensing", "radar-imaging"]
+methods = ["image-classification", "change-detection", "self-supervised-learning"]
+
+[[queries]]
+id = "geo.climate-mapping"
+q = "\"climate downscaling\" in:readme"
+domains = ["geospatial", "climate-science", "earth-observation"]
+methods = ["downscaling", "spatiotemporal-modeling", "scientific-machine-learning"]

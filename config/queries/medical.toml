@@ -1,0 +1,89 @@
+[[queries]]
+id = "medical.medical-imaging"
+q = "\"medical imaging\" in:readme"
+domains = ["health-and-biomedicine", "medical-imaging"]
+methods = ["image-analysis"]
+
+[[queries]]
+id = "medical.medical-image-segmentation"
+q = "\"medical image segmentation\" in:description"
+domains = ["health-and-biomedicine", "medical-imaging"]
+methods = ["segmentation"]
+
+[[queries]]
+id = "medical.radiology"
+q = "\"radiology machine learning\" in:readme"
+domains = ["health-and-biomedicine", "radiology"]
+methods = ["image-analysis", "decision-support"]
+
+[[queries]]
+id = "medical.pathology"
+q = "\"computational pathology\" in:description"
+domains = ["health-and-biomedicine", "pathology"]
+methods = ["image-analysis", "classification"]
+
+[[queries]]
+id = "medical.histopathology"
+q = "\"histopathology image analysis\" in:readme"
+domains = ["health-and-biomedicine", "pathology"]
+methods = ["image-analysis", "classification"]
+
+[[queries]]
+id = "medical.ehr"
+q = "\"electronic health record\" in:readme"
+domains = ["health-and-biomedicine", "clinical-informatics"]
+methods = ["risk-prediction", "representation-learning"]
+
+[[queries]]
+id = "medical.clinical-time-series"
+q = "\"clinical time series\" in:description"
+domains = ["health-and-biomedicine", "clinical-informatics"]
+methods = ["time-series-modeling", "risk-prediction"]
+
+[[queries]]
+id = "medical.clinical-nlp"
+q = "\"clinical natural language processing\" in:readme"
+domains = ["health-and-biomedicine", "clinical-informatics", "natural-language-processing"]
+methods = ["information-extraction", "clinical-text-mining"]
+
+[[queries]]
+id = "medical.medical-language-model"
+q = "\"medical language model\" in:description"
+domains = ["health-and-biomedicine", "natural-language-processing"]
+methods = ["language-model"]
+
+[[queries]]
+id = "medical.clinical-decision-support"
+q = "\"clinical decision support\" in:readme"
+domains = ["health-and-biomedicine", "clinical-informatics"]
+methods = ["decision-support"]
+
+[[queries]]
+id = "medical.diagnosis-prediction"
+q = "\"diagnosis prediction\" in:description"
+domains = ["health-and-biomedicine", "clinical-informatics"]
+methods = ["diagnosis", "risk-prediction"]
+
+[[queries]]
+id = "medical.wearable-health"
+q = "\"wearable health monitoring\" in:readme"
+domains = ["health-and-biomedicine", "digital-health"]
+methods = ["wearable-sensing", "time-series-modeling"]
+
+[[queries]]
+id = "medical.neural-decoding"
+q = "\"neural data decoding\" in:description"
+domains = ["health-and-biomedicine", "neuroscience"]
+methods = ["neural-decoding", "signal-classification"]
+
+[[queries]]
+id = "medical.neuroimaging"
+q = "\"neuroimaging machine learning\" in:readme"
+domains = ["health-and-biomedicine", "neuroscience", "neuroimaging"]
+methods = ["image-analysis", "representation-learning"]
+
+[[queries]]
+id = "medical.clinical-trials"
+q = "\"clinical trial prediction\" in:description"
+domains = ["health-and-biomedicine", "clinical-research"]
+methods = ["patient-matching", "outcome-prediction"]

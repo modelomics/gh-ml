@@ -1,0 +1,89 @@
+[[queries]]
+id = "audio-asr"
+q = "\"automatic speech recognition\" in:readme"
+domains = ["audio", "speech"]
+methods = ["architecture", "evaluation", "inference", "training"]
+
+[[queries]]
+id = "audio-speech-to-text"
+q = "\"speech to text\" in:readme"
+domains = ["audio", "speech"]
+methods = ["inference", "training"]
+
+[[queries]]
+id = "audio-text-to-speech"
+q = "\"text to speech\" in:readme"
+domains = ["audio", "speech"]
+methods = ["generative-modeling", "inference", "training"]
+
+[[queries]]
+id = "audio-speech-synthesis"
+q = "\"speech synthesis\" in:readme"
+domains = ["audio", "speech"]
+methods = ["generative-modeling", "architecture", "training"]
+
+[[queries]]
+id = "audio-voice-conversion"
+q = "\"voice conversion\" in:readme"
+domains = ["audio", "speech"]
+methods = ["generative-modeling", "inference"]
+
+[[queries]]
+id = "audio-speaker-diarization"
+q = "\"speaker diarization\" in:readme"
+domains = ["audio", "speech"]
+methods = ["representation", "evaluation", "inference"]
+
+[[queries]]
+id = "audio-speaker-verification"
+q = "\"speaker verification\" in:readme"
+domains = ["audio", "speech"]
+methods = ["representation", "evaluation", "inference"]
+
+[[queries]]
+id = "audio-speech-enhancement"
+q = "\"speech enhancement\" in:readme"
+domains = ["audio", "speech"]
+methods = ["inference", "representation"]
+
+[[queries]]
+id = "audio-source-separation"
+q = "\"audio source separation\" in:readme"
+domains = ["audio"]
+methods = ["inference", "representation"]
+
+[[queries]]
+id = "audio-generation"
+q = "\"audio generation\" in:readme"
+domains = ["audio"]
+methods = ["generative-modeling", "architecture", "training"]
+
+[[queries]]
+id = "audio-text-to-audio"
+q = "\"text to audio\" in:readme"
+domains = ["audio", "multimodal"]
+methods = ["generative-modeling", "training"]
+
+[[queries]]
+id = "audio-music-generation"
+q = "\"music generation\" in:readme"
+domains = ["audio"]
+methods = ["generative-modeling", "architecture", "training"]
+
+[[queries]]
+id = "audio-music-information-retrieval"
+q = "\"music information retrieval\" in:readme"
+domains = ["audio"]
+methods = ["representation", "evaluation"]
+
+[[queries]]
+id = "audio-sound-event-detection"
+q = "\"sound event detection\" in:readme"
+domains = ["audio"]
+methods = ["representation", "evaluation", "training"]
+
+[[queries]]
+id = "audio-neural-codec"
+q = "\"neural audio codec\" in:readme"
+domains = ["audio"]
+methods = ["compression", "representation", "architecture"]

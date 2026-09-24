@@ -1,0 +1,83 @@
+[[queries]]
+id = "graph.topic-gnn"
+q = "topic:graph-neural-network"
+domains = ["graph-learning", "deep-learning"]
+methods = ["graph-neural-network", "message-passing"]
+
+[[queries]]
+id = "graph.gnn-description"
+q = "\"graph neural network\" in:description"
+domains = ["graph-learning", "deep-learning"]
+methods = ["graph-neural-network", "message-passing"]
+
+[[queries]]
+id = "graph.representation-learning"
+q = "\"graph representation learning\" in:readme"
+domains = ["graph-learning"]
+methods = ["graph-representation-learning"]
+
+[[queries]]
+id = "graph.knowledge-graphs"
+q = "topic:knowledge-graph"
+domains = ["knowledge-graphs", "graph-learning"]
+methods = ["knowledge-graph-embedding", "knowledge-graph-completion"]
+
+[[queries]]
+id = "graph.knowledge-graph-embedding"
+q = "\"knowledge graph embedding\" in:description"
+domains = ["knowledge-graphs", "graph-learning"]
+methods = ["knowledge-graph-embedding"]
+
+[[queries]]
+id = "graph.geometric-learning"
+q = "\"geometric deep learning\" in:readme"
+domains = ["geometric-learning", "graph-learning"]
+methods = ["geometric-deep-learning", "manifold-learning"]
+
+[[queries]]
+id = "graph.equivariant-networks"
+q = "\"equivariant neural network\" in:description"
+domains = ["geometric-learning", "physics-ml"]
+methods = ["equivariant-neural-network", "group-equivariant-learning"]
+
+[[queries]]
+id = "graph.e3-equivariance"
+q = "\"E(3)-equivariant\" in:readme"
+domains = ["geometric-learning", "physics-ml", "molecular-ml"]
+methods = ["e3-equivariance", "equivariant-learning"]
+
+[[queries]]
+id = "graph.molecular-graphs"
+q = "\"molecular graph neural network\" in:readme"
+domains = ["chemistry", "molecular-ml", "graph-learning"]
+methods = ["molecular-graph-learning", "molecular-property-prediction"]
+
+[[queries]]
+id = "graph.point-clouds"
+q = "topic:point-cloud"
+domains = ["3d-vision", "geometric-learning"]
+methods = ["point-cloud-learning", "point-cloud-segmentation"]
+
+[[queries]]
+id = "graph.point-cloud-learning"
+q = "\"point cloud deep learning\" in:description"
+domains = ["3d-vision", "geometric-learning"]
+methods = ["point-cloud-learning", "3d-representation-learning"]
+
+[[queries]]
+id = "graph.topological-ml"
+q = "\"topological machine learning\" in:readme"
+domains = ["topological-ml", "geometric-learning"]
+methods = ["topological-data-analysis", "topological-deep-learning"]
+
+[[queries]]
+id = "graph.persistent-homology"
+q = "\"persistent homology\" in:description"
+domains = ["topological-ml"]
+methods = ["persistent-homology", "topological-data-analysis"]
+
+[[queries]]
+id = "graph.graph-generation"
+q = "\"graph generation\" in:readme"
+domains = ["graph-learning", "generative-ai"]
+methods = ["graph-generation", "generative-modeling"]

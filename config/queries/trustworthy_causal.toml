@@ -1,0 +1,89 @@
+[[queries]]
+id = "trust.interpretable-ml"
+q = "\"interpretable machine learning\" in:description"
+domains = ["trustworthy-ml"]
+methods = ["interpretability", "explainable-ai"]
+
+[[queries]]
+id = "trust.explainable-ai"
+q = "\"explainable AI\" in:description"
+domains = ["trustworthy-ml"]
+methods = ["explainable-ai", "interpretability"]
+
+[[queries]]
+id = "trust.causal-ml"
+q = "\"causal machine learning\" in:description"
+domains = ["causal-ml"]
+methods = ["causal-inference", "causal-learning"]
+
+[[queries]]
+id = "trust.causal-discovery"
+q = "\"causal discovery\" in:description"
+domains = ["causal-ml"]
+methods = ["causal-discovery", "structure-learning"]
+
+[[queries]]
+id = "trust.federated-learning"
+q = "\"federated learning\" in:description"
+domains = ["distributed-ml"]
+methods = ["federated-learning", "collaborative-learning"]
+
+[[queries]]
+id = "trust.privacy-preserving-ml"
+q = "\"privacy-preserving machine learning\" in:description"
+domains = ["privacy-ml"]
+methods = ["privacy-preserving-ml", "differential-privacy"]
+
+[[queries]]
+id = "trust.differential-privacy"
+q = "\"differential privacy\" in:description"
+domains = ["privacy-ml"]
+methods = ["differential-privacy", "privacy-preserving-ml"]
+
+[[queries]]
+id = "trust.adversarial-robustness"
+q = "\"adversarial robustness\" in:description"
+domains = ["trustworthy-ml"]
+methods = ["adversarial-robustness", "robust-optimization"]
+
+[[queries]]
+id = "trust.algorithmic-fairness"
+q = "\"algorithmic fairness\" in:description"
+domains = ["trustworthy-ml"]
+methods = ["algorithmic-fairness", "bias-mitigation"]
+
+[[queries]]
+id = "trust.ml-fairness"
+q = "\"machine learning fairness\" in:description"
+domains = ["trustworthy-ml"]
+methods = ["algorithmic-fairness", "bias-mitigation"]
+
+[[queries]]
+id = "trust.uncertainty-quantification"
+q = "\"uncertainty quantification\" in:description"
+domains = ["trustworthy-ml"]
+methods = ["uncertainty-quantification", "calibration"]
+
+[[queries]]
+id = "trust.neuro-symbolic"
+q = "\"neuro-symbolic\" in:description"
+domains = ["neuro-symbolic-ai"]
+methods = ["neuro-symbolic-learning", "symbolic-reasoning"]
+
+[[queries]]
+id = "trust.ai-alignment"
+q = "\"AI alignment\" in:description"
+domains = ["ai-safety"]
+methods = ["ai-alignment", "safe-learning"]
+
+[[queries]]
+id = "trust.ai-safety"
+q = "\"AI safety\" in:description"
+domains = ["ai-safety"]
+methods = ["safe-learning", "robustness"]
+
+[[queries]]
+id = "trust.safe-reinforcement-learning"
+q = "\"safe reinforcement learning\" in:description"
+domains = ["ai-safety", "reinforcement-learning"]
+methods = ["safe-learning", "constrained-reinforcement-learning"]

@@ -1,0 +1,89 @@
+[[queries]]
+id = "science.physics"
+q = "physics in:description"
+domains = ["physics", "computational-physics", "scientific-computing"]
+methods = ["physics-informed-learning", "neural-operators", "surrogate-modeling"]
+
+[[queries]]
+id = "science.scientific-machine-learning"
+q = "\"scientific machine learning\" in:readme"
+domains = ["scientific-computing", "applied-mathematics", "computational-science"]
+methods = ["differentiable-programming", "learned-solvers", "surrogate-modeling"]
+
+[[queries]]
+id = "science.physics-informed-neural-networks"
+q = "\"physics-informed neural network\" in:description"
+domains = ["physics", "computational-physics"]
+methods = ["physics-informed-learning"]
+
+[[queries]]
+id = "science.neural-operators"
+q = "\"neural operator\" in:description"
+domains = ["physics", "computational-science"]
+methods = ["neural-operators", "surrogate-modeling"]
+
+[[queries]]
+id = "science.particle-physics"
+q = "\"particle physics\" in:description"
+domains = ["particle-physics", "high-energy-physics", "nuclear-physics"]
+methods = ["event-classification", "anomaly-detection", "graph-neural-networks"]
+
+[[queries]]
+id = "science.astronomy"
+q = "astronomy in:readme"
+domains = ["astronomy", "astrophysics", "space-science"]
+methods = ["time-series-classification", "object-detection", "anomaly-detection"]
+
+[[queries]]
+id = "science.astrophysics"
+q = "astrophysics in:description"
+domains = ["astronomy", "astrophysics", "space-science"]
+methods = ["time-series-classification", "object-detection", "anomaly-detection"]
+
+[[queries]]
+id = "science.cosmology"
+q = "cosmology in:description"
+domains = ["cosmology", "astrophysics", "gravitational-physics"]
+methods = ["simulation-emulation", "parameter-inference", "surrogate-modeling"]
+
+[[queries]]
+id = "science.weather-forecasting"
+q = "\"weather forecasting\" in:description"
+domains = ["climate-science", "meteorology", "earth-science"]
+methods = ["weather-forecasting", "climate-modeling", "downscaling"]
+
+[[queries]]
+id = "science.climate-modeling"
+q = "\"climate modeling\" in:readme"
+domains = ["climate-science", "meteorology", "earth-science"]
+methods = ["weather-forecasting", "climate-modeling", "downscaling"]
+
+[[queries]]
+id = "science.remote-sensing"
+q = "\"remote sensing\" in:description"
+domains = ["earth-science", "remote-sensing", "geospatial-science"]
+methods = ["remote-sensing", "geospatial-learning", "foundation-model"]
+
+[[queries]]
+id = "science.plasma-physics"
+q = "\"plasma physics\" in:description"
+domains = ["fusion-energy", "plasma-physics", "nuclear-engineering"]
+methods = ["control", "disruption-prediction", "physics-informed-learning"]
+
+[[queries]]
+id = "science.fluid-dynamics"
+q = "\"fluid dynamics\" in:description"
+domains = ["fluid-dynamics", "computational-fluid-dynamics", "engineering"]
+methods = ["turbulence-modeling", "neural-operators", "physics-informed-learning"]
+
+[[queries]]
+id = "science.differentiable-simulation"
+q = "\"differentiable simulation\" in:readme"
+domains = ["scientific-computing", "applied-mathematics", "computational-science"]
+methods = ["differentiable-programming", "learned-solvers", "surrogate-modeling"]
+
+[[queries]]
+id = "science.inverse-problems"
+q = "\"inverse problems\" in:description"
+domains = ["applied-physics", "computational-science", "applied-mathematics"]
+methods = ["inverse-problems", "data-assimilation", "reconstruction"]

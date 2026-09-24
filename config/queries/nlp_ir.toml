@@ -1,0 +1,89 @@
+[[queries]]
+id = "nlp.sentence-embeddings"
+q = '"sentence embeddings" in:description'
+domains = ["natural-language-processing"]
+methods = ["text-embeddings", "sentence-embeddings"]
+
+[[queries]]
+id = "nlp.semantic-search"
+q = '"semantic search" in:description'
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["semantic-search"]
+
+[[queries]]
+id = "nlp.dense-retrieval"
+q = '"dense retrieval" in:readme'
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["dense-retrieval"]
+
+[[queries]]
+id = "nlp.neural-reranking"
+q = '"neural reranking" in:description'
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["neural-reranking", "learning-to-rank"]
+
+[[queries]]
+id = "nlp.rag"
+q = '"retrieval augmented generation" in:description'
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["retrieval-augmented-generation", "rag"]
+
+[[queries]]
+id = "nlp.information-extraction"
+q = '"information extraction" in:description'
+domains = ["natural-language-processing"]
+methods = ["information-extraction"]
+
+[[queries]]
+id = "nlp.named-entity-recognition"
+q = '"named entity recognition" in:readme'
+domains = ["natural-language-processing"]
+methods = ["named-entity-recognition"]
+
+[[queries]]
+id = "nlp.machine-translation"
+q = '"machine translation" in:description'
+domains = ["natural-language-processing"]
+methods = ["machine-translation", "neural-machine-translation"]
+
+[[queries]]
+id = "nlp.text-summarization"
+q = '"text summarization" in:description'
+domains = ["natural-language-processing"]
+methods = ["text-summarization", "abstractive-summarization"]
+
+[[queries]]
+id = "nlp.dialogue-systems"
+q = '"dialogue system" in:readme'
+domains = ["natural-language-processing"]
+methods = ["dialogue-modeling", "conversational-ai"]
+
+[[queries]]
+id = "nlp.text-classification"
+q = '"text classification" in:description'
+domains = ["natural-language-processing"]
+methods = ["text-classification", "document-classification"]
+
+[[queries]]
+id = "nlp.subword-tokenization"
+q = '"subword tokenization" in:readme'
+domains = ["natural-language-processing"]
+methods = ["tokenization", "subword-tokenization"]
+
+[[queries]]
+id = "nlp.question-answering"
+q = '"question answering" in:description'
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["question-answering", "reading-comprehension"]
+
+[[queries]]
+id = "nlp.language-modeling"
+q = '"language modeling" in:description'
+domains = ["natural-language-processing"]
+methods = ["language-modeling"]
+
+[[queries]]
+id = "nlp.text-generation"
+q = '"text generation" in:readme'
+domains = ["natural-language-processing"]
+methods = ["text-generation"]

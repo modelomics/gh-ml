@@ -1,0 +1,89 @@
+[[queries]]
+id = "vision.topic-computer-vision"
+q = "topic:computer-vision"
+domains = ["computer-vision"]
+methods = ["computer-vision"]
+
+[[queries]]
+id = "vision.object-detection"
+q = "\"object detection\" in:description"
+domains = ["computer-vision"]
+methods = ["detection"]
+
+[[queries]]
+id = "vision.open-vocabulary-detection"
+q = "\"open-vocabulary detection\" in:readme"
+domains = ["computer-vision"]
+methods = ["open-vocabulary-detection", "detection"]
+
+[[queries]]
+id = "vision.segmentation"
+q = "\"image segmentation\" in:description"
+domains = ["computer-vision"]
+methods = ["segmentation"]
+
+[[queries]]
+id = "vision.promptable-segmentation"
+q = "\"promptable segmentation\" in:readme"
+domains = ["computer-vision"]
+methods = ["promptable-segmentation", "segmentation"]
+
+[[queries]]
+id = "vision.image-restoration"
+q = "\"image restoration\" in:readme"
+domains = ["computer-vision"]
+methods = ["restoration"]
+
+[[queries]]
+id = "vision.self-supervised-vision"
+q = "\"self-supervised vision\" in:description"
+domains = ["computer-vision"]
+methods = ["representation-learning", "self-supervised-learning"]
+
+[[queries]]
+id = "vision.image-diffusion"
+q = "\"image diffusion model\" in:readme"
+domains = ["computer-vision", "generative-ai"]
+methods = ["diffusion", "generative-modeling"]
+
+[[queries]]
+id = "vision.ocr"
+q = "topic:ocr"
+domains = ["computer-vision", "document-understanding"]
+methods = ["ocr"]
+
+[[queries]]
+id = "vision.video-understanding"
+q = "\"video understanding\" in:readme"
+domains = ["computer-vision"]
+methods = ["video-understanding"]
+
+[[queries]]
+id = "vision.action-recognition"
+q = "\"action recognition\" in:description"
+domains = ["computer-vision"]
+methods = ["action-recognition", "video-understanding"]
+
+[[queries]]
+id = "vision.object-tracking"
+q = "\"object tracking\" in:readme"
+domains = ["computer-vision"]
+methods = ["tracking"]
+
+[[queries]]
+id = "vision.optical-flow"
+q = "topic:optical-flow"
+domains = ["computer-vision"]
+methods = ["optical-flow"]
+
+[[queries]]
+id = "vision.neural-rendering"
+q = "\"neural rendering\" in:description"
+domains = ["computer-vision", "3d-vision"]
+methods = ["neural-rendering", "3d-vision"]
+
+[[queries]]
+id = "vision.vision-language"
+q = "\"vision-language model\" in:readme"
+domains = ["computer-vision", "multimodal"]
+methods = ["vision-language", "multimodal-learning"]
