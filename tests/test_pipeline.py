@@ -51,14 +51,15 @@ def test_candidate_record_has_evidence_without_claiming_novelty() -> None:
 
 
 class FakeHub:
-    def __init__(self, checkpoint: dict | None = None) -> None:
+    def __init__(self, checkpoint: dict | None = None, *, exists: bool = True) -> None:
         self.checkpoint = checkpoint
+        self.exists = exists
         self.commits: list[dict] = []
         self.created: list[tuple[str, str, bool]] = []
 
     def download_file(self, *, repo_id: str, filename: str, repo_type: str, token: str | None) -> bytes:
         assert (repo_id, filename, repo_type, token) == (
-            "modelomics/ml-github-registry",
+            "modelomics/gh-ml",
             "state/checkpoint.json",
             "dataset",
             "secret",
@@ -67,7 +68,14 @@ class FakeHub:
             raise FileNotFoundError(filename)
         return json.dumps(self.checkpoint).encode()
 
-    def create_repo(self, repo_id: str, *, repo_type: str, exist_ok: bool, private: bool = False) -> None:
+    def repo_info(self, repo_id: str, *, repo_type: str) -> SimpleNamespace:
+        assert repo_id == "modelomics/gh-ml"
+        assert repo_type == "dataset"
+        if not self.exists:
+            raise RepositoryNotFoundError(repo_id)
+        return SimpleNamespace(id=repo_id)
+
+    def create_repo(self, repo_id: str, *, repo_type: str, exist_ok: bool) -> None:
         self.created.append((repo_id, repo_type, exist_ok))
 
     def list_repo_files(self, repo_id: str, *, repo_type: str) -> list[str]:
@@ -75,14 +83,18 @@ class FakeHub:
 
     def create_commit(self, **kwargs: object) -> SimpleNamespace:
         self.commits.append(kwargs)
-        return SimpleNamespace(commit_url="https://huggingface.co/datasets/modelomics/ml-github-registry/commit/abc")
+        return SimpleNamespace(commit_url="https://huggingface.co/datasets/modelomics/gh-ml/commit/abc")
+
+
+class RepositoryNotFoundError(Exception):
+    """Named like the Hugging Face exception used for a missing dataset."""
 
 
 def test_checkpoint_load_resumes_from_saved_cursor() -> None:
     saved = {"since": "2026-09-22", "cursor": {"query_index": 2, "page": 3}}
     api = FakeHub(saved)
 
-    assert load_checkpoint("modelomics/ml-github-registry", "secret", api=api) == saved
+    assert load_checkpoint("modelomics/gh-ml", "secret", api=api) == saved
 
 
 def test_cli_dry_run_writes_candidate_without_publishing(tmp_path: Path, monkeypatch) -> None:
@@ -133,18 +145,16 @@ def test_cli_dry_run_writes_candidate_without_publishing(tmp_path: Path, monkeyp
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["cursor"] is None
 
 
-def test_publish_run_commits_all_run_files_and_checkpoint_atomically(tmp_path: Path) -> None:
+def _publish_test_run(tmp_path: Path, api: FakeHub) -> str:
     observations = tmp_path / "observations.jsonl"
     observations.write_text('{"github_id":1}\n', encoding="utf-8")
     coverage = tmp_path / "coverage.json"
     coverage.write_text("{}\n", encoding="utf-8")
     card = tmp_path / "README.md"
-    card.write_text("# ML GitHub Registry\n", encoding="utf-8")
+    card.write_text("# GitHub ML\n", encoding="utf-8")
     checkpoint = {"since": "2026-09-24", "cursor": None}
-    api = FakeHub()
-
-    url = publish_run(
-        "modelomics/ml-github-registry",
+    return publish_run(
+        "modelomics/gh-ml",
         "secret",
         run_id="20260924T000000Z-123",
         observations_path=observations,
@@ -154,8 +164,13 @@ def test_publish_run_commits_all_run_files_and_checkpoint_atomically(tmp_path: P
         api=api,
     )
 
+
+def test_publish_run_commits_all_run_files_and_checkpoint_atomically(tmp_path: Path) -> None:
+    api = FakeHub(exists=True)
+    url = _publish_test_run(tmp_path, api)
+
     assert url.endswith("/commit/abc")
-    assert api.created == [("modelomics/ml-github-registry", "dataset", True)]
+    assert api.created == []
     assert len(api.commits) == 1
     ops = api.commits[0]["operations"]
     paths = {op.path_in_repo for op in ops}
@@ -163,3 +178,12 @@ def test_publish_run_commits_all_run_files_and_checkpoint_atomically(tmp_path: P
     assert "README.md" in paths
     assert any(path.startswith("coverage/") for path in paths)
     assert any(path.startswith("data/observations/") for path in paths)
+
+
+def test_publish_run_creates_missing_dataset_without_private_visibility_argument(tmp_path: Path) -> None:
+    api = FakeHub(exists=False)
+
+    _publish_test_run(tmp_path, api)
+
+    assert api.created == [("modelomics/gh-ml", "dataset", True)]
+    assert len(api.commits) == 1

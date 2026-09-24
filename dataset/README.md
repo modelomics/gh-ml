@@ -57,7 +57,7 @@ The source is GitHub's public repository metadata and Search API. GitHub Search 
 
 ## Access
 
-The configured destination is [`modelomics/gh-ml`](https://huggingface.co/datasets/modelomics/gh-ml). The dataset has not yet been published; this card describes the intended repository contents.
+This dataset is maintained at [`modelomics/gh-ml`](https://huggingface.co/datasets/modelomics/gh-ml). The collection workflow appends new observations and coverage records to this repository over time. Publishing requires an `HF_TOKEN` with write permission to the dataset repository; the GitHub Actions workflow checks for the token and exits before collection if it is missing.
 
 Observation files are JSON Lines stored under date-partitioned Hub paths. To load them with 🤗 Datasets, first download the repository files locally, then pass the local file paths:
 

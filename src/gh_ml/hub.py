@@ -100,7 +100,17 @@ def publish_run(
             raise RuntimeError("install huggingface_hub to publish the dataset") from exc
         api = HfApi(token=token)
 
-    api.create_repo(repo_id, repo_type="dataset", exist_ok=True, private=False)
+    repo_info = getattr(api, "repo_info", None)
+    if callable(repo_info):
+        try:
+            repo_info(repo_id, repo_type="dataset")
+        except Exception as exc:
+            if not _is_missing(exc):
+                raise
+            api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
+    else:
+        # Lightweight injected API doubles predating repo_info remain supported.
+        api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
     today = datetime.now(UTC)
     observation_name = f"data/observations/{today:%Y/%m/%d}/{run_id}.jsonl"
     coverage_name = f"coverage/{run_id}.json"
