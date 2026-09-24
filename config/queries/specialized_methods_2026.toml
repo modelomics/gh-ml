@@ -1,0 +1,91 @@
+# Focused method and subfield phrases found missing in the query catalog audit.
+
+[[queries]]
+id = "specialized.data-centric-ai"
+q = '"data-centric AI" in:description,readme'
+domains = ["data-centric-ai", "machine-learning"]
+methods = ["data-quality", "machine-learning"]
+
+[[queries]]
+id = "specialized.dataset-distillation"
+q = '"dataset distillation" in:description,readme'
+domains = ["machine-learning"]
+methods = ["dataset-distillation", "data-efficiency"]
+
+[[queries]]
+id = "specialized.coreset-selection"
+q = '"coreset selection" in:description,readme'
+domains = ["machine-learning"]
+methods = ["coreset-selection", "data-selection"]
+
+[[queries]]
+id = "specialized.data-shapley"
+q = '"data Shapley" in:description,readme'
+domains = ["machine-learning"]
+methods = ["data-attribution", "shapley-values"]
+
+[[queries]]
+id = "specialized.machine-unlearning"
+q = '"machine unlearning" in:description,readme'
+domains = ["machine-learning"]
+methods = ["machine-unlearning", "privacy"]
+
+[[queries]]
+id = "specialized.mechanistic-interpretability"
+q = '"mechanistic interpretability" in:description,readme'
+domains = ["artificial-intelligence", "machine-learning"]
+methods = ["interpretability", "mechanistic-interpretability"]
+
+[[queries]]
+id = "specialized.curriculum-learning"
+q = '"curriculum learning" in:description,readme'
+domains = ["machine-learning"]
+methods = ["curriculum-learning", "training-strategy"]
+
+[[queries]]
+id = "specialized.test-time-adaptation"
+q = '"test-time adaptation" in:description,readme'
+domains = ["machine-learning"]
+methods = ["adaptation", "test-time-adaptation"]
+
+[[queries]]
+id = "specialized.spiking-neural-network"
+q = '"spiking neural network" in:description,readme'
+domains = ["computational-neuroscience", "machine-learning"]
+methods = ["neuromorphic-computing", "spiking-neural-network"]
+
+[[queries]]
+id = "specialized.event-camera-deep-learning"
+q = '"event camera" "deep learning" in:description,readme'
+domains = ["computer-vision", "robotics"]
+methods = ["deep-learning", "event-based-vision"]
+
+[[queries]]
+id = "specialized.computational-pathology-ml"
+q = '"computational pathology" "machine learning" in:description,readme'
+domains = ["computational-pathology", "medical-imaging"]
+methods = ["deep-learning", "machine-learning"]
+
+[[queries]]
+id = "specialized.pathology-foundation-model"
+q = '"pathology foundation model" "machine learning" in:description,readme'
+domains = ["computational-pathology", "medical-imaging"]
+methods = ["foundation-model", "machine-learning"]
+
+[[queries]]
+id = "specialized.medical-image-registration-deep-learning"
+q = '"medical image registration" "deep learning" in:description,readme'
+domains = ["medical-imaging"]
+methods = ["deep-learning", "image-registration"]
+
+[[queries]]
+id = "specialized.fmri-decoding-ml"
+q = '"fMRI decoding" "machine learning" in:description,readme'
+domains = ["neuroimaging", "neuroscience"]
+methods = ["decoding", "machine-learning"]
+
+[[queries]]
+id = "specialized.carbon-footprint-training"
+q = '"carbon footprint" "deep learning" training in:description,readme'
+domains = ["green-ai", "sustainable-computing"]
+methods = ["carbon-accounting", "training-efficiency"]

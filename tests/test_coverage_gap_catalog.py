@@ -72,7 +72,7 @@ def test_recall_aliases_are_bounded_and_included_in_catalog_budget() -> None:
 
     assert RECALL_ALIAS_FILE.is_file()
     assert len(aliases) == 8
-    assert len(all_queries) == 569  # 561 existing queries plus eight aliases.
+    assert len(all_queries) == 584  # 561 existing queries, eight aliases, and 15 specialized queries.
     assert {query.id for query in aliases} == {
         "recall26.long-tailed-recognition",
         "recall26.class-imbalance",

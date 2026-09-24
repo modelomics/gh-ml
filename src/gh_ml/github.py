@@ -7,6 +7,7 @@ import binascii
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -100,6 +101,24 @@ class GitHubClient:
     ) -> None:
         """Set an optional callback for completed Search API responses."""
         self._progress_callback = callback
+
+    def graphql(
+        self, query: str, variables: Mapping[str, Any] | None = None
+    ) -> tuple[Any, Any]:
+        """Send a GraphQL query with optional JSON variables.
+
+        Returns the decoded response payload and response headers.
+        """
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a nonempty string")
+        if variables is not None and not isinstance(variables, Mapping):
+            raise TypeError("variables must be a mapping or None")
+        if variables is not None:
+            try:
+                json.dumps(variables)
+            except (TypeError, ValueError):
+                raise ValueError("variables must contain JSON-serializable values") from None
+        return self._graphql_request(query, variables)
 
     def search_repositories(
         self, query: str, page: int = 1, per_page: int = 100
@@ -298,10 +317,15 @@ class GitHubClient:
                 item_errors[index] = "invalid GraphQL repository data"
         return RepositoryBatchResult(tuple(repositories), tuple(item_errors))
 
-    def _graphql_request(self, query: str) -> tuple[Any, Any]:
+    def _graphql_request(
+        self, query: str, variables: Mapping[str, Any] | None = None
+    ) -> tuple[Any, Any]:
+        payload = {"query": query}
+        if variables is not None:
+            payload["variables"] = variables
         request = Request(
             _API_ROOT + "/graphql",
-            data=json.dumps({"query": query}, separators=(",", ":")).encode("utf-8"),
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             headers={
                 "Accept": "application/vnd.github+json",
                 "Content-Type": "application/json",
@@ -512,6 +536,11 @@ def _repository_from_graphql(node: Any) -> dict[str, Any]:
         "archived": node.get("isArchived"),
         "fork": node.get("isFork"),
     }
+
+
+def repository_from_graphql(node: Any) -> dict[str, Any]:
+    """Normalize a GraphQL repository node to the client's REST-shaped form."""
+    return _repository_from_graphql(node)
 
 
 def _retry_delay(headers: Any, attempt: int) -> float:

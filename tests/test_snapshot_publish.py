@@ -136,7 +136,7 @@ def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
     assert hub.commits[0]["parent_commit"] == "rev-1"
     manifest = json.loads(hub.files["data/current/manifest.json"])
     assert manifest["version"] == 8
-    assert manifest["canonical_source_precedence"] == "search-over-queryless-census"
+    assert manifest["canonical_source_precedence"] == "search-over-queryless"
     assert manifest["readme_evidence_count"] == 0
     assert manifest["readme_evidence_files"] == []
     assert manifest["candidate_rule_version"] == publisher.CANDIDATE_RULE_VERSION
@@ -460,7 +460,7 @@ def test_version_seven_manifest_rebuilds_source_ranked_snapshot(tmp_path):
     assert len(hub.commits) == 2
     rebuilt = json.loads(hub.files[manifest_path])
     assert rebuilt["version"] == 8
-    assert rebuilt["canonical_source_precedence"] == "search-over-queryless-census"
+    assert rebuilt["canonical_source_precedence"] == "search-over-queryless"
 
 
 def test_same_inputs_with_old_selection_version_rebuilds(tmp_path):
@@ -646,7 +646,7 @@ def test_lost_commit_response_with_old_source_precedence_rebuilds(tmp_path):
         if calls == 1:
             manifest_path = "data/current/manifest.json"
             manifest = json.loads(hub.files[manifest_path])
-            manifest["canonical_source_precedence"] = "queryless-census-over-search"
+            manifest["canonical_source_precedence"] = "search-over-queryless-census"
             hub.files[manifest_path] = json.dumps(manifest).encode()
             hub.history[hub.revision][manifest_path] = hub.files[manifest_path]
             raise RuntimeError("response lost")
@@ -657,7 +657,7 @@ def test_lost_commit_response_with_old_source_precedence_rebuilds(tmp_path):
     assert result["already_current"] is False
     assert len(hub.commits) == 2
     rebuilt = json.loads(hub.files["data/current/manifest.json"])
-    assert rebuilt["canonical_source_precedence"] == "search-over-queryless-census"
+    assert rebuilt["canonical_source_precedence"] == "search-over-queryless"
 
 
 def test_lost_commit_response_requires_matching_remote_card(tmp_path):

@@ -256,8 +256,9 @@ def materialize_current_view(
     """Write one latest observation per GitHub id using bounded-memory SQLite.
 
     Search observations (``queryless`` absent or false) take precedence over
-    census observations (``queryless`` true) for the source snapshot. Within a
-    source class, the greatest timezone-aware ``observed_at`` instant wins;
+    all queryless observations (``queryless`` true), including census and topic
+    discovery rows. Within a source class, the greatest timezone-aware
+    ``observed_at`` instant wins;
     equal instants use the lexicographically greatest canonical JSON row as a
     stable tie-break, so results do not depend on source-file order.
     That row's fields, including its ``query_ids``, ``domains``, and ``methods``,
@@ -460,7 +461,7 @@ def materialize_current_view(
                     "version": CURRENT_VIEW_PROJECTION_VERSION,
                     "selection_version": SELECTION_VERSION,
                     "candidate_rule_version": CANDIDATE_RULE_VERSION,
-                    "selection": "Search observations (queryless absent or false) take precedence over census observations (queryless true); within each class choose maximum observed_at instant, then lexicographically greatest canonical JSON row",
+                    "selection": "Search observations (queryless absent or false) take precedence over all queryless observations (queryless true), including census and topic discovery; within each class choose maximum observed_at instant, then lexicographically greatest canonical JSON row",
                     "aggregation": "sorted label unions across all observations; methods normalized to canonical slugs",
                     "ordering": "ascending github_id",
                     "input_files": per_source,

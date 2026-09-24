@@ -160,6 +160,7 @@ def publish_snapshot(
                "outputs": {name: manifest["outputs"][name] for name in FILES},
                "card_sha256": validated["card_sha256"], **{k: manifest[k] for k in (
                    "source_dataset", "source_revision", "source_snapshot", "source_license", "derived_license",
+                   "source_attribution", "modification_notice", "input_file_count", "input_files",
                    "repository_count", "paper_link_count")}}
     encoded = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode()
 

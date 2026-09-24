@@ -107,6 +107,18 @@ def test_publishes_four_files_in_one_parent_pinned_commit_and_is_idempotent(tmp_
     assert [op.path_in_repo for op in hub.commits[0]["operations"]] == [
         "data/repositories.parquet", "data/paper_links.parquet", "data/manifest.json", "README.md"
     ]
+    uploaded_manifest = json.loads(hub.files["data/manifest.json"])
+    source_manifest = json.loads((snapshot / "manifest.json").read_text())
+    for field in ("source_attribution", "modification_notice", "input_file_count", "input_files"):
+        assert uploaded_manifest[field] == source_manifest[field]
+    assert uploaded_manifest["outputs"] == source_manifest["outputs"]
+    assert uploaded_manifest["card_sha256"] == first["card_sha256"]
     second = publish_snapshot(DEFAULT_REPO, "token", snapshot, api=hub, downloader=downloader)
     assert second["already_current"] is True
     assert len(hub.commits) == 1
+
+    # Provenance is part of the publication identity; a remote manifest missing it is stale.
+    hub.files["data/manifest.json"] = json.dumps({"format": "gh_ml_pwc_hf_publication"}).encode()
+    third = publish_snapshot(DEFAULT_REPO, "token", snapshot, api=hub, downloader=downloader)
+    assert third["already_current"] is False
+    assert len(hub.commits) == 2

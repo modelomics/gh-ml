@@ -35,6 +35,123 @@ def test_owner_profile_repository_is_excluded() -> None:
         assert result["selection_reason"] == "owner-profile-repository"
 
 
+def test_archived_same_name_technical_repositories_are_not_hard_excluded() -> None:
+    # Repository-owned fields from the archived 2026-09-24 observations.
+    rows = (
+        {
+            "name": "ChangeTitans/ChangeTitans",
+            "description": 'The official implementation of "ChangeTitans: Towards Remote Sensing Change Detection with Neural Memory"',
+            "topics": [],
+            "fork": False,
+        },
+        {
+            "name": "gnina/gnina",
+            "description": "A deep learning framework for molecular docking",
+            "topics": ["cheminformatics", "computational-chemistry", "convolutional-neural-networks", "drug-discovery", "molecular-modeling"],
+            "fork": False,
+        },
+        {
+            "name": "nilearn/nilearn",
+            "description": "Machine learning for NeuroImaging in Python",
+            "topics": ["brain-connectivity", "brain-imaging", "brain-mri", "decoding", "fmri", "machine-learning", "mvpa", "neuroimaging", "python"],
+            "fork": False,
+        },
+        {
+            "name": "pykeen/pykeen",
+            "description": "🤖 A Python library for learning and evaluating knowledge graph embeddings",
+            "topics": ["cuda", "deep-learning", "knowledge-base-completion", "knowledge-graph-embeddings", "knowledge-graphs", "link-prediction", "machine-learning", "pykeen", "python", "torch"],
+            "fork": False,
+        },
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "review", (row["name"], result)
+        assert result["selection_reason"] == "ml-relevance-without-clear-contribution", (row["name"], result)
+
+
+def test_same_name_official_novel_ml_can_be_included_but_library_stays_review() -> None:
+    official = assess_repository({
+        "name": "ChangeTitans/ChangeTitans",
+        "description": "Official implementation of our novel graph neural network method for remote sensing change detection, NeurIPS 2025.",
+    })
+    assert official["selection_status"] == "include"
+    assert official["selection_reason"] == "official-paper-method-implementation"
+
+    library = assess_repository({
+        "name": "gnina/gnina",
+        "description": "A deep learning framework for molecular docking",
+    })
+    assert library["selection_status"] == "review"
+    assert library["selection_reason"] == "ml-relevance-without-clear-contribution"
+
+
+def test_same_name_sparse_and_explicit_profiles_and_github_profile_stay_excluded() -> None:
+    rows = (
+        {"name": "lab/lab", "description": "Machine learning"},
+        {"name": "lab/lab", "description": "My profile and projects"},
+        {"name": "org/.github", "description": "Neural network research"},
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "exclude"
+        assert result["selection_reason"] == "owner-profile-repository"
+
+    fork = assess_repository({
+        "name": "gnina/gnina",
+        "description": "A deep learning framework for molecular docking",
+        "fork": True,
+    })
+    assert fork["selection_status"] == "exclude"
+    assert fork["selection_reason"] == "fork"
+
+
+def test_research_workshop_venues_and_presentation_generation_are_not_utility_excluded() -> None:
+    # Repository-owned fields from the archived 2026-09-24 current view.
+    rows = (
+        {
+            "name": "mv-lab/swin2sr",
+            "description": "[ECCV] Swin2SR: SwinV2 Transformer for Compressed Image Super-Resolution and Restoration.  Advances in Image Manipulation (AIM) workshop ECCV 2022. Try it out! over 3.3M runs https://replicate.com/mv-lab/swin2sr",
+            "topics": ["compression", "compression-artifact-reduction", "computer-vision", "deblocking", "deep-learning", "denoising", "eccv2022", "image-denoising", "image-processing", "image-restoration", "image-sr", "image-super-resolution", "jpeg", "low-level-vision", "ntire", "super-resolution", "swin2sr", "swinir", "transformer", "vision-transformer"],
+            "fork": False,
+        },
+        {
+            "name": "eurecom-asp/RawGAT-ST-antispoofing",
+            "description": "This repository includes the code to reproduce our paper \"End-to-End Spectro-Temporal Graph Attention Networks for Speaker Verification Anti-Spoofing and Speech Deepfake Detection\" (https://arxiv.org/abs/2107.12710) published in the ASVspoof 2021 workshop.",
+            "topics": [],
+            "fork": False,
+        },
+        {
+            "name": "johnyang101/reticular-sae",
+            "description": "Official repo of \"Towards Interpretable Protein Structure Prediction with Sparse Autoencoders\" published at ICLR 2025 GEM workshop.",
+            "topics": [],
+            "fork": False,
+        },
+        {
+            "name": "AIGeeksGroup/PresentAgent",
+            "description": "[EMNLP 2025 Demo] PresentAgent: Multimodal Agent for Presentation Video Generation",
+            "topics": [],
+            "fork": False,
+        },
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "review", (row["name"], result)
+        assert result["selection_reason"] != "course-or-utility-repository", (row["name"], result)
+
+
+def test_educational_workshops_and_lecture_slides_remain_excluded() -> None:
+    educational_workshop = assess_repository({
+        "name": "lab/ml-workshop",
+        "description": "A workshop about machine learning course materials.",
+    })
+    assert educational_workshop["selection_status"] == "exclude"
+    slides = assess_repository({
+        "name": "mkang315/CST-YOLO",
+        "description": "Lecture presentation slides explaining object detection and YOLO.",
+    })
+    assert slides["selection_status"] == "exclude"
+
+
 def test_coursework_and_awesome_lists_are_excluded() -> None:
     for row in (
         {"name": "student/CS760-project", "description": "Transformer homework"},
@@ -54,7 +171,7 @@ def test_method_and_substantive_contribution_are_required_for_include() -> None:
         "stargazers_count": 0,
     })
     assert result["selection_status"] == "include"
-    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v3"
+    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v4"
     assert result["selection_signals"] == sorted(result["selection_signals"])
 
 

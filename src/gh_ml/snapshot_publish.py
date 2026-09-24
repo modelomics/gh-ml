@@ -26,7 +26,7 @@ _MANIFEST = "data/current/manifest.json"
 _CARD = "README.md"
 _SOURCE_CARD = Path(__file__).resolve().parents[2] / "dataset" / "README.md"
 _SNAPSHOT_VERSION = 8
-_CANONICAL_SOURCE_PRECEDENCE = "search-over-queryless-census"
+_CANONICAL_SOURCE_PRECEDENCE = "search-over-queryless"
 
 
 def publish_current_view(

@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-SELECTION_VERSION = "ml-contribution-v3"
+SELECTION_VERSION = "ml-contribution-v4"
 
 _METHOD_PATTERNS = (
     r"\btransformers?\b", r"\bdiffusion(?: models?)?\b", r"\bflow matching\b",
@@ -74,13 +74,14 @@ _EXPLICIT_EXCLUDE = re.compile(
 )
 _COURSE_CUE = re.compile(
     r"\b(?:course|coursework|course work|course projects?|course materials?|class projects?|class materials?|education(?:al)?|"
-    r"coursera|specialization|training course|workshop|bootcamp|student project|lab assignments?|"
+    r"coursera|specialization|training course|bootcamp|student project|lab assignments?|"
     r"\d+[- ]?day)\b", re.I,
 )
+_WORKSHOP = re.compile(r"\bworkshops?\b", re.I)
 _UTILITY_CUE = re.compile(
     r"\b(?:codex skill|claude skills?|skills? trees?|agent skills?|agentic skills?|"
     r"skills for|workflows?|index(?:es|ing)?|"
-    r"catalog(?:ue)?|directory of|list of projects|lectures?|slides?|presentations?)\b", re.I,
+    r"catalog(?:ue)?|directory of|list of projects|lectures?|slides?)\b", re.I,
 )
 _SURVEY_CUE = re.compile(
     r"\b(?:surveys?|collecting (?:awesome )?papers|"
@@ -96,6 +97,17 @@ _REVIEW_ONLY_CUE = re.compile(
 _DATASET_CUE = re.compile(r"\bdatasets?\b", re.I)
 _BACKTESTING = re.compile(r"\b(?:backtest(?:ing)?|algorithmic trading|trading library)\b", re.I)
 _GENERIC_AI = re.compile(r"\b(?:ai|artificial intelligence|machine learning|deep learning|ml)\b", re.I)
+_EXPLICIT_PROFILE = re.compile(
+    r"\b(?:about me|about us|my profile|personal profile|profile page|"
+    r"personal website|personal homepage|github profile)\b", re.I,
+)
+_SAME_NAME_TECHNICAL = re.compile(
+    r"\b(?:change detection|neural memory|remote sensing|knowledge graph(?:s)?|"
+    r"neuroimaging|brain imaging|molecular docking|molecular modeling|"
+    r"drug discovery|protein folding|time.series forecasting|"
+    r"graph embeddings?|embeddings?|computer vision|natural language processing)\b",
+    re.I,
+)
 
 
 def _strings(value: Any) -> list[str]:
@@ -154,7 +166,8 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         return result("exclude", "fork")
 
     parts = name.strip().split("/")
-    profile_repository = (len(parts) >= 2 and parts[-1].casefold() in {parts[-2].casefold(), ".github"}) or (len(parts) == 1 and parts[0].casefold() == ".github")
+    same_name_repository = len(parts) >= 2 and parts[-1].casefold() == parts[-2].casefold()
+    github_profile_repository = (len(parts) >= 2 and parts[-1].casefold() == ".github") or (len(parts) == 1 and parts[0].casefold() == ".github")
 
     fields = [
         " ".join(_strings(row.get(key)))
@@ -212,7 +225,9 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         _TUTORIAL.search(" ".join(_strings(row.get("name")) + _strings(row.get("full_name")) + _strings(row.get("topics"))))
         or _TUTORIAL.search(description)
     )
-    course_cue = bool(_COURSE_CUE.search(text))
+    course_cue = bool(_COURSE_CUE.search(text)) or bool(
+        _WORKSHOP.search(text) and not (_PAPER.search(text) or _VENUE_YEAR.search(text) or method)
+    )
     utility_cue = bool(_UTILITY_CUE.search(text))
     survey_cue = bool(_SURVEY_CUE.search(text))
     if _EXPLICIT_EXCLUDE.search(text):
@@ -253,7 +268,13 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         signals.add("non-ml-utility-cue")
         return result("exclude", "non-ml-utility")
 
-    if profile_repository and not official_paper_code:
+    # A same-name repository is often a profile, but can also be the canonical
+    # technical project. Keep the hard exclusion for `.github`, explicit
+    # profile descriptions, and sparse same-name records; let substantive
+    # technical records continue through the ordinary conservative triage.
+    same_name_technical = bool(_SAME_NAME_TECHNICAL.search(text))
+    explicit_profile = bool(_EXPLICIT_PROFILE.search(description))
+    if github_profile_repository or (same_name_repository and explicit_profile) or (same_name_repository and not same_name_technical and not official_paper_code):
         signals.add("owner-profile-repository")
         return result("exclude", "owner-profile-repository")
 

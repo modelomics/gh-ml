@@ -8,7 +8,7 @@ from urllib.error import HTTPError
 
 import pytest
 
-from gh_ml.github import GitHubAPIError, GitHubClient, SearchProgress
+from gh_ml.github import GitHubAPIError, GitHubClient, SearchProgress, repository_from_graphql
 
 
 class FakeResponse:
@@ -377,3 +377,63 @@ def test_get_readme_rejects_oversize_response_and_invalid_names_without_request(
     with pytest.raises(GitHubAPIError, match="size limit"):
         client.get_readme("owner/repo")
     assert len(calls) == 1
+
+
+def test_public_graphql_sends_variables_as_json_and_returns_headers() -> None:
+    captured = []
+    headers = {"X-RateLimit-Remaining": "42"}
+
+    def opener(request, *, timeout):
+        captured.append(json.loads(request.data))
+        return FakeResponse({"data": {"search": {"repositoryCount": 1}}}, headers=headers)
+
+    payload, response_headers = GitHubClient(opener=opener).graphql(
+        "query Search($topic: String!) { search(query: $topic) { repositoryCount } }",
+        {"topic": "protein"},
+    )
+    assert captured == [{
+        "query": "query Search($topic: String!) { search(query: $topic) { repositoryCount } }",
+        "variables": {"topic": "protein"},
+    }]
+    assert payload["data"]["search"]["repositoryCount"] == 1
+    assert response_headers is headers
+
+
+def test_public_graphql_validates_inputs_and_retries_sanitized_errors() -> None:
+    token = "ghp-public-graphql-secret"
+    secret = "private response text"
+    retry = HTTPError("https://api.github.com/graphql", 429, "slow down", {"Retry-After": "2"}, BytesIO(secret.encode()))
+    outcomes = [retry, FakeResponse({"data": {"ok": True}})]
+    sleeps: list[float] = []
+
+    def opener(request, *, timeout):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    client = GitHubClient(token=token, opener=opener, sleeper=sleeps.append)
+    with pytest.raises(ValueError):
+        client.graphql("   ")
+    with pytest.raises(TypeError):
+        client.graphql("query { ok }", [])
+    payload, _ = client.graphql("query { ok }", {"id": 1})
+    assert payload == {"data": {"ok": True}}
+    assert sleeps == [2.0]
+    with pytest.raises(GitHubAPIError) as error:
+        GitHubClient(
+            token=token,
+            opener=lambda request, *, timeout: (_ for _ in ()).throw(
+                HTTPError("https://api.github.com/graphql", 401, "Unauthorized", {}, BytesIO(secret.encode()))
+            ),
+        ).graphql("query { ok }")
+    assert token not in str(error.value)
+    assert secret not in str(error.value)
+
+
+def test_public_repository_from_graphql_normalizes_node() -> None:
+    repository = repository_from_graphql(_graphql_repo(17))
+    assert repository["id"] == 17
+    assert repository["full_name"] == "owner/repo-17"
+    assert repository["language"] == "Python"
+    assert repository["topics"] == ["machine-learning"]

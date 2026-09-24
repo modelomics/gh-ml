@@ -120,6 +120,40 @@ def test_census_only_observations_are_retained(tmp_path):
     assert _read(tmp_path / "view.jsonl")[0]["name"] == "census-row"
 
 
+def test_search_beats_topic_and_census_and_topic_only_projects_with_extras(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(107, "2020-01-01T00:00:00Z", name="search-row", queryless=False),
+    ])
+    topic = _write(tmp_path / "topic.jsonl", [
+        _row(107, "2027-01-01T00:00:00Z", name="topic-row", queryless=True,
+             discovery_source="topic", topic_names=["diffusion-models"]),
+        _row(108, "2027-01-01T00:00:00Z", name="topic-only", queryless=True,
+             discovery_source="topic", topic_names=["protein-design"]),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(107, "2028-01-01T00:00:00Z", name="census-row", queryless=True),
+    ])
+    output = tmp_path / "view.jsonl"
+
+    materialize_current_view([topic, census, search], output)
+
+    rows = _read(output)
+    assert [row["name"] for row in rows] == ["search-row", "topic-only"]
+    assert rows[1]["discovery_source"] == "topic"
+    assert rows[1]["topic_names"] == ["protein-design"]
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError:
+        return
+    projected = tmp_path / "view.parquet"
+    current_view.export_current_view_parquet(output, projected)
+    table = parquet.read_table(projected).to_pylist()
+    assert json.loads(table[1]["extra_json"]) == {
+        "discovery_source": "topic", "queryless": True,
+        "topic_names": ["protein-design"],
+    }
+
+
 @pytest.mark.parametrize("queryless", [0, 1, "false", "true"])
 def test_invalid_queryless_is_rejected(tmp_path, queryless):
     source = _write(tmp_path / "bad.jsonl", [

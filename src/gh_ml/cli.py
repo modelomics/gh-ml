@@ -210,6 +210,14 @@ def _parser() -> argparse.ArgumentParser:
     census_daily.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     census_daily.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
     census_daily.add_argument("--no-publish", action="store_true", help="collect locally without downloading or publishing Hub state")
+    topic_daily = subparsers.add_parser("topic-breadth-daily", help="collect and publish a bounded daily GitHub topic breadth run")
+    topic_daily.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
+    topic_daily.add_argument("--work-dir", type=Path, required=True, help="directory for isolated topic breadth run files")
+    topic_daily.add_argument("--max-pages", type=int, default=60, help="maximum GitHub pages to collect (default: 30 topic heads plus 30 deeper pages; capped at 100)")
+    topic_daily.add_argument("--topics-config", type=Path, help="optional TOML topic catalog (default: bundled catalog)")
+    topic_daily.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    topic_daily.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
+    topic_daily.add_argument("--no-publish", action="store_true", help="collect locally without downloading or publishing Hub state")
     snapshot = subparsers.add_parser(
         "publish-current-view",
         help="publish a current-view Parquet snapshot derived from the Hub observation history",
@@ -399,6 +407,137 @@ def _census_daily(args: argparse.Namespace, *, api: Any = None, downloader: Any 
     elif not args.no_publish:
         print("No new census pages collected; skipping Hub publication.")
     print(f"Census daily {run_id}: {len(observations)} candidate repositories across {len(new_coverage_paths)} new pages")
+    print(f"Coverage: {coverage_path}")
+    return 0
+
+
+def _topic_breadth_daily(args: argparse.Namespace, *, api: Any = None, downloader: Any = None,
+                         token_provider: Any = None, client_factory: Any = None,
+                         collector: Any = None) -> int:
+    """Collect a bounded topic sweep from pinned Hub state and optionally publish it."""
+    if args.max_pages < 1:
+        raise ValueError("--max-pages must be at least 1")
+    max_pages = min(args.max_pages, 100)
+    github_token = _github_token(args.github_token_env)
+    if not github_token:
+        raise ValueError(f"GitHub token missing from {args.github_token_env} or gh CLI login")
+    initial_hf_token = None if args.no_publish else _hf_token(args.hf_token_env)
+    if not args.no_publish and not initial_hf_token:
+        raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+
+    base_revision = None
+    if not args.no_publish:
+        if api is None:
+            from huggingface_hub import HfApi
+            api = HfApi(token=initial_hf_token)
+        if downloader is None:
+            from huggingface_hub import hf_hub_download
+            downloader = hf_hub_download
+        try:
+            info = api.repo_info(args.repo, repo_type="dataset", token=initial_hf_token)
+        except TypeError:
+            info = api.repo_info(args.repo, repo_type="dataset")
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face dataset lookup failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        except Exception:
+            raise ValueError("Hugging Face dataset lookup failed") from None
+        base_revision = getattr(info, "sha", None)
+        if not isinstance(base_revision, str) or not base_revision:
+            raise ValueError("could not pin Hugging Face dataset revision")
+
+    from .topic_breadth_state import hydrate_topic_state, serialize_topic_state
+    from .topic_catalog import load_topics
+    if collector is None:
+        from .topic_breadth import collect_topic_breadth
+        collector = collect_topic_breadth
+
+    topics = load_topics(args.topics_config)
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    run_id = _run_id(_utc_now())
+    run_dir = args.work_dir / run_id
+    run_dir.mkdir()
+    if not args.no_publish:
+        try:
+            remote_state = downloader(repo_id=args.repo, filename="state/topic-breadth.json", repo_type="dataset",
+                                      revision=base_revision, token=initial_hf_token,
+                                      cache_dir=str(args.work_dir / "hf-cache"))
+            before_state_bytes = Path(remote_state).read_bytes()
+        except Exception as exc:
+            if (getattr(getattr(exc, "response", None), "status_code", None) == 404
+                    or type(exc).__name__ in {"EntryNotFoundError", "RemoteEntryNotFoundError"}):
+                before_state_bytes = serialize_topic_state(run_dir)
+            elif isinstance(exc, HfHubHTTPError):
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
+                raise ValueError(f"Hugging Face topic state download failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+            else:
+                raise ValueError("Hugging Face topic state download failed") from None
+        else:
+            hydrate_topic_state(before_state_bytes, run_dir)
+    else:
+        before_state_bytes = serialize_topic_state(run_dir)
+
+    client = (client_factory or GitHubClient)(token=github_token)
+    result = collector(run_dir, topics=topics, client=client, max_pages=max_pages)
+    observation_paths = [Path(path) for path in result.get("observation_paths", [])]
+    coverage_paths = [Path(path) for path in result.get("coverage_paths", [])]
+    observations: dict[int, dict[str, Any]] = {}
+    for path in observation_paths:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            repo_id = row.get("github_id")
+            if isinstance(repo_id, int) and not isinstance(repo_id, bool):
+                previous = observations.get(repo_id)
+                if previous is None:
+                    observations[repo_id] = row
+                else:
+                    names = set(previous.get("topic_names", [])) | set(row.get("topic_names", []))
+                    observations[repo_id] = {**previous, **row, "topic_names": sorted(names)}
+    observations_path = run_dir / "observations.jsonl"
+    observations_path.write_text("".join(json.dumps(observations[key], sort_keys=True) + "\n" for key in sorted(observations)), encoding="utf-8")
+    coverage_rows = []
+    for path in coverage_paths:
+        value = json.loads(path.read_text(encoding="utf-8"))
+        coverage_rows.append(value)
+    coverage_path = run_dir / "coverage.json"
+    aggregate = {
+        "run_id": run_id, "base_revision": base_revision,
+        "pages_fetched": result.get("pages_fetched", 0),
+        "observations_written": len(observations),
+        "rate_limit_remaining": result.get("rate_limit_remaining"),
+        "rate_limit_remaining_by_page": [row.get("rate_limit_remaining") for row in coverage_rows],
+        "coverage": coverage_rows,
+        "coverage_paths": [str(path) for path in coverage_paths],
+        "source_notes": ["GitHub GraphQL topic repository connections; pages correspond to the configured topic catalog.",
+                         *[row["source_notes"] for row in coverage_rows if row.get("source_notes") is not None]],
+    }
+    _write_json(coverage_path, aggregate)
+    state_bytes = serialize_topic_state(run_dir)
+    has_pages = bool(result.get("pages_fetched", 0))
+    has_delta = has_pages or state_bytes != before_state_bytes
+    if not args.no_publish and has_delta:
+        fresh_token = (token_provider or (lambda: _hf_token(args.hf_token_env)))()
+        if not fresh_token:
+            raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+        from .topic_publish import publish_topic_run
+        try:
+            url = publish_topic_run(args.repo, fresh_token, base_revision=base_revision, run_id=run_id,
+                                    observations_path=observations_path, coverage_path=coverage_path,
+                                    state_bytes=state_bytes, api=api, downloader=downloader)
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face topic publication failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        except Exception:
+            raise ValueError("Hugging Face topic publication failed") from None
+        print(f"Published {len(observations)} topic breadth observations to {url}")
+    elif not args.no_publish:
+        print("No topic pages or state changes; skipping Hub publication.")
+    print(f"Topic breadth {run_id}: {len(observations)} repositories across {result.get('pages_fetched', 0)} pages")
     print(f"Coverage: {coverage_path}")
     return 0
 
@@ -906,6 +1045,8 @@ def main(argv: list[str] | None = None) -> int:
             return _census(args)
         if args.command == "census-daily":
             return _census_daily(args)
+        if args.command == "topic-breadth-daily":
+            return _topic_breadth_daily(args)
         if args.command == "publish-current-view":
             return _publish_current_view(args)
         if args.command == "readme-enrich":
