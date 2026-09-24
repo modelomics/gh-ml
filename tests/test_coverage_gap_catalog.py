@@ -8,6 +8,7 @@ from gh_ml.query_catalog import load_queries
 ROOT = Path(__file__).parents[1]
 CATALOG = ROOT / "config" / "queries"
 GAP_FILE = CATALOG / "coverage_gaps_2026.toml"
+RECALL_ALIAS_FILE = CATALOG / "recall_aliases_2026.toml"
 
 
 def test_gap_queries_expand_audited_low_incidence_areas() -> None:
@@ -63,3 +64,25 @@ def test_gap_catalog_file_is_included_by_standard_catalog_loader() -> None:
     loaded = load_queries(CATALOG)
     assert any(query.id == "gap2026.neuroimaging-fmri" for query in loaded)
     assert any(query.id == "gap2026.archaeology-ml" for query in loaded)
+
+
+def test_recall_aliases_are_bounded_and_included_in_catalog_budget() -> None:
+    all_queries = load_queries(CATALOG)
+    aliases = [query for query in all_queries if query.id.startswith("recall26.")]
+
+    assert RECALL_ALIAS_FILE.is_file()
+    assert len(aliases) == 8
+    assert len(all_queries) == 569  # 561 existing queries plus eight aliases.
+    assert {query.id for query in aliases} == {
+        "recall26.long-tailed-recognition",
+        "recall26.class-imbalance",
+        "recall26.image-denoising",
+        "recall26.image-dehazing",
+        "recall26.low-light-enhancement",
+        "recall26.visual-grounding",
+        "recall26.sign-language",
+        "recall26.audio-language-model",
+    }
+    assert all(query.q.endswith("in:description,readme") for query in aliases)
+    assert all(len(query.domains) >= 2 and query.methods for query in aliases)
+    assert all("fork:true" not in query.q.casefold() for query in aliases)
