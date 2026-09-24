@@ -54,7 +54,7 @@ def test_method_and_substantive_contribution_are_required_for_include() -> None:
         "stargazers_count": 0,
     })
     assert result["selection_status"] == "include"
-    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v2"
+    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v3"
     assert result["selection_signals"] == sorted(result["selection_signals"])
 
 
@@ -461,3 +461,93 @@ def test_dataset_topic_does_not_block_original_model_implementation() -> None:
         "topics": ["datasets", "transformer"],
     })
     assert result["selection_status"] == "include"
+
+
+def test_readme_evidence_promotes_sparse_draggan_and_gpt2_metadata() -> None:
+    evidence = ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    for name in ("lab/DragGAN", "lab/gpt-2"):
+        result = assess_repository({
+            "name": name, "description": "Research implementation.",
+            "readme_status": "ok", "readme_signals": evidence,
+        })
+        assert result["selection_status"] == "include", (name, result)
+        assert result["selection_reason"] == "readme-supported-paper-method-implementation"
+        assert set(evidence) <= set(result["selection_signals"])
+
+
+def test_readme_promotion_requires_active_status_and_related_signals() -> None:
+    qualifying = ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    base = {"name": "lab/project", "description": "A useful machine learning project."}
+    assert assess_repository({**base, "readme_status": "missing", "readme_signals": qualifying})["selection_status"] == "review"
+    unrelated = ["ml-method-context", "method-contribution", "paper-reference"]
+    result = assess_repository({**base, "readme_status": "ok", "readme_signals": unrelated})
+    assert result["selection_status"] == "review"
+    assert "paper-reference" in result["selection_signals"]
+
+
+def test_readme_negative_cues_and_zipline_prevent_promotion() -> None:
+    positives = ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    for negative in ("course-cue", "reproduction-cue", "dataset-only-cue"):
+        result = assess_repository({
+            "name": "lab/project", "description": "A machine learning project.",
+            "readme_status": "unchanged", "readme_signals": [*positives, negative],
+        })
+        assert result["selection_status"] == "review", (negative, result)
+    zipline = assess_repository({
+        "name": "quantopian/zipline",
+        "description": "Zipline, a Pythonic Algorithmic Trading Library",
+        "topics": ["algorithmic-trading", "python", "quant", "zipline"],
+        "fork": False, "readme_status": "ok", "readme_signals": positives,
+    })
+    assert zipline["selection_status"] == "exclude"
+    assert zipline["selection_reason"] == "non-ml-utility"
+
+
+def test_metadata_readme_synergy_promotes_official_paper_implementations() -> None:
+    cases = (
+        (
+            {
+                "name": "XingangPan/DragGAN",
+                "description": "Official Code for DragGAN (SIGGRAPH 2023)",
+                "topics": ["artificial-intelligence", "generative-adversarial-network", "generative-models"],
+            },
+            ["paper-reference", "ml-method-context"],
+        ),
+        (
+            {
+                "name": "openai/gpt-2",
+                "description": 'Code for the paper "Language Models are Unsupervised Multitask Learners"',
+                "topics": ["paper"],
+            },
+            ["paper-reference", "ml-method-context", "paper-code-relationship"],
+        ),
+        (
+            {"name": "guoyww/AnimateDiff", "description": "Official implementation of AnimateDiff."},
+            ["paper-reference", "ml-method-context", "method-contribution"],
+        ),
+    )
+    for metadata, evidence in cases:
+        result = assess_repository({
+            **metadata, "readme_status": "ok", "readme_signals": evidence,
+        })
+        assert result["selection_status"] == "include", (metadata["name"], result)
+        assert result["selection_reason"] == "readme-supported-paper-method-implementation"
+
+
+def test_metadata_readme_synergy_rejects_generic_apps_and_unrelated_mentions() -> None:
+    rows = (
+        {
+            "name": "lab/official-llm-cli",
+            "description": "Official implementation of a command line application for LLM users.",
+            "readme_signals": ["paper-reference", "ml-method-context"],
+        },
+        {
+            "name": "lab/gpt-dashboard",
+            "description": "A dashboard with a citation to a transformer paper.",
+            "topics": ["transformer"],
+            "readme_signals": ["paper-reference", "ml-method-context"],
+        },
+    )
+    for row in rows:
+        result = assess_repository({**row, "readme_status": "ok"})
+        assert result["selection_status"] == "review", (row["name"], result)

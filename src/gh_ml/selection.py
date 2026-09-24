@@ -11,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-SELECTION_VERSION = "ml-contribution-v2"
+SELECTION_VERSION = "ml-contribution-v3"
 
 _METHOD_PATTERNS = (
     r"\btransformers?\b", r"\bdiffusion(?: models?)?\b", r"\bflow matching\b",
@@ -135,6 +135,11 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
     """Return a stable include/review/exclude assessment for a repository row."""
     name, text = _normalized_text(row)
     signals: set[str] = set()
+    readme_signals = set(_strings(row.get("readme_signals")))
+    readme_active = row.get("readme_status") in {"ok", "unchanged"}
+    if readme_active:
+        # Keep the extractor's bounded enum values visible in the assessment.
+        signals.update(readme_signals)
 
     def result(status: str, reason: str) -> dict[str, Any]:
         return {
@@ -197,7 +202,7 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
     research_name_topics = " ".join(_strings(row.get("name")) + _strings(row.get("full_name")) + _strings(row.get("topics")))
     official_paper_code = official_paper_description or (any(
         (claim := _OFFICIAL_PAPER.search(sentence))
-        and (paper := (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence)))
+        and (paper := (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence) or re.search(r"\bsiggraph\s*20\d{2}\b", sentence, re.I)))
         and (code := _CODE.search(sentence))
         and max(claim.start(), paper.start(), code.start()) - min(claim.start(), paper.start(), code.start()) <= 180
         for sentence in description_sentences
@@ -263,6 +268,56 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         return result("review", "overview-reproduction-or-dataset")
     if strong_contribution:
         return result("include", "official-paper-method-implementation" if official_paper_code else "specific-method-with-novelty-claim")
+    negative_readme = {
+        "course-cue", "reproduction-cue", "survey-cue", "dataset-only-cue",
+    }
+    readme_ml = "ml-method-context" in readme_signals
+    readme_relation = bool({"paper-code-relationship", "official-implementation-claim"} & readme_signals)
+    readme_paper = "paper-reference" in readme_signals
+    readme_contribution = "method-contribution" in readme_signals
+    # A README alone is not enough: it must be paired with a repository-owned
+    # code-for-paper claim. Keep this relationship local to one metadata
+    # sentence so an unrelated citation cannot lend credibility to an app.
+    code_claim = re.compile(
+        r"\b(?:official\s+(?:(?:source\s+)?code|implementations?)|"
+        r"code\s+for\s+(?:the\s+)?paper)\b", re.I,
+    )
+    metadata_code_paper = any(
+        (claim := code_claim.search(sentence))
+        and (paper := (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence) or re.search(r"\bsiggraph\s*20\d{2}\b", sentence, re.I)))
+        and abs(claim.start() - paper.start()) <= 180
+        for field in fields
+        for sentence in re.split(r"(?<!\d)\.(?!\d)|[!?;\n]+", field.casefold().replace("-", " ").replace("_", " "))
+    )
+    topic_text = " ".join(_strings(row.get("topics"))).replace("-", " ").replace("_", " ")
+    metadata_method_topic = bool(_METHOD.search(topic_text)) or bool(
+        re.search(r"\b(?:gans?|generative adversarial networks?)\b", topic_text, re.I)
+    )
+    metadata_official_implementation = bool(re.search(
+        r"\bofficial\s+(?:(?:source\s+)?code|implementations?)\b",
+        " ".join(fields), re.I,
+    ))
+    readme_supports_metadata_paper = (
+        readme_active and readme_ml and readme_paper
+        and not (negative_readme & readme_signals)
+        and (
+            # DragGAN-like rows tie official code to a named venue and expose
+            # the method family in repository topics, while the README carries
+            # paper and ML context without proposal wording.
+            (metadata_code_paper and metadata_method_topic)
+            # GPT-2-like code-for-paper rows have an explicit README relation.
+            or (metadata_code_paper and readme_relation)
+            # Some official implementations document the method in a separate
+            # README paragraph; require a contribution signal as extra support.
+            or (metadata_official_implementation and readme_contribution)
+        )
+    )
+    readme_supports_standalone_method = (
+        readme_active and readme_ml and readme_contribution and readme_relation
+        and not (negative_readme & readme_signals)
+    )
+    if readme_supports_metadata_paper or readme_supports_standalone_method:
+        return result("include", "readme-supported-paper-method-implementation")
     if method or ml_context or _GENERIC_AI.search(text):
         return result("review", "ml-relevance-without-clear-contribution")
     return result("review", "insufficient-repository-evidence")

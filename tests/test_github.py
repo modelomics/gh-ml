@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import time
 from io import BytesIO
@@ -24,8 +25,8 @@ class FakeResponse:
     def __exit__(self, *_: object) -> None:
         return None
 
-    def read(self) -> bytes:
-        return self._body
+    def read(self, size: int = -1) -> bytes:
+        return self._body if size < 0 else self._body[:size]
 
 
 def http_error(status: int, headers: dict[str, str] | None = None) -> HTTPError:
@@ -294,3 +295,85 @@ def test_graphql_http_error_does_not_expose_token_or_body() -> None:
     assert token not in str(error.value)
     assert body_secret not in str(error.value)
     assert token not in repr(error.value)
+
+
+def test_get_readme_decodes_base64_and_sends_conditional_json_request() -> None:
+    captured = []
+    content = "# Model\nA README with λ.\n".encode()
+    payload = {
+        "type": "file", "encoding": "base64", "size": len(content),
+        "content": base64.b64encode(content).decode(), "sha": "abc123",
+    }
+
+    def opener(request, *, timeout):
+        captured.append(request)
+        return FakeResponse(payload, headers={"ETag": '"new-etag"', "X-RateLimit-Remaining": "42"})
+
+    result = GitHubClient(token="secret", opener=opener).get_readme("owner/repo", '"old-etag"')
+    assert result.status == 200
+    assert result.etag == '"new-etag"'
+    assert result.blob_sha == "abc123"
+    assert result.text == content.decode()
+    assert result.rate_remaining == 42
+    assert captured[0].full_url == "https://api.github.com/repos/owner/repo/readme"
+    assert captured[0].get_header("Accept") == "application/vnd.github+json"
+    assert captured[0].get_header("If-none-match") == '"old-etag"'
+    assert captured[0].get_header("Authorization") == "Bearer secret"
+
+
+@pytest.mark.parametrize("status", [304, 404])
+def test_get_readme_returns_not_modified_and_not_found(status: int) -> None:
+    err = HTTPError("https://api.github.com/private", status, "details", {"ETag": '"cached"'}, BytesIO(b"secret"))
+    calls = []
+
+    def opener(request, *, timeout):
+        calls.append(request)
+        raise err
+
+    result = GitHubClient(opener=opener).get_readme("owner/repo", '"cached"')
+    assert result.status == status
+    assert result.etag == '"cached"'
+    assert result.blob_sha is None and result.text is None
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("status", [403, 429])
+def test_get_readme_rate_limit_is_sanitized_and_never_retried(status: int) -> None:
+    calls = []
+    token = "ghp-private-token"
+
+    def opener(request, *, timeout):
+        calls.append(request)
+        raise HTTPError(request.full_url, status, "secret reason", {}, BytesIO(b"private body"))
+
+    with pytest.raises(GitHubAPIError) as error:
+        GitHubClient(token=token, opener=opener, sleeper=lambda _: pytest.fail("must not sleep")).get_readme("owner/repo")
+    assert error.value.status == status
+    assert token not in str(error.value)
+    assert "private body" not in str(error.value)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("payload", [
+    {"type": "file", "encoding": "base64", "size": 1, "content": "%%%", "sha": "sha"},
+    {"type": "file", "encoding": "utf-8", "size": 0, "content": "", "sha": "sha"},
+    {"type": "file", "encoding": "base64", "size": 2, "content": "YQ==", "sha": "sha"},
+    {"type": "file", "encoding": "base64", "size": 1_000_001, "content": "", "sha": "sha"},
+])
+def test_get_readme_rejects_malformed_or_oversize_content(payload: object) -> None:
+    client = GitHubClient(opener=lambda request, *, timeout: FakeResponse(payload))
+    with pytest.raises(GitHubAPIError):
+        client.get_readme("owner/repo")
+
+
+def test_get_readme_rejects_oversize_response_and_invalid_names_without_request() -> None:
+    from gh_ml.github import _MAX_README_RESPONSE_BYTES
+
+    calls = []
+    client = GitHubClient(opener=lambda request, *, timeout: calls.append(request) or FakeResponse("x" * (_MAX_README_RESPONSE_BYTES + 1)))
+    with pytest.raises(ValueError):
+        client.get_readme("owner/repo/extra")
+    assert calls == []
+    with pytest.raises(GitHubAPIError, match="size limit"):
+        client.get_readme("owner/repo")
+    assert len(calls) == 1

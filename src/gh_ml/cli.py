@@ -19,7 +19,8 @@ from .classification import classify_repository
 from .discovery import discover, discover_sample
 from .historical_ledger import discover_historical_ledger
 from .github import GitHubAPIError, GitHubClient, SearchProgress
-from .hub import load_checkpoint, publish_run
+from .hub import load_checkpoint, publish_readme_run, publish_run
+from .readme_enrichment import enrich_readmes
 from .query_catalog import load_queries
 from .schema import observation_from_repository, write_jsonl
 from .pwc import DEFAULT_DIR as DEFAULT_PWC_DIR, import_pwc
@@ -208,6 +209,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     snapshot.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
     snapshot.add_argument("--work-dir", type=Path, required=True, help="temporary directory for downloaded history and generated snapshot")
+    readme = subparsers.add_parser("readme-enrich", help="collect bounded compact README evidence for current repositories")
+    readme.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
+    readme.add_argument("--max-requests", type=int, default=150, help="maximum GitHub README requests per invocation")
+    readme.add_argument("--work-dir", type=Path, default=DEFAULT_OUTPUT / "readme-enrich", help="temporary download and local output directory")
+    readme.add_argument("--no-publish", action="store_true", help="write local compact results without publishing to Hugging Face")
+    readme.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    readme.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
     return parser
 
 
@@ -271,6 +279,110 @@ def _publish_current_view(args: argparse.Namespace) -> int:
         raise ValueError(f"Hugging Face snapshot publication failed (HTTP {status_text})") from None
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
+
+
+def _readme_enrich(args: argparse.Namespace, *, api: Any = None, downloader: Any = None,
+                   token_provider: Any = None, client_factory: Any = None) -> int:
+    """Download a pinned observation history, enrich its current view, and optionally publish."""
+    if args.max_requests < 0:
+        raise ValueError("--max-requests must be nonnegative")
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    hf_token = None if args.no_publish else _hf_token(args.hf_token_env)
+    if not args.no_publish and not hf_token:
+        raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+    if api is None:
+        from huggingface_hub import HfApi
+        api = HfApi(token=hf_token)
+    if downloader is None:
+        from huggingface_hub import hf_hub_download
+        downloader = hf_hub_download
+    try:
+        info = api.repo_info(args.repo, repo_type="dataset", token=hf_token)
+    except TypeError:
+        info = api.repo_info(args.repo, repo_type="dataset")
+    except HfHubHTTPError as exc:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        raise ValueError(f"Hugging Face dataset lookup failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+    revision = getattr(info, "sha", None)
+    if not isinstance(revision, str) or not revision:
+        raise ValueError("could not pin Hugging Face dataset revision")
+    try:
+        paths = api.list_repo_files(args.repo, repo_type="dataset", revision=revision, token=hf_token)
+    except TypeError:
+        paths = api.list_repo_files(args.repo, repo_type="dataset", revision=revision)
+    except HfHubHTTPError as exc:
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        raise ValueError(f"Hugging Face file listing failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+    observation_files = sorted(path for path in paths if path.startswith("data/observations/") and path.endswith(".jsonl"))
+    if not observation_files:
+        raise ValueError("no observation JSONL files found in the pinned dataset revision")
+
+    downloaded: list[Path] = []
+    for index, filename in enumerate(observation_files):
+        try:
+            local = downloader(repo_id=args.repo, filename=filename, repo_type="dataset", revision=revision, token=hf_token, cache_dir=str(args.work_dir / "hf-cache"))
+        except TypeError:
+            local = downloader(repo_id=args.repo, filename=filename, repo_type="dataset", revision=revision, token=hf_token)
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face history download failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        source = Path(local)
+        target = args.work_dir / "history" / f"{index:06d}.jsonl"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if source.resolve() != target.resolve():
+            copyfile(source, target)
+        downloaded.append(target)
+    current_path = args.work_dir / "current-view.jsonl"
+    materialize_current_view(downloaded, current_path, manifest_path=args.work_dir / "current-view.manifest.json")
+    rows = [json.loads(line) for line in current_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    try:
+        raw_checkpoint = downloader(repo_id=args.repo, filename="state/readme-evidence.json", repo_type="dataset", revision=revision, token=hf_token, cache_dir=str(args.work_dir / "hf-cache"))
+        stored = json.loads(Path(raw_checkpoint).read_text(encoding="utf-8"))
+    except Exception as exc:
+        if type(exc).__name__ in {"EntryNotFoundError", "RepositoryNotFoundError", "RemoteEntryNotFoundError"} or getattr(getattr(exc, "response", None), "status_code", None) == 404:
+            stored = None
+        elif isinstance(exc, HfHubHTTPError):
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face README checkpoint download failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        else:
+            raise
+    checkpoint = stored.get("checkpoint", {}) if isinstance(stored, dict) else {}
+    if not isinstance(checkpoint, dict):
+        checkpoint = {}
+    now = _utc_now()
+    client = (client_factory or GitHubClient)(token=_github_token(args.github_token_env))
+    records, next_checkpoint, coverage = enrich_readmes(rows, checkpoint, client, now=now, max_requests=args.max_requests)
+    records_path = args.work_dir / "readme-evidence.jsonl"
+    coverage_path = args.work_dir / "coverage.json"
+    checkpoint_path = args.work_dir / "checkpoint.json"
+    write_jsonl(records, records_path)
+    coverage = {**coverage, "dataset_revision": revision, "current_view_count": len(rows)}
+    _write_json(coverage_path, coverage)
+    _write_json(checkpoint_path, next_checkpoint)
+    if coverage.get("rate_limited"):
+        print("GitHub rate limit reached; remaining README targets deferred.", file=sys.stderr)
+    if not args.no_publish and coverage.get("attempted", 0) > 0:
+        fresh_token = (token_provider or (lambda: _hf_token(args.hf_token_env)))()
+        if not fresh_token:
+            raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+        try:
+            url = publish_readme_run(args.repo, fresh_token, records=records, coverage=coverage,
+                                     checkpoint=next_checkpoint, run_date=now)
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face README publication failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        print(f"Published {len(records)} compact README evidence records to {url}")
+    elif not args.no_publish:
+        print("No README targets attempted; skipping Hub publication.")
+    print(f"README enrichment used {coverage.get('attempted', 0)} client attempts across {len(rows)} current repositories")
+    print(f"Local evidence: {records_path}")
+    return 2 if coverage.get("rate_limited") else 0
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -648,6 +760,8 @@ def main(argv: list[str] | None = None) -> int:
             return _census(args)
         if args.command == "publish-current-view":
             return _publish_current_view(args)
+        if args.command == "readme-enrich":
+            return _readme_enrich(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

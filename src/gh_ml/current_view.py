@@ -14,12 +14,22 @@ from .candidate import CANDIDATE_RULE_VERSION, assess_candidate
 from .evidence import classify_repository_text
 from .selection import SELECTION_VERSION, assess_repository
 from .schema import normalize_method_label
+from .readme_signals import README_EVIDENCE_VERSION
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _PARQUET_BATCH_ROWS = 2048
+_README_SIGNAL_ENUMS = {
+    "paper-reference", "ml-method-context", "course-cue", "reproduction-cue", "survey-cue",
+    "model-training-artifact", "paper-code-relationship", "method-contribution",
+    "official-implementation-claim", "dataset-only-cue",
+}
+_README_SECTION_ENUMS = {
+    "abstract", "overview", "method", "results", "installation", "usage", "citation",
+    "references", "course", "dataset", "other",
+}
 # Bump whenever current-view rows or their Parquet projection changes.
-CURRENT_VIEW_PROJECTION_VERSION = 4
+CURRENT_VIEW_PROJECTION_VERSION = 5
 
 
 def export_current_view_parquet(
@@ -111,6 +121,15 @@ def _export_observation_parquet(
         pa.field("observed_at", string),
         pa.field("pushed_at", string),
         pa.field("query_ids", strings),
+        pa.field("readme_blob_sha", string),
+        pa.field("readme_checked_at", string),
+        pa.field("readme_evidence_version", string),
+        pa.field("readme_etag", string),
+        pa.field("readme_sections", strings),
+        pa.field("readme_signals", strings),
+        pa.field("readme_status", string),
+        pa.field("readme_observed_at", string),
+        pa.field("readme_repository_name_at_fetch", string),
         pa.field("selection_reason", string),
         pa.field("selection_signals", strings),
         pa.field("selection_status", string),
@@ -232,6 +251,7 @@ def materialize_current_view(
     output_path: str | Path,
     *,
     manifest_path: str | Path | None = None,
+    readme_evidence_paths: Iterable[str | Path] = (),
 ) -> dict[str, Any]:
     """Write one latest observation per GitHub id using bounded-memory SQLite.
 
@@ -248,6 +268,7 @@ def materialize_current_view(
     output unless an explicit ``manifest_path`` is supplied.
     """
     sources = [Path(item) for item in observation_paths]
+    readme_sources = [Path(item) for item in readme_evidence_paths]
     output = Path(output_path)
     manifest = Path(manifest_path) if manifest_path is not None else output.with_suffix(output.suffix + ".manifest.json")
     resolved_output = output.resolve()
@@ -255,6 +276,8 @@ def materialize_current_view(
         raise ValueError("output_path must not also be an observation input")
     if manifest.resolve() in {resolved_output, *(source.resolve() for source in sources)}:
         raise ValueError("manifest_path must be distinct from output and observation inputs")
+    if manifest.resolve() in {source.resolve() for source in readme_sources} or resolved_output in {source.resolve() for source in readme_sources}:
+        raise ValueError("output and manifest paths must be distinct from README evidence inputs")
 
     per_source: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory(prefix="gh-ml-current-view-") as temp_dir:
@@ -270,6 +293,7 @@ def materialize_current_view(
                 "CREATE TABLE labels (github_id INTEGER NOT NULL, field TEXT NOT NULL, label TEXT NOT NULL, "
                 "PRIMARY KEY (github_id, field, label))"
             )
+            connection.execute("CREATE TABLE readme (github_id INTEGER PRIMARY KEY, stamp INTEGER NOT NULL, row_json TEXT NOT NULL)")
             total_rows = 0
             for source in sources:
                 source_rows = 0
@@ -324,6 +348,60 @@ def materialize_current_view(
                         source_rows += 1
                         total_rows += 1
                 per_source.append({"path": str(source.resolve()), "observations": source_rows})
+            per_readme_source: list[dict[str, Any]] = []
+            allowed = {"github_id", "repository_name_at_fetch", "observed_at", "readme_status", "readme_etag",
+                       "readme_blob_sha", "readme_evidence_version", "readme_signals", "readme_sections", "readme_checked_at"}
+            for source in readme_sources:
+                source_rows = 0
+                try:
+                    stream = source.open("r", encoding="utf-8")
+                except OSError as exc:
+                    raise ValueError(f"cannot open README evidence file {source}: {exc}") from exc
+                with stream:
+                    for line_number, line in enumerate(stream, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            evidence = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(f"{source}:{line_number}: invalid JSON: {exc.msg}") from exc
+                        if not isinstance(evidence, dict) or set(evidence) != allowed:
+                            raise ValueError(f"{source}:{line_number}: README evidence must contain exactly the compact schema fields")
+                        gid = evidence["github_id"]
+                        if isinstance(gid, bool) or not isinstance(gid, int) or not 0 < gid <= 9_223_372_036_854_775_807:
+                            raise ValueError(f"{source}:{line_number}: github_id must be a positive SQLite-safe integer")
+                        stamp = _timestamp_key(evidence.get("observed_at"), source=source, line_number=line_number)
+                        for field in ("repository_name_at_fetch", "readme_status", "readme_evidence_version"):
+                            if not isinstance(evidence[field], str) or not evidence[field].strip():
+                                raise ValueError(f"{source}:{line_number}: {field} must be a non-empty string")
+                        if evidence["readme_status"] not in {"ok", "unchanged", "missing"}:
+                            raise ValueError(f"{source}:{line_number}: invalid readme_status")
+                        if evidence["readme_evidence_version"] != README_EVIDENCE_VERSION:
+                            raise ValueError(f"{source}:{line_number}: unsupported readme_evidence_version")
+                        for field in ("readme_etag", "readme_blob_sha", "readme_checked_at"):
+                            if evidence[field] is not None and not isinstance(evidence[field], str):
+                                raise ValueError(f"{source}:{line_number}: {field} must be a string or null")
+                        for field in ("readme_signals", "readme_sections"):
+                            values = evidence[field]
+                            if not isinstance(values, list) or any(not isinstance(v, str) or not v.strip() for v in values):
+                                raise ValueError(f"{source}:{line_number}: {field} must be an array of non-empty strings")
+                        if (len(set(evidence["readme_signals"])) != len(evidence["readme_signals"])
+                                or not set(evidence["readme_signals"]) <= _README_SIGNAL_ENUMS):
+                            raise ValueError(f"{source}:{line_number}: readme_signals contains an unknown or duplicate enum")
+                        if (len(set(evidence["readme_sections"])) != len(evidence["readme_sections"])
+                                or not set(evidence["readme_sections"]) <= _README_SECTION_ENUMS):
+                            raise ValueError(f"{source}:{line_number}: readme_sections contains an unknown or duplicate enum")
+                        if evidence["readme_status"] == "missing" and evidence["readme_signals"]:
+                            raise ValueError(f"{source}:{line_number}: missing README evidence cannot contain active signals")
+                        if evidence["readme_checked_at"] is not None:
+                            _timestamp_key(evidence["readme_checked_at"], source=source, line_number=line_number)
+                        encoded = json.dumps(evidence, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+                        connection.execute("INSERT INTO readme VALUES (?, ?, ?) ON CONFLICT(github_id) DO UPDATE SET "
+                                           "stamp=CASE WHEN excluded.stamp > readme.stamp OR (excluded.stamp=readme.stamp AND excluded.row_json>readme.row_json) THEN excluded.stamp ELSE readme.stamp END, "
+                                           "row_json=CASE WHEN excluded.stamp > readme.stamp OR (excluded.stamp=readme.stamp AND excluded.row_json>readme.row_json) THEN excluded.row_json ELSE readme.row_json END",
+                                           (gid, stamp, encoded))
+                        source_rows += 1
+                per_readme_source.append({"path": str(source.resolve()), "readme_evidence_rows": source_rows})
             connection.commit()
 
             output.parent.mkdir(parents=True, exist_ok=True)
@@ -336,6 +414,18 @@ def materialize_current_view(
                     )
                     for github_id, row_json, first_observed_at, observation_count in chosen_rows:
                         row = json.loads(row_json)
+                        readme_record = connection.execute("SELECT row_json FROM readme WHERE github_id=?", (github_id,)).fetchone()
+                        if readme_record:
+                            evidence = json.loads(readme_record[0])
+                            row.update({"readme_observed_at": evidence["observed_at"],
+                                        "readme_repository_name_at_fetch": evidence["repository_name_at_fetch"],
+                                        **{key: value for key, value in evidence.items() if key.startswith("readme_")}})
+                            current_name = row.get("full_name") or row.get("name")
+                            fetched_name = evidence["repository_name_at_fetch"]
+                            if (isinstance(current_name, str) and current_name.strip()
+                                    and current_name.strip().casefold() != fetched_name.strip().casefold()):
+                                # Keep immutable evidence provenance but prevent old-name signals from influencing selection.
+                                row["readme_status"] = "stale_name"
                         row["observation_count"] = observation_count
                         row["first_observed_at"] = first_observed_at
                         all_labels = {source_field: [] for source_field in _AGGREGATED_LABEL_FIELDS}
@@ -362,6 +452,8 @@ def materialize_current_view(
                     "aggregation": "sorted label unions across all observations; methods normalized to canonical slugs",
                     "ordering": "ascending github_id",
                     "input_files": per_source,
+                    "readme_evidence_input_files": per_readme_source,
+                    "readme_evidence_count": sum(item["readme_evidence_rows"] for item in per_readme_source),
                     "observation_count": total_rows,
                     "current_view_count": row_count,
                     "output_file": str(output.resolve()),

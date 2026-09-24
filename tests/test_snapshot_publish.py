@@ -83,6 +83,22 @@ def _hub(tmp_path, observations=None):
     return hub, FakeDownloader(hub)
 
 
+def _readme_evidence(*, github_id=1, observed_at="2026-09-24T12:00:00Z", signal="paper-reference"):
+    row = {
+        "github_id": github_id,
+        "repository_name_at_fetch": "org/model",
+        "observed_at": observed_at,
+        "readme_status": "ok",
+        "readme_etag": None,
+        "readme_blob_sha": "blob-1",
+        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_signals": [signal],
+        "readme_sections": ["references"],
+        "readme_checked_at": observed_at,
+    }
+    return (json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode()
+
+
 @pytest.fixture(autouse=True)
 def fake_parquet(monkeypatch):
     def export(jsonl, destination, *, selection_status=None, candidate_eligible=None):
@@ -119,7 +135,9 @@ def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
     assert len(hub.commits) == 1
     assert hub.commits[0]["parent_commit"] == "rev-1"
     manifest = json.loads(hub.files["data/current/manifest.json"])
-    assert manifest["version"] == 6
+    assert manifest["version"] == 7
+    assert manifest["readme_evidence_count"] == 0
+    assert manifest["readme_evidence_files"] == []
     assert manifest["candidate_rule_version"] == publisher.CANDIDATE_RULE_VERSION
     assert manifest["candidate_count"] >= manifest["included_count"]
     assert manifest["candidates_parquet_row_count"] == manifest["candidate_count"]
@@ -281,6 +299,110 @@ def test_snapshot_commit_does_not_trigger_another_commit(tmp_path):
     assert len(hub.commits) == 1
 
 
+def test_readme_evidence_is_overlayed_and_committed_only_as_projection(tmp_path):
+    evidence_path = "data/readme-evidence/2026/09/24/run.jsonl"
+    hub, downloader = _hub(tmp_path, {
+        "data/observations/run.jsonl": b'{"github_id":1,"name":"org/model","description":"We propose a novel transformer architecture for efficient machine learning inference.","observed_at":"2026-09-24T12:00:00Z"}\n',
+        evidence_path: _readme_evidence(),
+    })
+
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    manifest = json.loads(hub.files["data/current/manifest.json"])
+    projected = json.loads(hub.files["data/current/repositories.parquet"].split(b"\0", 1)[1])
+    assert projected["readme_signals"] == ["paper-reference"]
+    assert result["source_revision"] == "rev-1"
+    assert manifest["readme_evidence_count"] == 1
+    assert manifest["readme_evidence_files"] == [{"path": evidence_path, "sha256": publisher._sha256(_readme_evidence())}]
+    assert all("readme-evidence" not in op.path_in_repo for op in hub.commits[0]["operations"])
+    assert all(revision == "rev-1" for _, revision in downloader.calls)
+
+
+def test_readme_evidence_snapshot_is_idempotent_and_changes_rebuild(tmp_path):
+    path = "data/readme-evidence/2026/09/24/run.jsonl"
+    hub, downloader = _hub(tmp_path, {
+        "data/observations/run.jsonl": b'{"github_id":1,"name":"org/model","description":"We propose a novel transformer architecture for efficient machine learning inference.","observed_at":"2026-09-24T12:00:00Z"}\n',
+        path: _readme_evidence(),
+    })
+    first = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    second = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    assert first["already_current"] is False
+    assert second["already_current"] is True
+    assert len(hub.commits) == 1
+
+    hub.files["data/readme-evidence/2026/09/25/new.jsonl"] = _readme_evidence(observed_at="2026-09-25T12:00:00Z", signal="survey-cue")
+    hub.revision = "rev-2"
+    hub.history[hub.revision] = dict(hub.files)
+    changed = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    assert changed["already_current"] is False
+    assert len(hub.commits) == 2
+    assert json.loads(hub.files["data/current/manifest.json"])["readme_evidence_count"] == 2
+
+
+def test_malformed_readme_evidence_stops_before_commit(tmp_path):
+    hub, downloader = _hub(tmp_path, {
+        "data/observations/run.jsonl": b'{"github_id":1,"observed_at":"2026-09-24T12:00:00Z"}\n',
+        "data/readme-evidence/2026/09/24/bad.jsonl": b'{"github_id":1}\n',
+    })
+    with pytest.raises(ValueError, match="compact schema fields"):
+        publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    assert not hub.commits
+
+
+def test_noncanonical_readme_evidence_is_rejected(tmp_path):
+    hub, downloader = _hub(tmp_path, {
+        "data/observations/run.jsonl": b'{"github_id":1,"observed_at":"2026-09-24T12:00:00Z"}\n',
+        "data/readme-evidence/2026/09/24/bad.jsonl": b'{ "github_id": 1 }\n',
+    })
+    with pytest.raises(ValueError, match="compact canonical JSON"):
+        publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    assert not hub.commits
+
+
+def test_head_advance_with_new_readme_evidence_rebuilds_from_new_revision(tmp_path):
+    hub, downloader = _hub(tmp_path)
+
+    def advance(fake):
+        fake.files["data/readme-evidence/2026/09/25/new.jsonl"] = _readme_evidence(
+            observed_at="2026-09-25T12:00:00Z", signal="survey-cue"
+        )
+        fake.revision = "rev-2"
+        fake.history[fake.revision] = dict(fake.files)
+
+    hub.on_list = advance
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub,
+                                  downloader=downloader, max_attempts=2)
+    assert result["source_revision"] == "rev-2"
+    assert result["already_current"] is False
+    assert any(path.endswith("new.jsonl") and revision == "rev-2" for path, revision in downloader.calls)
+
+
+def test_commit_conflict_with_new_readme_evidence_rebuilds(tmp_path):
+    hub, downloader = _hub(tmp_path)
+    original_create = hub.create_commit
+    conflicted = False
+
+    def conflicting_create(**kwargs):
+        nonlocal conflicted
+        if not conflicted:
+            conflicted = True
+            hub.files["data/readme-evidence/2026/09/25/new.jsonl"] = _readme_evidence(
+                observed_at="2026-09-25T12:00:00Z", signal="survey-cue"
+            )
+            hub.revision = "rev-2"
+            hub.history[hub.revision] = dict(hub.files)
+            raise RuntimeError("parent conflict")
+        return original_create(**kwargs)
+
+    hub.create_commit = conflicting_create
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub,
+                                  downloader=downloader, max_attempts=2)
+    manifest = json.loads(hub.files["data/current/manifest.json"])
+    assert result["source_revision"] == "rev-2"
+    assert manifest["readme_evidence_count"] == 1
+    assert len(hub.commits) == 1
+
+
 def test_card_change_publishes_card_with_snapshot_in_one_commit(tmp_path):
     hub, downloader = _hub(tmp_path)
     source_card = tmp_path / "README.md"
@@ -335,7 +457,7 @@ def test_version_five_manifest_rebuilds_candidate_snapshot(tmp_path):
 
     assert result["already_current"] is False
     assert len(hub.commits) == 2
-    assert json.loads(hub.files[manifest_path])["version"] == 6
+    assert json.loads(hub.files[manifest_path])["version"] == 7
 
 
 def test_same_inputs_with_old_selection_version_rebuilds(tmp_path):

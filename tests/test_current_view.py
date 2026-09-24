@@ -64,7 +64,7 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
     ]
     assert report["observation_count"] == 4
     assert report["current_view_count"] == 2
-    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 4
+    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 5
     manifest = json.loads((tmp_path / "view.jsonl.manifest.json").read_text())
     assert manifest["candidate_rule_version"] == "ml-candidate-v2"
     assert manifest["input_files"][1]["observations"] == 2
@@ -386,3 +386,84 @@ def test_candidate_parquet_columns_are_typed_and_filter_is_independent_of_select
     assert pa.types.is_string(table.schema.field("candidate_rule_version").type)
     assert pa.types.is_boolean(table.schema.field("candidate_eligible").type)
     assert pa.types.is_string(table.schema.field("candidate_reason").type)
+
+
+def test_readme_evidence_latest_per_id_and_typed_parquet_columns(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    obs = _write(tmp_path / "obs.jsonl", [_row(9, "2026-01-01T00:00:00Z", name="new/name")])
+
+    def ev(name, when, status, signal):
+        return {"github_id": 9, "repository_name_at_fetch": name, "observed_at": when,
+                "readme_status": status, "readme_etag": None, "readme_blob_sha": None,
+                "readme_evidence_version": "gh-ml-readme-evidence-v1", "readme_signals": signal,
+                "readme_sections": ["installation"] if signal else [], "readme_checked_at": when}
+
+    old = _write(tmp_path / "old.jsonl", [ev("old/name", "2026-01-02T00:00:00Z", "ok", ["ml-method-context"])])
+    new = _write(tmp_path / "new.jsonl", [ev("new/name", "2026-01-03T00:00:00Z", "unchanged", ["paper-reference"])])
+    output = tmp_path / "view.jsonl"
+    report = materialize_current_view([obs], output, readme_evidence_paths=[old, new])
+    row = _read(output)[0]
+    assert row["name"] == "new/name"
+    assert row["readme_repository_name_at_fetch"] == "new/name"
+    assert row["readme_status"] == "unchanged" and row["readme_signals"] == ["paper-reference"]
+    assert report["readme_evidence_count"] == 2
+    parquet_path = tmp_path / "view.parquet"
+    export_current_view_parquet(output, parquet_path)
+    table = pq.read_table(parquet_path)
+    assert pa.types.is_list(table.schema.field("readme_signals").type)
+    assert pa.types.is_list(table.schema.field("readme_sections").type)
+    assert pa.types.is_string(table.schema.field("readme_status").type)
+    assert table.to_pylist()[0]["readme_signals"] == ["paper-reference"]
+
+
+@pytest.mark.parametrize("evidence", [
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
+     "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "v1",
+     "readme_signals": [], "readme_sections": [], "readme_checked_at": None, "readme_text": "private body"},
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
+     "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v1",
+     "readme_signals": ["some freeform project text"], "readme_sections": [], "readme_checked_at": None},
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
+     "readme_status": "missing", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v1",
+     "readme_signals": ["ml-method-context"], "readme_sections": [], "readme_checked_at": None},
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "bad", "readme_status": "ok",
+     "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "v1",
+     "readme_signals": [], "readme_sections": [], "readme_checked_at": None},
+])
+def test_readme_evidence_rejects_raw_payload_or_bad_timestamp(tmp_path, evidence):
+    obs = _write(tmp_path / "obs.jsonl", [_row(1, "2026-01-01T00:00:00Z")])
+    source = _write(tmp_path / "readme.jsonl", [evidence])
+    with pytest.raises(ValueError):
+        materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[source])
+
+
+def test_missing_readme_status_cannot_promote_repository(tmp_path):
+    obs = _write(tmp_path / "obs.jsonl", [_row(1, "2026-01-01T00:00:00Z", name="small-project")])
+    missing = _write(tmp_path / "readme.jsonl", [{
+        "github_id": 1, "repository_name_at_fetch": "small-project", "observed_at": "2026-01-02T00:00:00Z",
+        "readme_status": "missing", "readme_etag": None, "readme_blob_sha": None,
+        "readme_evidence_version": "gh-ml-readme-evidence-v1", "readme_signals": [], "readme_sections": [],
+        "readme_checked_at": None,
+    }])
+    materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[missing])
+    row = _read(tmp_path / "view.jsonl")[0]
+    assert row["selection_status"] == "review"
+    assert row["selection_reason"] == "insufficient-repository-evidence"
+
+
+def test_rename_makes_previous_readme_evidence_inactive_by_name(tmp_path):
+    obs = _write(tmp_path / "obs.jsonl", [_row(22, "2026-01-01T00:00:00Z", name="owner/new-name")])
+    previous_name = _write(tmp_path / "readme.jsonl", [{
+        "github_id": 22, "repository_name_at_fetch": "Owner/old-name", "observed_at": "2026-01-02T00:00:00Z",
+        "readme_status": "ok", "readme_etag": "etag", "readme_blob_sha": "blob",
+        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_signals": ["ml-method-context", "method-contribution", "paper-code-relationship"],
+        "readme_sections": ["method"], "readme_checked_at": "2026-01-02T00:00:00Z",
+    }])
+    materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[previous_name])
+    row = _read(tmp_path / "view.jsonl")[0]
+    assert row["readme_repository_name_at_fetch"] == "Owner/old-name"
+    assert row["readme_signals"] == ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    assert row["readme_status"] == "stale_name"
+    assert row["selection_status"] != "include"

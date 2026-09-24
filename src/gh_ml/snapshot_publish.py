@@ -18,6 +18,7 @@ from .candidate import CANDIDATE_RULE_VERSION
 from .selection import SELECTION_VERSION
 
 _OBSERVATIONS = re.compile(r"^data/observations/.+\.jsonl$")
+_README_EVIDENCE = re.compile(r"^data/readme-evidence/\d{4}/\d{2}/\d{2}/[^/]+\.jsonl$")
 _PARQUET = "data/current/repositories.parquet"
 _OBSERVATIONS_PARQUET = "data/history/observations.parquet"
 _CANDIDATES_PARQUET = "data/candidates/repositories.parquet"
@@ -72,6 +73,7 @@ def publish_current_view(
             raise ValueError(f"dataset {repo_id!r} has no resolvable main revision")
         remote_paths = set(_list_repo_files(api, repo_id, revision, token=token))
         paths = sorted(path for path in remote_paths if _OBSERVATIONS.fullmatch(path))
+        readme_paths = sorted(path for path in remote_paths if _README_EVIDENCE.fullmatch(path))
         if not paths:
             raise ValueError(f"dataset {repo_id!r} at {revision} has no data/observations/**/*.jsonl inputs")
 
@@ -86,6 +88,19 @@ def publish_current_view(
             sources.append({"path": remote_path, "sha256": input_hash})
         fingerprint = _fingerprint(sources)
 
+        local_readme_inputs: list[Path] = []
+        readme_sources: list[dict[str, str]] = []
+        readme_evidence_count = 0
+        for index, remote_path in enumerate(readme_paths):
+            local = work / "readme-evidence" / f"{index:06d}.jsonl"
+            local.parent.mkdir(parents=True, exist_ok=True)
+            downloaded = _download(downloader, repo_id, remote_path, revision, token)
+            input_hash, row_count = _copy_validate_readme_jsonl(Path(downloaded), local, remote_path)
+            local_readme_inputs.append(local)
+            readme_sources.append({"path": remote_path, "sha256": input_hash})
+            readme_evidence_count += row_count
+        readme_fingerprint = _fingerprint(readme_sources)
+
         staged_card = work / "dataset-card.md"
         try:
             card_bytes = source_card.read_bytes()
@@ -98,10 +113,13 @@ def publish_current_view(
         remote_manifest = _read_remote_manifest(downloader, repo_id, revision, manifest_token)
         if (_PARQUET in remote_paths and _OBSERVATIONS_PARQUET in remote_paths
                 and _CANDIDATES_PARQUET in remote_paths and remote_manifest
-                and remote_manifest.get("version") == 6
+                and remote_manifest.get("version") == 7
                 and isinstance(remote_manifest.get("source_revision"), str)
                 and bool(remote_manifest.get("source_revision"))
                 and remote_manifest.get("input_fingerprint") == fingerprint
+                and remote_manifest.get("readme_evidence_fingerprint") == readme_fingerprint
+                and remote_manifest.get("readme_evidence_files") == readme_sources
+                and remote_manifest.get("readme_evidence_count") == readme_evidence_count
                 and remote_manifest.get("projection_version") == CURRENT_VIEW_PROJECTION_VERSION
                 and remote_manifest.get("selection_version") == SELECTION_VERSION
                 and remote_manifest.get("candidate_rule_version") == CANDIDATE_RULE_VERSION
@@ -118,7 +136,9 @@ def publish_current_view(
 
         jsonl_path = work / "repositories.jsonl"
         parquet_path = work / "repositories.parquet"
-        report = materialize_current_view(local_inputs, jsonl_path)
+        report = materialize_current_view(
+            local_inputs, jsonl_path, readme_evidence_paths=local_readme_inputs
+        )
         selection_counts, reason_counts = _selection_summary(jsonl_path)
         included_count = selection_counts["include"]
         parquet_report = export_current_view_parquet(
@@ -178,13 +198,16 @@ def publish_current_view(
         observations_parquet_hash = _sha256_file(observations_parquet_path)
         manifest = {
             "format": "gh_ml_current_view_snapshot",
-            "version": 6,
+            "version": 7,
             "projection_version": CURRENT_VIEW_PROJECTION_VERSION,
             "selection_version": SELECTION_VERSION,
             "candidate_rule_version": CANDIDATE_RULE_VERSION,
             "source_revision": revision,
             "input_fingerprint": fingerprint,
             "observation_files": sources,
+            "readme_evidence_fingerprint": readme_fingerprint,
+            "readme_evidence_files": readme_sources,
+            "readme_evidence_count": readme_evidence_count,
             "observation_count": observation_count,
             "current_view_count": int(report["current_view_count"]),
             "included_count": selection_counts["include"],
@@ -237,9 +260,12 @@ def publish_current_view(
                 latest_paths = set(_list_repo_files(api, repo_id, latest, token=commit_token))
                 if (_PARQUET in latest_paths and _OBSERVATIONS_PARQUET in latest_paths
                         and _CANDIDATES_PARQUET in latest_paths
-                        and confirmed and confirmed.get("version") == 6
+                        and confirmed and confirmed.get("version") == 7
                         and confirmed.get("source_revision") == revision
                         and confirmed.get("input_fingerprint") == fingerprint
+                        and confirmed.get("readme_evidence_fingerprint") == readme_fingerprint
+                        and confirmed.get("readme_evidence_files") == readme_sources
+                        and confirmed.get("readme_evidence_count") == readme_evidence_count
                         and confirmed.get("projection_version") == CURRENT_VIEW_PROJECTION_VERSION
                         and confirmed.get("selection_version") == SELECTION_VERSION
                         and confirmed.get("candidate_rule_version") == CANDIDATE_RULE_VERSION
@@ -398,6 +424,43 @@ def _copy_validate_jsonl(source: Path, destination: Path, remote_path: str) -> s
     except OSError as exc:
         raise ValueError(f"cannot read downloaded observation file {remote_path}: {exc}") from exc
     return digest.hexdigest()
+
+
+def _copy_validate_readme_jsonl(source: Path, destination: Path, remote_path: str) -> tuple[str, int]:
+    """Copy compact README evidence JSONL and return its hash and row count."""
+    digest = hashlib.sha256()
+    count = 0
+    try:
+        with source.open("rb") as incoming, destination.open("wb") as outgoing:
+            for number, raw_line in enumerate(incoming, 1):
+                digest.update(raw_line)
+                outgoing.write(raw_line)
+                if b"\r" in raw_line:
+                    raise ValueError(f"{remote_path}:{number}: JSONL must use LF line endings")
+                if not raw_line.endswith(b"\n"):
+                    raise ValueError(f"{remote_path}:{number}: JSONL must end with LF")
+                try:
+                    line = raw_line[:-1].decode("utf-8")
+                except UnicodeDecodeError as exc:
+                    raise ValueError(f"{remote_path}:{number}: JSONL must be UTF-8") from exc
+                if not line:
+                    raise ValueError(f"{remote_path}:{number}: blank lines are not allowed in strict JSONL")
+                try:
+                    row = json.loads(line)
+                    if not isinstance(row, dict):
+                        raise ValueError("README evidence must be a JSON object")
+                    canonical = json.dumps(
+                        row, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
+                    )
+                except (json.JSONDecodeError, ValueError) as exc:
+                    detail = exc.msg if isinstance(exc, json.JSONDecodeError) else str(exc)
+                    raise ValueError(f"{remote_path}:{number}: invalid compact README evidence JSON: {detail}") from exc
+                if canonical != line:
+                    raise ValueError(f"{remote_path}:{number}: README evidence JSONL must use compact canonical JSON")
+                count += 1
+    except OSError as exc:
+        raise ValueError(f"cannot read downloaded README evidence file {remote_path}: {exc}") from exc
+    return digest.hexdigest(), count
 
 
 def _fingerprint(sources: list[dict[str, str]]) -> str:

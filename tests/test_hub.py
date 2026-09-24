@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gh_ml.hub import publish_run
+from gh_ml.hub import load_checkpoint, publish_readme_run, publish_run
 
 
 class ConcurrentHub:
@@ -41,6 +41,10 @@ class ConcurrentHub:
 
 
 class RepositoryNotFoundError(Exception):
+    pass
+
+
+class EntryNotFoundError(Exception):
     pass
 
 
@@ -99,3 +103,143 @@ def test_create_dataset_keeps_library_default_visibility(tmp_path: Path) -> None
 
     assert api.created == [{"repo_id": "org/data", "repo_type": "dataset", "exist_ok": True}]
     assert "private" not in api.created[0]
+
+
+class ReadmeHub:
+    def __init__(self) -> None:
+        self.files: dict[str, bytes] = {}
+        self.calls: list[dict[str, object]] = []
+        self.fail_after_commit = False
+
+    def repo_info(self, repo_id: str, *, repo_type: str) -> SimpleNamespace:
+        return SimpleNamespace(sha="parent-sha")
+
+    def download_file(self, *, repo_id: str, filename: str, repo_type: str, token: str | None = None) -> bytes:
+        if filename not in self.files:
+            raise EntryNotFoundError(filename)
+        return self.files[filename]
+
+    def create_commit(self, **kwargs: object) -> SimpleNamespace:
+        self.calls.append(kwargs)
+        for operation in kwargs["operations"]:  # type: ignore[union-attr]
+            self.files[operation.path_in_repo] = Path(operation.path_or_fileobj).read_bytes()
+        if self.fail_after_commit:
+            self.fail_after_commit = False
+            raise RuntimeError("response lost")
+        return SimpleNamespace(commit_url="https://huggingface.co/datasets/org/data/commit/readme")
+
+
+def _readme_record(github_id: int = 3) -> dict[str, object]:
+    return {
+        "github_id": github_id,
+        "repository_name_at_fetch": "org/repo",
+        "observed_at": "2026-09-24T10:00:00Z",
+        "readme_status": "ok",
+        "readme_etag": '"etag"',
+        "readme_blob_sha": "abc123",
+        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_signals": ["ml-method-context"],
+        "readme_sections": ["method"],
+        "readme_checked_at": "2026-09-24T10:00:00Z",
+    }
+
+
+def test_readme_run_commits_compact_files_atomically_and_pins_parent() -> None:
+    api = ReadmeHub()
+    result = publish_readme_run("org/data", "token", records=[_readme_record()],
+                                coverage={"records": 1}, checkpoint={"cursors": {"0": 3}}, api=api)
+
+    assert result.endswith("/commit/readme")
+    call = api.calls[0]
+    assert call["parent_commit"] == "parent-sha"
+    paths = {op.path_in_repo for op in call["operations"]}  # type: ignore[union-attr]
+    assert "state/readme-evidence.json" in paths
+    data_path = next(path for path in paths if path.endswith(".jsonl"))
+    raw = api.files[data_path].decode()
+    assert "README body" not in raw and "readme_text" not in raw
+    assert '"github_id":3' in raw
+    assert any(path.endswith(".coverage.json") for path in paths)
+    assert any(path.endswith(".manifest.json") for path in paths)
+
+
+def test_readme_run_retries_idempotently_and_recovers_lost_response() -> None:
+    api = ReadmeHub()
+    api.fail_after_commit = True
+    args = {"records": [_readme_record()], "coverage": {"records": 1}, "checkpoint": {"cursors": {"0": 3}}, "api": api}
+
+    assert publish_readme_run("org/data", "token", **args) == "https://huggingface.co/datasets/org/data"
+    assert len(api.calls) == 1
+    assert publish_readme_run("org/data", "token", **args) == "https://huggingface.co/datasets/org/data"
+    assert len(api.calls) == 1
+
+
+def test_readme_checkpoint_state_roundtrips_full_cursor() -> None:
+    api = ReadmeHub()
+    checkpoint = {
+        "cursors": {"3": 20},
+        "repositories": {
+            "20": {
+                "repository_name_at_fetch": "org/repo",
+                "readme_etag": '"etag"',
+                "readme_blob_sha": "abc123",
+                "readme_evidence_version": "gh-ml-readme-evidence-v1",
+                "readme_signals": ["ml-method-context"],
+                "readme_sections": ["method"],
+                "readme_checked_at": "2026-09-24T10:00:00Z",
+                "due_at": "2026-09-25T10:00:00Z",
+            }
+        },
+    }
+    publish_readme_run("org/data", "token", records=[_readme_record()], coverage={}, checkpoint=checkpoint, api=api)
+
+    state = load_checkpoint("org/data", "token", checkpoint_path="state/readme-evidence.json", api=api)
+    assert state is not None
+    assert state["checkpoint"] == checkpoint
+
+
+def test_readme_empty_run_publishes_deterministic_empty_jsonl() -> None:
+    api = ReadmeHub()
+    args = {
+        "records": [],
+        "coverage": {"attempted": 2, "records": 0, "rate_limited": 1},
+        "checkpoint": {"cursors": {"3": 0}},
+        "run_date": "2026-09-24T10:00:00Z",
+        "api": api,
+    }
+
+    result = publish_readme_run("org/data", "token", **args)
+
+    assert result.endswith("/commit/readme")
+    data_path = next(path for path in api.files if path.endswith(".jsonl"))
+    assert data_path.startswith("data/readme-evidence/2026/09/24/")
+    assert api.files[data_path] == b""
+    assert len(api.calls) == 1
+    assert publish_readme_run("org/data", "token", **args) == "https://huggingface.co/datasets/org/data"
+    assert len(api.calls) == 1
+
+
+def test_readme_checkpoint_rejects_raw_text_and_unknown_enums() -> None:
+    row = _readme_record()
+    row["readme_evidence_version"] = "v1"
+    with pytest.raises(ValueError, match="unsupported"):
+        publish_readme_run("org/data", "token", records=[row], coverage={}, checkpoint={}, api=ReadmeHub())
+    with pytest.raises(ValueError, match="unsupported repository fields"):
+        publish_readme_run("org/data", "token", records=[_readme_record()], coverage={},
+                           checkpoint={"repositories": {"3": {"readme_text": "body"}}}, api=ReadmeHub())
+    bad_signal = _readme_record()
+    bad_signal["readme_signals"] = ["org-specific phrase"]
+    with pytest.raises(ValueError, match="unknown or duplicate enum"):
+        publish_readme_run("org/data", "token", records=[bad_signal], coverage={}, checkpoint={}, api=ReadmeHub())
+    with pytest.raises(ValueError, match="invalid enums"):
+        publish_readme_run(
+            "org/data", "token", records=[_readme_record()], coverage={},
+            checkpoint={"repositories": {"3": {"readme_signals": ["raw prose"]}}}, api=ReadmeHub(),
+        )
+
+
+@pytest.mark.parametrize("extra", ["readme_text", "snippet", "body"])
+def test_readme_run_rejects_non_compact_or_invalid_records(extra: str) -> None:
+    row = _readme_record()
+    row[extra] = "private README text"
+    with pytest.raises(ValueError, match="exactly"):
+        publish_readme_run("org/data", None, records=[row], coverage={}, checkpoint={}, api=ReadmeHub())
