@@ -5,7 +5,7 @@ import json
 import pytest
 
 import gh_ml.current_view as current_view
-from gh_ml.current_view import export_current_view_parquet, materialize_current_view
+from gh_ml.current_view import export_current_view_parquet, export_observations_parquet, materialize_current_view
 
 
 def _write(path, rows):
@@ -178,6 +178,63 @@ def test_parquet_export_writes_valid_empty_file_and_keeps_output_on_bad_input(tm
     with pytest.raises(ValueError, match="positive numeric"):
         export_current_view_parquet(bad, output)
     assert output.read_bytes() == b"old output"
+
+
+def test_raw_observation_parquet_keeps_every_row_in_file_order_and_preserves_extras(tmp_path, monkeypatch):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    first = _write(tmp_path / "part-1.jsonl", [
+        {"github_id": 12, "name": "owner/first", "observed_at": "2026-01-01T00:00:00Z",
+         "query_ids": ["first.query"], "domains": ["vision"], "methods": ["transformer"],
+         "novelty_signals": ["paper"], "selection_status": "exclude",
+         "candidate_evidence": {"source": "readme", "signals": ["algorithm"]}},
+        {"github_id": 12, "name": "owner/first", "observed_at": "2026-01-02T00:00:00Z",
+         "query_ids": ["second.query"], "domains": [], "methods": [], "novelty_signals": [],
+         "selection_status": "include", "batch_marker": 2},
+    ])
+    second = _write(tmp_path / "part-2.jsonl", [
+        {"github_id": 3, "name": "owner/third", "observed_at": "2026-01-03T00:00:00Z",
+         "selection_status": "review", "pwc_assertions": [{"paper_id": "P7"}]},
+    ])
+    output = tmp_path / "raw.parquet"
+    monkeypatch.setattr(current_view, "_PARQUET_BATCH_ROWS", 1)
+
+    result = export_observations_parquet((path for path in (first, second)), output)
+
+    table = pq.read_table(output)
+    rows = table.to_pylist()
+    assert result == {"row_count": 3, "size_bytes": output.stat().st_size, "compression": "zstd"}
+    assert [row["github_id"] for row in rows] == [12, 12, 3]
+    assert [row["observed_at"] for row in rows] == [
+        "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z", "2026-01-03T00:00:00Z",
+    ]
+    assert pa.types.is_int64(table.schema.field("github_id").type)
+    assert pa.types.is_list(table.schema.field("query_ids").type)
+    assert pa.types.is_string(table.schema.field("selection_status").type)
+    assert json.loads(rows[0]["extra_json"]) == {
+        "candidate_evidence": {"source": "readme", "signals": ["algorithm"]},
+    }
+    assert json.loads(rows[1]["extra_json"]) == {"batch_marker": 2}
+    assert json.loads(rows[2]["extra_json"]) == {"pwc_assertions": [{"paper_id": "P7"}]}
+    assert rows[0]["query_ids"] == ["first.query"]
+    assert rows[1]["query_ids"] == ["second.query"]
+    assert [row["selection_status"] for row in rows] == ["exclude", "include", "review"]
+    assert output.parent == tmp_path
+
+
+def test_raw_observation_parquet_empty_inputs_and_source_collision(tmp_path):
+    pq = pytest.importorskip("pyarrow.parquet")
+    empty = tmp_path / "empty.jsonl"
+    empty.touch()
+    output = tmp_path / "raw.parquet"
+
+    result = export_observations_parquet([empty], output, compression="snappy")
+
+    assert result["row_count"] == 0
+    assert result["compression"] == "snappy"
+    assert pq.read_table(output).num_rows == 0
+    with pytest.raises(ValueError, match="distinct"):
+        export_observations_parquet([output], output)
 
 
 def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):

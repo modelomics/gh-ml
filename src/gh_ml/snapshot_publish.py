@@ -11,12 +11,14 @@ from typing import Any, Callable
 from .current_view import (
     CURRENT_VIEW_PROJECTION_VERSION,
     export_current_view_parquet,
+    export_observations_parquet,
     materialize_current_view,
 )
 from .selection import SELECTION_VERSION
 
 _OBSERVATIONS = re.compile(r"^data/observations/.+\.jsonl$")
 _PARQUET = "data/current/repositories.parquet"
+_OBSERVATIONS_PARQUET = "data/history/observations.parquet"
 _MANIFEST = "data/current/manifest.json"
 _CARD = "README.md"
 _SOURCE_CARD = Path(__file__).resolve().parents[2] / "dataset" / "README.md"
@@ -33,7 +35,7 @@ def publish_current_view(
     token_provider: Callable[[], str | None] | None = None,
     card_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    """Build and atomically publish the filtered Parquet, manifest, and card.
+    """Build and atomically publish both Parquet views, manifest, and card.
 
     Each attempt pins the input listing and downloads to one Hub revision. A
     changed head causes a fresh build. Idempotency follows the observation
@@ -92,12 +94,17 @@ def publish_current_view(
 
         manifest_token = _fresh_token(token, token_provider)
         remote_manifest = _read_remote_manifest(downloader, repo_id, revision, manifest_token)
-        if (_PARQUET in remote_paths and remote_manifest
+        if (_PARQUET in remote_paths and _OBSERVATIONS_PARQUET in remote_paths and remote_manifest
+                and remote_manifest.get("version") == 5
+                and isinstance(remote_manifest.get("source_revision"), str)
+                and bool(remote_manifest.get("source_revision"))
                 and remote_manifest.get("input_fingerprint") == fingerprint
                 and remote_manifest.get("projection_version") == CURRENT_VIEW_PROJECTION_VERSION
                 and remote_manifest.get("selection_version") == SELECTION_VERSION
+                and remote_manifest.get("observations_parquet_row_count") == remote_manifest.get("observation_count")
                 and remote_manifest.get("card_sha256") == card_hash
                 and _remote_parquet_matches(downloader, repo_id, revision, manifest_token, remote_manifest)
+                and _remote_observations_parquet_matches(downloader, repo_id, revision, manifest_token, remote_manifest)
                 and _remote_card_matches(downloader, repo_id, revision, manifest_token, remote_manifest)):
             return _result(repo_id, remote_manifest, already_current=True)
 
@@ -115,21 +122,34 @@ def publish_current_view(
                 f"{parquet_report.get('row_count')} != {included_count}"
             )
         parquet_hash = _sha256_file(parquet_path)
+        observations_parquet_path = work / "observations.parquet"
+        observations_parquet_report = export_observations_parquet(
+            local_inputs, observations_parquet_path
+        )
+        observation_count = int(report["observation_count"])
+        if observations_parquet_report.get("row_count") != observation_count:
+            raise ValueError(
+                "Observations Parquet row count does not match observation count: "
+                f"{observations_parquet_report.get('row_count')} != {observation_count}"
+            )
+        observations_parquet_hash = _sha256_file(observations_parquet_path)
         manifest = {
             "format": "gh_ml_current_view_snapshot",
-            "version": 4,
+            "version": 5,
             "projection_version": CURRENT_VIEW_PROJECTION_VERSION,
             "selection_version": SELECTION_VERSION,
             "source_revision": revision,
             "input_fingerprint": fingerprint,
             "observation_files": sources,
-            "observation_count": int(report["observation_count"]),
+            "observation_count": observation_count,
             "current_view_count": int(report["current_view_count"]),
             "included_count": selection_counts["include"],
             "review_count": selection_counts["review"],
             "excluded_count": selection_counts["exclude"],
             "selection_reason_counts": reason_counts,
             "parquet_sha256": parquet_hash,
+            "observations_parquet_sha256": observations_parquet_hash,
+            "observations_parquet_row_count": observation_count,
             "card_sha256": card_hash,
         }
         manifest_path = work / "manifest.json"
@@ -147,7 +167,9 @@ def publish_current_view(
                 break
             continue
 
-        operations = _commit_operations(parquet_path, manifest_path, staged_card)
+        operations = _commit_operations(
+            parquet_path, observations_parquet_path, manifest_path, staged_card
+        )
         try:
             response = api.create_commit(
                 repo_id=repo_id,
@@ -165,12 +187,17 @@ def publish_current_view(
             latest = _head_sha(api, repo_id, token=commit_token)
             if latest:
                 confirmed = _read_remote_manifest(downloader, repo_id, latest, commit_token)
-                if (_PARQUET in set(_list_repo_files(api, repo_id, latest, token=commit_token))
-                        and confirmed and confirmed.get("input_fingerprint") == fingerprint
+                latest_paths = set(_list_repo_files(api, repo_id, latest, token=commit_token))
+                if (_PARQUET in latest_paths and _OBSERVATIONS_PARQUET in latest_paths
+                        and confirmed and confirmed.get("version") == 5
+                        and confirmed.get("source_revision") == revision
+                        and confirmed.get("input_fingerprint") == fingerprint
                         and confirmed.get("projection_version") == CURRENT_VIEW_PROJECTION_VERSION
                         and confirmed.get("selection_version") == SELECTION_VERSION
+                        and confirmed.get("observations_parquet_row_count") == confirmed.get("observation_count")
                         and confirmed.get("card_sha256") == card_hash
                         and _remote_parquet_matches(downloader, repo_id, latest, commit_token, confirmed)
+                        and _remote_observations_parquet_matches(downloader, repo_id, latest, commit_token, confirmed)
                         and _remote_card_matches(downloader, repo_id, latest, commit_token, confirmed)):
                     return _result(repo_id, confirmed, already_current=True)
                 if attempt + 1 < max_attempts and latest != revision:
@@ -256,6 +283,24 @@ def _remote_card_matches(
     return actual == expected
 
 
+def _remote_observations_parquet_matches(
+    downloader: Callable[..., str], repo_id: str, revision: str, token: str | None,
+    manifest: dict[str, Any],
+) -> bool:
+    expected = manifest.get("observations_parquet_sha256")
+    if not isinstance(expected, str) or not expected:
+        return False
+    try:
+        actual = _sha256_file(
+            Path(_download(downloader, repo_id, _OBSERVATIONS_PARQUET, revision, token))
+        )
+    except Exception as exc:
+        if _is_missing(exc):
+            return False
+        raise
+    return actual == expected
+
+
 def _copy_validate_jsonl(source: Path, destination: Path, remote_path: str) -> str:
     """Copy and validate one source in bounded memory, preserving its bytes."""
     digest = hashlib.sha256()
@@ -302,7 +347,9 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _commit_operations(parquet_path: Path, manifest_path: Path, card_path: Path) -> list[Any]:
+def _commit_operations(
+    parquet_path: Path, observations_parquet_path: Path, manifest_path: Path, card_path: Path
+) -> list[Any]:
     try:
         from huggingface_hub import CommitOperationAdd
     except ImportError:  # pragma: no cover
@@ -315,6 +362,7 @@ def _commit_operations(parquet_path: Path, manifest_path: Path, card_path: Path)
 
     return [
         CommitOperationAdd(path_in_repo=_PARQUET, path_or_fileobj=str(parquet_path)),
+        CommitOperationAdd(path_in_repo=_OBSERVATIONS_PARQUET, path_or_fileobj=str(observations_parquet_path)),
         CommitOperationAdd(path_in_repo=_MANIFEST, path_or_fileobj=str(manifest_path)),
         CommitOperationAdd(path_in_repo=_CARD, path_or_fileobj=str(card_path)),
     ]
@@ -331,6 +379,8 @@ def _result(repo_id: str, manifest: dict[str, Any], *, already_current: bool) ->
         "excluded_count": manifest.get("excluded_count"),
         "selection_reason_counts": manifest.get("selection_reason_counts"),
         "parquet_sha256": manifest.get("parquet_sha256"),
+        "observations_parquet_sha256": manifest.get("observations_parquet_sha256"),
+        "observations_parquet_row_count": manifest.get("observations_parquet_row_count"),
         "card_sha256": manifest.get("card_sha256"),
         "already_current": already_current,
     }

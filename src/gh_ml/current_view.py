@@ -37,16 +37,43 @@ def export_current_view_parquet(
     ``extra_json`` column. The destination is replaced atomically after the
     Parquet footer is closed.
     """
+    return _export_observation_parquet([jsonl_path], parquet_path, compression=compression,
+                                       selection_status=selection_status)
+
+
+def export_observations_parquet(
+    observation_paths: Iterable[str | Path],
+    parquet_path: str | Path,
+    *,
+    compression: str = "zstd",
+) -> dict[str, int | str]:
+    """Stream every JSONL observation, in file and row order, to typed Parquet.
+
+    Unlike :func:`export_current_view_parquet`, this exporter does not filter
+    rows. It is intended for an append-only raw observation history. Memory is
+    bounded by one Parquet batch regardless of corpus size.
+    """
+    return _export_observation_parquet(observation_paths, parquet_path, compression=compression)
+
+
+def _export_observation_parquet(
+    observation_paths: Iterable[str | Path],
+    parquet_path: str | Path,
+    *,
+    compression: str,
+    selection_status: str | None = None,
+) -> dict[str, int | str]:
     try:
         import pyarrow as pa
         import pyarrow.parquet as parquet
     except ImportError as exc:
         raise ImportError("Parquet export requires the optional 'parquet' dependencies; install with `uv sync --extra parquet`") from exc
 
-    source = Path(jsonl_path)
+    sources = [Path(item) for item in observation_paths]
     destination = Path(parquet_path)
-    if source.resolve() == destination.resolve():
-        raise ValueError("parquet_path must be distinct from jsonl_path")
+    resolved_destination = destination.resolve()
+    if any(source.resolve() == resolved_destination for source in sources):
+        raise ValueError("parquet_path must be distinct from every JSONL input")
 
     string = pa.string()
     strings = pa.list_(pa.string())
@@ -96,40 +123,45 @@ def export_current_view_parquet(
     try:
         with parquet.ParquetWriter(temporary, schema, compression=compression) as writer:
             prepared_rows: list[dict[str, Any]] = []
-            with source.open("r", encoding="utf-8") as stream:
-                for line_number, line in enumerate(stream, start=1):
-                    if not line.strip():
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError as exc:
-                        raise ValueError(f"{source}:{line_number}: invalid JSON: {exc.msg}") from exc
-                    if not isinstance(row, dict):
-                        raise ValueError(f"{source}:{line_number}: observation must be a JSON object")
-                    if selection_status is not None and row.get("selection_status") != selection_status:
-                        continue
-                    github_id = row.get("github_id")
-                    if (isinstance(github_id, bool) or not isinstance(github_id, int)
-                            or not 0 < github_id <= 9_223_372_036_854_775_807):
-                        raise ValueError(f"{source}:{line_number}: github_id must be a positive numeric integer")
-                    extra = {key: value for key, value in row.items() if key not in canonical_fields}
-                    try:
-                        extra_json = json.dumps(extra, ensure_ascii=False, allow_nan=False, sort_keys=True,
-                                                separators=(",", ":")) if extra else None
-                    except (TypeError, ValueError) as exc:
-                        raise ValueError(f"{source}:{line_number}: extra fields are not valid JSON data: {exc}") from exc
-                    prepared_rows.append({**{field: row.get(field) for field in schema.names
-                                             if field in canonical_fields},
-                                          "extra_json": extra_json})
-                    if len(prepared_rows) >= _PARQUET_BATCH_ROWS:
-                        batch = pa.Table.from_pylist(prepared_rows, schema=schema)
-                        writer.write_table(batch)
-                        count += batch.num_rows
-                        prepared_rows.clear()
-                if prepared_rows:
-                    batch = pa.Table.from_pylist(prepared_rows, schema=schema)
-                    writer.write_table(batch)
-                    count += batch.num_rows
+            for source in sources:
+                try:
+                    stream = source.open("r", encoding="utf-8")
+                except OSError as exc:
+                    raise ValueError(f"cannot open observation file {source}: {exc}") from exc
+                with stream:
+                    for line_number, line in enumerate(stream, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(f"{source}:{line_number}: invalid JSON: {exc.msg}") from exc
+                        if not isinstance(row, dict):
+                            raise ValueError(f"{source}:{line_number}: observation must be a JSON object")
+                        if selection_status is not None and row.get("selection_status") != selection_status:
+                            continue
+                        github_id = row.get("github_id")
+                        if (isinstance(github_id, bool) or not isinstance(github_id, int)
+                                or not 0 < github_id <= 9_223_372_036_854_775_807):
+                            raise ValueError(f"{source}:{line_number}: github_id must be a positive numeric integer")
+                        extra = {key: value for key, value in row.items() if key not in canonical_fields}
+                        try:
+                            extra_json = json.dumps(extra, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                                                    separators=(",", ":")) if extra else None
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(f"{source}:{line_number}: extra fields are not valid JSON data: {exc}") from exc
+                        prepared_rows.append({**{field: row.get(field) for field in schema.names
+                                                 if field in canonical_fields},
+                                              "extra_json": extra_json})
+                        if len(prepared_rows) >= _PARQUET_BATCH_ROWS:
+                            batch = pa.Table.from_pylist(prepared_rows, schema=schema)
+                            writer.write_table(batch)
+                            count += batch.num_rows
+                            prepared_rows.clear()
+            if prepared_rows:
+                batch = pa.Table.from_pylist(prepared_rows, schema=schema)
+                writer.write_table(batch)
+                count += batch.num_rows
         with open(temporary, "rb") as stream:
             os.fsync(stream.fileno())
         size = os.path.getsize(temporary)

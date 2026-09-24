@@ -41,7 +41,8 @@ class FakeHub:
         assert kwargs["repo_type"] == "dataset"
         operations = kwargs["operations"]
         assert [op.path_in_repo for op in operations] == [
-            "data/current/repositories.parquet", "data/current/manifest.json", "README.md"
+            "data/current/repositories.parquet", "data/history/observations.parquet",
+            "data/current/manifest.json", "README.md"
         ]
         added = {op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in operations}
         self.files.update(added)
@@ -91,6 +92,14 @@ def fake_parquet(monkeypatch):
         Path(destination).write_bytes(b"PARQUET\0" + encoded)
         return {"row_count": len(rows)}
     monkeypatch.setattr(publisher, "export_current_view_parquet", export)
+    def export_observations(paths, destination, *, compression="zstd"):
+        rows = []
+        for path in paths:
+            rows.extend(json.loads(line) for line in Path(path).read_text().split("\n") if line)
+        encoded = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows).encode()
+        Path(destination).write_bytes(b"OBS-PARQUET\0" + encoded)
+        return {"row_count": len(rows)}
+    monkeypatch.setattr(publisher, "export_observations_parquet", export_observations)
 
 
 def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
@@ -107,10 +116,14 @@ def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
     assert len(hub.commits) == 1
     assert hub.commits[0]["parent_commit"] == "rev-1"
     manifest = json.loads(hub.files["data/current/manifest.json"])
-    assert manifest["version"] == 4
+    assert manifest["version"] == 5
     assert manifest["projection_version"] == 3
     assert manifest["selection_version"] == "ml-contribution-v1"
     assert manifest["card_sha256"] == publisher._sha256(publisher._SOURCE_CARD.read_bytes())
+    assert manifest["observations_parquet_row_count"] == manifest["observation_count"] == 1
+    assert manifest["observations_parquet_sha256"] == publisher._sha256(
+        hub.files["data/history/observations.parquet"]
+    )
     assert hub.files["README.md"] == publisher._SOURCE_CARD.read_bytes()
     assert sum(manifest["selection_reason_counts"].values()) == manifest["current_view_count"]
     assert manifest["observation_files"] == [{
@@ -266,7 +279,8 @@ def test_card_change_publishes_card_with_snapshot_in_one_commit(tmp_path):
     assert second["already_current"] is False
     assert len(hub.commits) == 2
     assert [op.path_in_repo for op in hub.commits[-1]["operations"]] == [
-        "data/current/repositories.parquet", "data/current/manifest.json", "README.md"
+        "data/current/repositories.parquet", "data/history/observations.parquet",
+        "data/current/manifest.json", "README.md"
     ]
     assert hub.files["README.md"] == source_card.read_bytes()
     manifest = json.loads(hub.files["data/current/manifest.json"])
@@ -344,6 +358,39 @@ def test_corrupt_parquet_with_matching_manifest_rebuilds_snapshot(tmp_path):
     assert result["already_current"] is False
     assert len(hub.commits) == 2
     assert hub.files["data/current/repositories.parquet"].startswith(b"PARQUET\0")
+
+
+@pytest.mark.parametrize("corruption", ["missing", "corrupt"])
+def test_missing_or_corrupt_observations_parquet_rebuilds_snapshot(tmp_path, corruption):
+    hub, downloader = _hub(tmp_path)
+    publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    path = "data/history/observations.parquet"
+    if corruption == "missing":
+        del hub.history[hub.revision][path]
+        del hub.files[path]
+    else:
+        hub.history[hub.revision][path] = b"corrupted"
+        hub.files[path] = b"corrupted"
+
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    assert result["already_current"] is False
+    assert len(hub.commits) == 2
+    assert hub.files[path].startswith(b"OBS-PARQUET\0")
+
+
+def test_observations_parquet_count_mismatch_stops_before_commit(tmp_path, monkeypatch):
+    hub, downloader = _hub(tmp_path)
+    original = publisher.export_observations_parquet
+
+    def mismatched_export(paths, parquet_path, **kwargs):
+        report = original(paths, parquet_path, **kwargs)
+        return {**report, "row_count": report["row_count"] + 1}
+
+    monkeypatch.setattr(publisher, "export_observations_parquet", mismatched_export)
+    with pytest.raises(ValueError, match="Observations Parquet row count does not match"):
+        publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    assert not hub.commits
 
 
 def test_valid_json_string_with_unicode_line_separator_is_not_split(tmp_path):
