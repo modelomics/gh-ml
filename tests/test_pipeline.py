@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -186,6 +187,88 @@ def test_cli_publishes_empty_sweep_checkpoint_for_ephemeral_runners(
     manifest = json.loads(next(tmp_path.glob("manifest-*.json")).read_text(encoding="utf-8"))
     assert manifest["published"] is True
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["since"] == "2026-09-24"
+
+
+def test_oidc_token_is_reacquired_before_publish(tmp_path: Path, monkeypatch) -> None:
+    acquired: list[str] = []
+
+    def get_token() -> str:
+        token = f"oidc-token-{len(acquired) + 1}"
+        acquired.append(token)
+        return token
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(get_token=get_token))
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_OIDC_RESOURCE", "https://huggingface.co")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    checkpoint_tokens: list[str] = []
+    monkeypatch.setattr(cli, "load_checkpoint", lambda _repo, token, **_: checkpoint_tokens.append(token))
+    monkeypatch.setattr(
+        cli,
+        "discover",
+        lambda *args, **kwargs: SimpleNamespace(
+            repositories={}, matched_query_ids={}, next_cursor=None, requests_used=1, coverage=[]
+        ),
+    )
+    publish_tokens: list[str] = []
+
+    def publish(_repo, token, **kwargs):
+        publish_tokens.append(token)
+        return "https://example.test/run"
+
+    monkeypatch.setattr(cli, "publish_run", publish)
+
+    assert cli.main(
+        [
+            "run",
+            "--config-dir",
+            str(Path(__file__).parents[1] / "config" / "queries"),
+            "--output-dir",
+            str(tmp_path),
+        ]
+    ) == 0
+
+    assert acquired == ["oidc-token-1", "oidc-token-2"]
+    assert checkpoint_tokens == ["oidc-token-1"]
+    assert publish_tokens == ["oidc-token-2"]
+
+
+def test_explicit_hf_token_takes_precedence_over_oidc(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", "explicit-token")
+    monkeypatch.setenv("HF_OIDC_RESOURCE", "https://huggingface.co")
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        SimpleNamespace(get_token=lambda: (_ for _ in ()).throw(AssertionError("OIDC should not run"))),
+    )
+
+    assert cli._hf_token("HF_TOKEN") == "explicit-token"
+
+
+def test_oidc_failure_is_clear_and_does_not_print_exception(tmp_path: Path, monkeypatch, capsys) -> None:
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setenv("HF_OIDC_RESOURCE", "https://huggingface.co")
+
+    def fail_exchange() -> None:
+        raise RuntimeError("response contained bearer-secret-value")
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", SimpleNamespace(get_token=fail_exchange))
+
+    status = cli.main(
+        [
+            "run",
+            "--config-dir",
+            str(Path(__file__).parents[1] / "config" / "queries"),
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert status == 2
+    output = capsys.readouterr().err
+    assert "Hugging Face OIDC token exchange failed" in output
+    assert "bearer-secret-value" not in output
 
 
 @pytest.mark.parametrize(

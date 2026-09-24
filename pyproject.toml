@@ -9,7 +9,7 @@ description = "A daily registry of GitHub projects presenting novel machine lear
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-  "huggingface-hub>=0.30",
+  "huggingface-hub>=1.19.0",
 ]
 
 [project.optional-dependencies]

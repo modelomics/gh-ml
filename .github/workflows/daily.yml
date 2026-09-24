@@ -17,6 +17,9 @@ jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -26,21 +29,21 @@ jobs:
         run: uv sync --locked --extra dev
       - name: Run tests
         run: uv run --frozen pytest
-      - name: Require Hugging Face write token
+      - name: Verify Hugging Face publishing credentials
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: |
-          if [ -z "$HF_TOKEN" ]; then
-            echo "HF_TOKEN repository secret is required to publish the registry dataset." >&2
-            exit 1
-          fi
+          uv run --frozen python -c 'import os; from huggingface_hub import get_token; token = os.environ.get("HF_TOKEN") or get_token(); assert token, "No Hugging Face token available from HF_TOKEN or the configured GitHub OIDC trusted publisher"'
       - name: Collect recent repositories
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml run --max-requests 600
       - name: Backfill historical repositories
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml backfill --max-requests 900

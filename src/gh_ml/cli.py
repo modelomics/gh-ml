@@ -77,6 +77,18 @@ def _hf_token(env_name: str) -> str | None:
     value = os.environ.get(env_name)
     if value:
         return value
+    if os.environ.get("HF_OIDC_RESOURCE"):
+        try:
+            from huggingface_hub import get_token
+
+            token = get_token()
+        except Exception:
+            # SDK errors can include response details. Keep credentials and
+            # exchange response bodies out of CLI output.
+            raise ValueError("Hugging Face OIDC token exchange failed") from None
+        if not token:
+            raise ValueError("Hugging Face OIDC token exchange returned no token")
+        return token
     try:
         from huggingface_hub import get_token
 
@@ -138,7 +150,9 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     remote_checkpoint: dict[str, Any] | None = None
     if not args.no_publish:
         if not hf_token:
-            raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+            raise ValueError(
+                f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login"
+            )
         remote_checkpoint = load_checkpoint(
             args.repo, hf_token, **({"checkpoint_path": "state/backfill.json"} if mode == "backfill" else {})
         )
@@ -280,6 +294,14 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     # the same Hub commit as the run metadata.
     should_publish = not args.no_publish
     if should_publish:
+        # Discovery can take longer than the one-hour lifetime of a GitHub
+        # OIDC exchange. Ask huggingface_hub for a fresh token at the point of
+        # publication; ordinary local logins and explicit tokens still work.
+        hf_token = _hf_token(args.hf_token_env)
+        if not hf_token:
+            raise ValueError(
+                f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login"
+            )
         checkpoint_path = "state/checkpoint.json" if mode == "daily" else "state/backfill.json"
         checkpoint = {**(remote_checkpoint or {}), **next_state, "updated_at": observed_at}
         url = publish_run(
