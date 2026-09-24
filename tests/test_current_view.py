@@ -64,11 +64,85 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
     ]
     assert report["observation_count"] == 4
     assert report["current_view_count"] == 2
-    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 5
+    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 6
     manifest = json.loads((tmp_path / "view.jsonl.manifest.json").read_text())
     assert manifest["candidate_rule_version"] == "ml-candidate-v2"
+    assert "queryless absent or false" in manifest["selection"]
     assert manifest["input_files"][1]["observations"] == 2
     assert repeat.read_bytes() == output.read_bytes()
+
+
+def test_search_observation_wins_over_newer_census_and_retains_all_aggregates(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(101, "2020-01-01T00:00:00Z", queryless=False, name="search-row",
+             query_ids=["search.query"], domains=["search-domain"]),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(101, "2026-01-01T00:00:00Z", queryless=True, name="census-row",
+             query_ids=["census.query"], domains=["census-domain"]),
+    ])
+    output = tmp_path / "view.jsonl"
+
+    report = materialize_current_view([census, search], output)
+
+    row = _read(output)[0]
+    assert row["name"] == "search-row"
+    assert row["queryless"] is False
+    assert row["observed_at"] == "2020-01-01T00:00:00Z"
+    assert row["observation_count"] == report["observation_count"] == 2
+    assert row["first_observed_at"] == "2020-01-01T00:00:00Z"
+    assert row["all_query_ids"] == ["census.query", "search.query"]
+    assert row["all_domains"] == ["census-domain", "search-domain"]
+
+
+@pytest.mark.parametrize("search_queryless", [None, False])
+def test_search_wins_when_newer_and_missing_queryless_is_search(tmp_path, search_queryless):
+    search_fields = {} if search_queryless is None else {"queryless": search_queryless}
+    search = _write(tmp_path / "search.jsonl", [
+        _row(102, "2026-01-01T00:00:00Z", name="search-row", **search_fields),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(102, "2020-01-01T00:00:00Z", queryless=True, name="census-row"),
+    ])
+
+    materialize_current_view([census, search], tmp_path / "view.jsonl")
+
+    assert _read(tmp_path / "view.jsonl")[0]["name"] == "search-row"
+
+
+def test_census_only_observations_are_retained(tmp_path):
+    census = _write(tmp_path / "census.jsonl", [
+        _row(103, "2026-01-01T00:00:00Z", queryless=True, name="census-row"),
+    ])
+
+    materialize_current_view([census], tmp_path / "view.jsonl")
+
+    assert _read(tmp_path / "view.jsonl")[0]["name"] == "census-row"
+
+
+@pytest.mark.parametrize("queryless", [0, 1, "false", "true"])
+def test_invalid_queryless_is_rejected(tmp_path, queryless):
+    source = _write(tmp_path / "bad.jsonl", [
+        _row(104, "2026-01-01T00:00:00Z", queryless=queryless),
+    ])
+
+    with pytest.raises(ValueError, match="queryless must be a boolean"):
+        materialize_current_view([source], tmp_path / "view.jsonl")
+
+
+def test_source_precedence_is_strictly_limited_to_same_github_id(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(105, "2020-01-01T00:00:00Z", name="search-row"),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(106, "2026-01-01T00:00:00Z", queryless=True, name="census-row"),
+    ])
+
+    materialize_current_view([search, census], tmp_path / "view.jsonl")
+
+    assert [(row["github_id"], row["name"]) for row in _read(tmp_path / "view.jsonl")] == [
+        (105, "search-row"), (106, "census-row"),
+    ]
 
 
 def test_equal_timestamp_tie_break_does_not_depend_on_input_order(tmp_path):

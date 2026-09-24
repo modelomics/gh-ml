@@ -435,3 +435,85 @@ def test_permanently_unresolved_rows_are_parked_with_consistent_coverage(tmp_pat
     assert coverage["retry_ids"] == []
     assert coverage["permanently_unresolved_ids"] == [51]
     assert coverage["candidate_count"] + coverage["unknown_count"] + coverage["not_candidate_count"] == coverage["enumerated"]
+
+
+def test_retry_selection_round_robins_both_pools_across_invocations(tmp_path, monkeypatch):
+    for name in ("pages", "coverage", "retry", "failed", "staging"):
+        (tmp_path / name).mkdir()
+    for repo_id in range(1, 151):
+        row = rest_row(repo_id)
+        row.update({"_census_since": 0, "_retry_attempts": 1})
+        (tmp_path / "retry" / f"{repo_id}.json").write_text(json.dumps(row))
+    for repo_id in range(1001, 1151):
+        row = rest_row(repo_id)
+        row.update({"_census_since": 0, "_retry_attempts": census._MAX_ENRICHMENT_ATTEMPTS})
+        (tmp_path / "failed" / f"{repo_id}.json").write_text(json.dumps(row))
+    duplicate = rest_row(1)
+    duplicate.update({"_census_since": 0, "_retry_attempts": census._MAX_ENRICHMENT_ATTEMPTS})
+    (tmp_path / "failed" / "1.json").write_text(json.dumps(duplicate))
+    (tmp_path / "checkpoint.json").write_text(json.dumps({"version": 1, "next_since": 200}))
+
+    batches = []
+
+    def enrich(rows, **_kwargs):
+        selected = [row["id"] for row in rows]
+        batches.append(selected)
+        return {}, [], 5
+
+    monkeypatch.setattr(census, "_enrich_rows", enrich)
+    monkeypatch.setattr(census, "_recover_alias_rows", lambda *_a, **_k: {})
+    monkeypatch.setattr(census, "fetch_page", lambda *_a, **_k: ([], 200, {
+        "coverage": {"since": 200, "next_since": 200, "enumerated": 0,
+                     "enriched": 0, "unresolved_ids": [], "graphql_error_count": 0,
+                     "graphql_errors": [], "graphql_failure": None,
+                     "graphql_rate_remaining": None, "complete_enrichment": True},
+        "enriched": {},
+    }))
+
+    rounds = []
+    for _ in range(3):
+        batches.clear()
+        census.collect_census(tmp_path, token="token", max_pages=1, opener=lambda *_a, **_k: None,
+                              sleeper=lambda _: None)
+        selected = [repo_id for batch in batches for repo_id in batch]
+        assert len(selected) == 100
+        assert len(selected) == len(set(selected))
+        rounds.append(set(selected))
+
+    assert rounds[0].isdisjoint(rounds[1])
+    assert rounds[1].isdisjoint(rounds[2])
+    assert rounds[2].isdisjoint(rounds[0])
+    assert set.union(*rounds) == set(range(1, 151)) | set(range(1001, 1151))
+    for selected in rounds:
+        assert sum(repo_id < 1000 for repo_id in selected) == 50
+        assert sum(repo_id >= 1000 for repo_id in selected) == 50
+
+
+def test_retry_selection_rotates_failed_pool_beyond_budget(tmp_path):
+    retry_dir, failed_dir = tmp_path / "retry", tmp_path / "failed"
+    retry_dir.mkdir()
+    failed_dir.mkdir()
+    for repo_id in range(1, 206):
+        (failed_dir / f"{repo_id}.json").touch()
+
+    selected, cursors = census._select_retry_paths(retry_dir, failed_dir, 100, {})
+    assert {int(path.stem) for path in selected} == set(range(1, 101))
+    assert cursors == {"failed": 100}
+    selected_next, cursors_next = census._select_retry_paths(retry_dir, failed_dir, 100, cursors)
+    assert {int(path.stem) for path in selected_next} == set(range(101, 201))
+    assert cursors_next == {"failed": 200}
+
+
+def test_retry_selection_uses_full_budget_when_one_pool_is_smaller(tmp_path):
+    retry_dir, failed_dir = tmp_path / "retry", tmp_path / "failed"
+    retry_dir.mkdir()
+    failed_dir.mkdir()
+    for repo_id in (1, 2):
+        (retry_dir / f"{repo_id}.json").touch()
+    for repo_id in range(100, 205):
+        (failed_dir / f"{repo_id}.json").touch()
+
+    selected, cursors = census._select_retry_paths(retry_dir, failed_dir, 100, {})
+    assert {int(path.stem) for path in selected} == {1, 2} | set(range(100, 198))
+    assert len(selected) == 100
+    assert cursors == {"retry": 2, "failed": 197}

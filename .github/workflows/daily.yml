@@ -31,6 +31,11 @@ on:
         required: false
         type: number
         default: 200
+      census_max_pages:
+        description: "Maximum GitHub repository census pages (1–100)"
+        required: false
+        type: number
+        default: 50
 
 permissions:
   contents: read
@@ -48,6 +53,7 @@ jobs:
       RECENT_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 600 || inputs.recent_max_requests }}
       HISTORICAL_SAMPLE_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 200 || inputs.historical_sample_max_requests }}
       BACKFILL_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 700 || inputs.backfill_max_requests }}
+      CENSUS_MAX_PAGES: ${{ github.event_name == 'schedule' && 50 || inputs.census_max_pages }}
     permissions:
       contents: read
       id-token: write
@@ -66,6 +72,7 @@ jobs:
               "RECENT_MAX_REQUESTS": (1, 600),
               "HISTORICAL_SAMPLE_MAX_REQUESTS": (1, 200),
               "BACKFILL_MAX_REQUESTS": (1, 700),
+              "CENSUS_MAX_PAGES": (1, 100),
           }
           for name, (minimum, maximum) in limits.items():
               value = os.environ.get(name, "")
@@ -123,6 +130,15 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml backfill-fair --max-requests "$BACKFILL_MAX_REQUESTS"
+      - name: Collect bounded repository census
+        if: ${{ !inputs.snapshot_only }}
+        id: census
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
+        run: uv run --frozen gh-ml census-daily --work-dir "$RUNNER_TEMP/gh-ml-census" --max-pages "$CENSUS_MAX_PAGES"
       - name: Enrich selected repositories with README evidence
         if: ${{ !inputs.snapshot_only }}
         id: readme
@@ -139,5 +155,5 @@ jobs:
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen --extra parquet gh-ml publish-current-view --work-dir "$RUNNER_TEMP/gh-ml-current-view"
       - name: Fail if any collection or snapshot step failed
-        if: always() && (steps.sample.outcome == 'failure' || steps.recent.outcome == 'failure' || steps.historical_sample.outcome == 'failure' || steps.backfill.outcome == 'failure' || steps.readme.outcome == 'failure' || steps.snapshot.outcome == 'failure')
+        if: always() && (steps.sample.outcome == 'failure' || steps.recent.outcome == 'failure' || steps.historical_sample.outcome == 'failure' || steps.backfill.outcome == 'failure' || steps.census.outcome == 'failure' || steps.readme.outcome == 'failure' || steps.snapshot.outcome == 'failure')
         run: exit 1

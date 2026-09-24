@@ -29,7 +29,7 @@ _README_SECTION_ENUMS = {
     "references", "course", "dataset", "other",
 }
 # Bump whenever current-view rows or their Parquet projection changes.
-CURRENT_VIEW_PROJECTION_VERSION = 5
+CURRENT_VIEW_PROJECTION_VERSION = 6
 
 
 def export_current_view_parquet(
@@ -255,9 +255,11 @@ def materialize_current_view(
 ) -> dict[str, Any]:
     """Write one latest observation per GitHub id using bounded-memory SQLite.
 
-    The greatest timezone-aware ``observed_at`` instant wins for the source
-    snapshot. Equal instants use the lexicographically greatest canonical JSON
-    row as a stable tie-break, so results do not depend on source-file order.
+    Search observations (``queryless`` absent or false) take precedence over
+    census observations (``queryless`` true) for the source snapshot. Within a
+    source class, the greatest timezone-aware ``observed_at`` instant wins;
+    equal instants use the lexicographically greatest canonical JSON row as a
+    stable tie-break, so results do not depend on source-file order.
     That row's fields, including its ``query_ids``, ``domains``, and ``methods``,
     remain intact. Sorted cross-observation unions are added as ``all_query_ids``,
     ``all_domains``, ``all_methods``, and ``all_novelty_signals``; aggregated
@@ -285,7 +287,7 @@ def materialize_current_view(
         connection = sqlite3.connect(database)
         try:
             connection.execute(
-                "CREATE TABLE chosen (github_id INTEGER PRIMARY KEY, latest_stamp INTEGER NOT NULL, "
+                "CREATE TABLE chosen (github_id INTEGER PRIMARY KEY, latest_rank INTEGER NOT NULL, latest_stamp INTEGER NOT NULL, "
                 "row_json TEXT NOT NULL, first_stamp INTEGER NOT NULL, first_observed_at TEXT NOT NULL, "
                 "observation_count INTEGER NOT NULL)"
             )
@@ -315,6 +317,10 @@ def materialize_current_view(
                         if (isinstance(github_id, bool) or not isinstance(github_id, int)
                                 or not 0 < github_id <= 9_223_372_036_854_775_807):
                             raise ValueError(f"{source}:{line_number}: github_id must be a positive SQLite-safe integer")
+                        queryless = row.get("queryless", False)
+                        if not isinstance(queryless, bool):
+                            raise ValueError(f"{source}:{line_number}: queryless must be a boolean when present")
+                        source_rank = 0 if queryless else 1
                         stamp = _timestamp_key(row.get("observed_at"), source=source, line_number=line_number)
                         first_observed_at = row["observed_at"].strip()
                         labels = _labels_from_row(row, source=source, line_number=line_number)
@@ -324,13 +330,19 @@ def materialize_current_view(
                         except (TypeError, ValueError) as exc:
                             raise ValueError(f"{source}:{line_number}: observation is not valid JSON data: {exc}") from exc
                         connection.execute(
-                            "INSERT INTO chosen VALUES (?, ?, ?, ?, ?, ?) "
+                            "INSERT INTO chosen VALUES (?, ?, ?, ?, ?, ?, ?) "
                             "ON CONFLICT(github_id) DO UPDATE SET "
-                            "latest_stamp=CASE WHEN excluded.latest_stamp > chosen.latest_stamp OR "
-                            "(excluded.latest_stamp = chosen.latest_stamp AND excluded.row_json > chosen.row_json) "
+                            "latest_rank=CASE WHEN excluded.latest_rank > chosen.latest_rank OR "
+                            "(excluded.latest_rank = chosen.latest_rank AND (excluded.latest_stamp > chosen.latest_stamp OR "
+                            "(excluded.latest_stamp = chosen.latest_stamp AND excluded.row_json > chosen.row_json))) "
+                            "THEN excluded.latest_rank ELSE chosen.latest_rank END, "
+                            "latest_stamp=CASE WHEN excluded.latest_rank > chosen.latest_rank OR "
+                            "(excluded.latest_rank = chosen.latest_rank AND (excluded.latest_stamp > chosen.latest_stamp OR "
+                            "(excluded.latest_stamp = chosen.latest_stamp AND excluded.row_json > chosen.row_json))) "
                             "THEN excluded.latest_stamp ELSE chosen.latest_stamp END, "
-                            "row_json=CASE WHEN excluded.latest_stamp > chosen.latest_stamp OR "
-                            "(excluded.latest_stamp = chosen.latest_stamp AND excluded.row_json > chosen.row_json) "
+                            "row_json=CASE WHEN excluded.latest_rank > chosen.latest_rank OR "
+                            "(excluded.latest_rank = chosen.latest_rank AND (excluded.latest_stamp > chosen.latest_stamp OR "
+                            "(excluded.latest_stamp = chosen.latest_stamp AND excluded.row_json > chosen.row_json))) "
                             "THEN excluded.row_json ELSE chosen.row_json END, "
                             "first_observed_at=CASE WHEN excluded.first_stamp < chosen.first_stamp OR "
                             "(excluded.first_stamp = chosen.first_stamp AND "
@@ -338,7 +350,7 @@ def materialize_current_view(
                             "THEN excluded.first_observed_at ELSE chosen.first_observed_at END, "
                             "first_stamp=MIN(chosen.first_stamp, excluded.first_stamp), "
                             "observation_count=chosen.observation_count + 1",
-                            (github_id, stamp, encoded, stamp, first_observed_at, 1),
+                            (github_id, source_rank, stamp, encoded, stamp, first_observed_at, 1),
                         )
                         connection.executemany(
                             "INSERT OR IGNORE INTO labels (github_id, field, label) VALUES (?, ?, ?)",
@@ -448,7 +460,7 @@ def materialize_current_view(
                     "version": CURRENT_VIEW_PROJECTION_VERSION,
                     "selection_version": SELECTION_VERSION,
                     "candidate_rule_version": CANDIDATE_RULE_VERSION,
-                    "selection": "maximum observed_at instant; equal instants choose lexicographically greatest canonical JSON row",
+                    "selection": "Search observations (queryless absent or false) take precedence over census observations (queryless true); within each class choose maximum observed_at instant, then lexicographically greatest canonical JSON row",
                     "aggregation": "sorted label unions across all observations; methods normalized to canonical slugs",
                     "ordering": "ascending github_id",
                     "input_files": per_source,

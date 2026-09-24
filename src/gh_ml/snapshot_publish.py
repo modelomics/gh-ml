@@ -25,6 +25,8 @@ _CANDIDATES_PARQUET = "data/candidates/repositories.parquet"
 _MANIFEST = "data/current/manifest.json"
 _CARD = "README.md"
 _SOURCE_CARD = Path(__file__).resolve().parents[2] / "dataset" / "README.md"
+_SNAPSHOT_VERSION = 8
+_CANONICAL_SOURCE_PRECEDENCE = "search-over-queryless-census"
 
 
 def publish_current_view(
@@ -113,7 +115,8 @@ def publish_current_view(
         remote_manifest = _read_remote_manifest(downloader, repo_id, revision, manifest_token)
         if (_PARQUET in remote_paths and _OBSERVATIONS_PARQUET in remote_paths
                 and _CANDIDATES_PARQUET in remote_paths and remote_manifest
-                and remote_manifest.get("version") == 7
+                and remote_manifest.get("version") == _SNAPSHOT_VERSION
+                and remote_manifest.get("canonical_source_precedence") == _CANONICAL_SOURCE_PRECEDENCE
                 and isinstance(remote_manifest.get("source_revision"), str)
                 and bool(remote_manifest.get("source_revision"))
                 and remote_manifest.get("input_fingerprint") == fingerprint
@@ -198,7 +201,8 @@ def publish_current_view(
         observations_parquet_hash = _sha256_file(observations_parquet_path)
         manifest = {
             "format": "gh_ml_current_view_snapshot",
-            "version": 7,
+            "version": _SNAPSHOT_VERSION,
+            "canonical_source_precedence": _CANONICAL_SOURCE_PRECEDENCE,
             "projection_version": CURRENT_VIEW_PROJECTION_VERSION,
             "selection_version": SELECTION_VERSION,
             "candidate_rule_version": CANDIDATE_RULE_VERSION,
@@ -260,7 +264,8 @@ def publish_current_view(
                 latest_paths = set(_list_repo_files(api, repo_id, latest, token=commit_token))
                 if (_PARQUET in latest_paths and _OBSERVATIONS_PARQUET in latest_paths
                         and _CANDIDATES_PARQUET in latest_paths
-                        and confirmed and confirmed.get("version") == 7
+                        and confirmed and confirmed.get("version") == _SNAPSHOT_VERSION
+                        and confirmed.get("canonical_source_precedence") == _CANONICAL_SOURCE_PRECEDENCE
                         and confirmed.get("source_revision") == revision
                         and confirmed.get("input_fingerprint") == fingerprint
                         and confirmed.get("readme_evidence_fingerprint") == readme_fingerprint

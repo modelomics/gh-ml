@@ -203,6 +203,13 @@ def _parser() -> argparse.ArgumentParser:
     census.add_argument("--since", type=int, help="GitHub repository ID cursor (default: resume local checkpoint)")
     census.add_argument("--max-pages", type=int, default=1, help="maximum Core pages to collect per invocation")
     census.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    census_daily = subparsers.add_parser("census-daily", help="collect and publish a bounded daily GitHub census delta")
+    census_daily.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
+    census_daily.add_argument("--work-dir", type=Path, required=True, help="directory for isolated census run files")
+    census_daily.add_argument("--max-pages", type=int, default=50, help="maximum Core pages to collect (capped at 100)")
+    census_daily.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    census_daily.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
+    census_daily.add_argument("--no-publish", action="store_true", help="collect locally without downloading or publishing Hub state")
     snapshot = subparsers.add_parser(
         "publish-current-view",
         help="publish a current-view Parquet snapshot derived from the Hub observation history",
@@ -254,6 +261,145 @@ def _census(args: argparse.Namespace) -> int:
     )
     print(f"Census checkpoint: {args.output_dir / 'checkpoint.json'}")
     print(f"Next GitHub ID cursor: {checkpoint.get('next_since')}")
+    return 0
+
+
+def _census_daily(args: argparse.Namespace, *, api: Any = None, downloader: Any = None,
+                  token_provider: Any = None) -> int:
+    """Collect a bounded census delta from the pinned Hub checkpoint and publish it."""
+    if args.max_pages < 1:
+        raise ValueError("--max-pages must be at least 1")
+    max_pages = min(args.max_pages, 100)
+    github_token = _github_token(args.github_token_env)
+    if not github_token:
+        raise ValueError(f"GitHub token missing from {args.github_token_env} or gh CLI login")
+    initial_hf_token = None if args.no_publish else _hf_token(args.hf_token_env)
+    if not args.no_publish and not initial_hf_token:
+        raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+
+    if not args.no_publish:
+        if api is None:
+            from huggingface_hub import HfApi
+            api = HfApi(token=initial_hf_token)
+        if downloader is None:
+            from huggingface_hub import hf_hub_download
+            downloader = hf_hub_download
+        try:
+            info = api.repo_info(args.repo, repo_type="dataset", token=initial_hf_token)
+        except TypeError:
+            info = api.repo_info(args.repo, repo_type="dataset")
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face dataset lookup failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        base_revision = getattr(info, "sha", None)
+        if not isinstance(base_revision, str) or not base_revision:
+            raise ValueError("could not pin Hugging Face dataset revision")
+
+    from .census_state import hydrate_census_state, serialize_census_state
+
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    run_id = _run_id(_utc_now())
+    run_dir = args.work_dir / run_id
+    run_dir.mkdir()
+    if not args.no_publish:
+        try:
+            remote_state = downloader(repo_id=args.repo, filename="state/census.json", repo_type="dataset",
+                                      revision=base_revision, token=initial_hf_token,
+                                      cache_dir=str(args.work_dir / "hf-cache"))
+            payload = Path(remote_state).read_bytes()
+        except Exception as exc:
+            if (getattr(getattr(exc, "response", None), "status_code", None) == 404
+                    or type(exc).__name__ in {"EntryNotFoundError", "RemoteEntryNotFoundError"}):
+                payload = b""
+            elif isinstance(exc, HfHubHTTPError):
+                response = getattr(exc, "response", None)
+                status = getattr(response, "status_code", None)
+                raise ValueError(f"Hugging Face census state download failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+            else:
+                raise
+        else:
+            hydrate_census_state(payload, run_dir)
+
+    prior_checkpoint_path = run_dir / "checkpoint.json"
+    prior_checkpoint = json.loads(prior_checkpoint_path.read_text(encoding="utf-8")) if prior_checkpoint_path.exists() else {}
+    prior_cursor = prior_checkpoint.get("next_since", 0)
+    coverage_dir = run_dir / "coverage"
+    before_coverage = {
+        path.name: path.read_bytes() for path in coverage_dir.glob("*.json")
+    } if coverage_dir.exists() else {}
+    before_state_bytes = serialize_census_state(run_dir)
+    checkpoint = collect_census(run_dir, token=github_token, max_pages=max_pages)
+    coverage_files = sorted(coverage_dir.glob("*.json"))
+    changed_coverage = [
+        json.loads(path.read_text(encoding="utf-8"))
+        for path in coverage_files if before_coverage.get(path.name) != path.read_bytes()
+    ]
+    coverage_changes = [
+        {
+            "since": int(path.stem),
+            "before": json.loads(before_coverage[path.name]) if path.name in before_coverage else None,
+            "after": json.loads(path.read_text(encoding="utf-8")),
+        }
+        for path in coverage_files if before_coverage.get(path.name) != path.read_bytes()
+    ]
+    new_coverage_paths = [path for path in coverage_files if path.name not in before_coverage]
+    # The state bundle excludes candidate pages, so every page file in this
+    # isolated run directory was written or updated during this invocation.
+    delta_page_paths = sorted((run_dir / "pages").glob("*.jsonl"))
+    observations: dict[int, dict[str, Any]] = {}
+    for candidate_page in delta_page_paths:
+        if not candidate_page.exists():
+            continue
+        for line in candidate_page.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            repo_id = row.get("github_id")
+            if isinstance(repo_id, int) and not isinstance(repo_id, bool):
+                observations[repo_id] = row
+    observations_path = run_dir / "observations.jsonl"
+    observations_path.write_text("".join(json.dumps(observations[key], sort_keys=True) + "\n" for key in sorted(observations)), encoding="utf-8")
+    coverage_path = run_dir / "coverage.json"
+    page_reports = [json.loads(path.read_text(encoding="utf-8")) for path in new_coverage_paths]
+    aggregate = {
+        "run_id": run_id, "base_revision": base_revision if not args.no_publish else None,
+        "prior_next_since": prior_cursor, "next_since": checkpoint.get("next_since"),
+        "checkpoint": checkpoint,
+        "pages_collected": len(new_coverage_paths),
+        "retry_pages_updated": max(0, len(changed_coverage) - len(new_coverage_paths)),
+        "enumerated": sum(int(row.get("enumerated", 0)) for row in page_reports),
+        "candidate_count": len(observations),
+        "unknown_count": sum(int(row.get("unknown_count", 0)) for row in page_reports),
+        "not_candidate_count": sum(int(row.get("not_candidate_count", 0)) for row in page_reports),
+        "changed_coverage": changed_coverage,
+        "coverage_changes": coverage_changes,
+    }
+    _write_json(coverage_path, aggregate)
+    checkpoint_path = run_dir / "checkpoint.json"
+    if not checkpoint_path.exists():
+        _write_json(checkpoint_path, checkpoint)
+    state_bytes = serialize_census_state(run_dir)
+    has_delta = bool(new_coverage_paths or changed_coverage or state_bytes != before_state_bytes)
+    if not args.no_publish and has_delta:
+        fresh_token = (token_provider or (lambda: _hf_token(args.hf_token_env)))()
+        if not fresh_token:
+            raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+        from .census_publish import publish_census_run
+        try:
+            url = publish_census_run(args.repo, fresh_token, base_revision=base_revision,
+                                     run_id=run_id, observations_path=observations_path,
+                                     coverage_path=coverage_path, state_bytes=state_bytes,
+                                     api=api, downloader=downloader)
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face census publication failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        print(f"Published {len(observations)} census candidates to {url}")
+    elif not args.no_publish:
+        print("No new census pages collected; skipping Hub publication.")
+    print(f"Census daily {run_id}: {len(observations)} candidate repositories across {len(new_coverage_paths)} new pages")
+    print(f"Coverage: {coverage_path}")
     return 0
 
 
@@ -758,6 +904,8 @@ def main(argv: list[str] | None = None) -> int:
             return _current_view(args)
         if args.command == "census":
             return _census(args)
+        if args.command == "census-daily":
+            return _census_daily(args)
         if args.command == "publish-current-view":
             return _publish_current_view(args)
         if args.command == "readme-enrich":

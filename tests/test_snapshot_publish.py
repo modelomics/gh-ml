@@ -135,7 +135,8 @@ def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
     assert len(hub.commits) == 1
     assert hub.commits[0]["parent_commit"] == "rev-1"
     manifest = json.loads(hub.files["data/current/manifest.json"])
-    assert manifest["version"] == 7
+    assert manifest["version"] == 8
+    assert manifest["canonical_source_precedence"] == "search-over-queryless-census"
     assert manifest["readme_evidence_count"] == 0
     assert manifest["readme_evidence_files"] == []
     assert manifest["candidate_rule_version"] == publisher.CANDIDATE_RULE_VERSION
@@ -444,12 +445,12 @@ def test_same_inputs_with_old_projection_version_rebuilds(tmp_path):
     assert rebuilt["projection_version"] == publisher.CURRENT_VIEW_PROJECTION_VERSION
 
 
-def test_version_five_manifest_rebuilds_candidate_snapshot(tmp_path):
+def test_version_seven_manifest_rebuilds_source_ranked_snapshot(tmp_path):
     hub, downloader = _hub(tmp_path)
     publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
     manifest_path = "data/current/manifest.json"
     old_manifest = json.loads(hub.files[manifest_path])
-    old_manifest["version"] = 5
+    old_manifest["version"] = 7
     hub.files[manifest_path] = json.dumps(old_manifest).encode()
     hub.history[hub.revision][manifest_path] = hub.files[manifest_path]
 
@@ -457,7 +458,9 @@ def test_version_five_manifest_rebuilds_candidate_snapshot(tmp_path):
 
     assert result["already_current"] is False
     assert len(hub.commits) == 2
-    assert json.loads(hub.files[manifest_path])["version"] == 7
+    rebuilt = json.loads(hub.files[manifest_path])
+    assert rebuilt["version"] == 8
+    assert rebuilt["canonical_source_precedence"] == "search-over-queryless-census"
 
 
 def test_same_inputs_with_old_selection_version_rebuilds(tmp_path):
@@ -629,6 +632,32 @@ def test_lost_commit_response_is_confirmed_by_remote_manifest(tmp_path):
     result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
     assert result["already_current"] is True
     assert len(hub.commits) == 1
+
+
+def test_lost_commit_response_with_old_source_precedence_rebuilds(tmp_path):
+    hub, downloader = _hub(tmp_path)
+    original = hub.create_commit
+    calls = 0
+
+    def lose_response_with_old_precedence(**kwargs):
+        nonlocal calls
+        calls += 1
+        original(**kwargs)
+        if calls == 1:
+            manifest_path = "data/current/manifest.json"
+            manifest = json.loads(hub.files[manifest_path])
+            manifest["canonical_source_precedence"] = "queryless-census-over-search"
+            hub.files[manifest_path] = json.dumps(manifest).encode()
+            hub.history[hub.revision][manifest_path] = hub.files[manifest_path]
+            raise RuntimeError("response lost")
+
+    hub.create_commit = lose_response_with_old_precedence
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub,
+                                  downloader=downloader, max_attempts=2)
+    assert result["already_current"] is False
+    assert len(hub.commits) == 2
+    rebuilt = json.loads(hub.files["data/current/manifest.json"])
+    assert rebuilt["canonical_source_precedence"] == "search-over-queryless-census"
 
 
 def test_lost_commit_response_requires_matching_remote_card(tmp_path):
