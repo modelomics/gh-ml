@@ -10,6 +10,8 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from .schema import normalize_method_label
+
 
 _DOMAIN_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("computer-vision", (r"computer vision", r"image classification", r"object detection", r"image segmentation", r"semantic segmentation", r"image generation", r"vision transformer", r"\b(?:cv|vision)\b")),
@@ -96,12 +98,14 @@ def classify_repository(repo: Mapping[str, Any], matched_specs: Sequence[Any]) -
             escaped += "s?"
         pattern = rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
         if re.search(pattern, corpus, re.IGNORECASE):
-            methods.add(method)
+            methods.add(normalize_method_label(method))
     for spec in matched_specs:
         for key in ("method", "methods", "technique"):
             for label in _strings(_value(spec, key)):
                 if label.strip():
-                    methods.add(label.strip().casefold())
+                    normalized = normalize_method_label(label.strip())
+                    if normalized:
+                        methods.add(normalized)
         for key in ("domain", "domains", "field", "category"):
             for label in _strings(_value(spec, key)):
                 if label.strip():

@@ -1,0 +1,195 @@
+# Bounded recall pass: searchable repository names plus application areas that
+# are less visible in the core domain catalogs. These are candidate signals,
+# not inclusion judgments; every hit keeps its query ID as provenance.
+
+[[queries]]
+id = "recall.name.machine-learning"
+q = "\"machine learning\" in:name,description,readme"
+domains = ["general-ml"]
+methods = ["machine-learning"]
+
+[[queries]]
+id = "recall.name.deep-learning"
+q = "\"deep learning\" in:name,description,readme"
+domains = ["general-ml"]
+methods = ["deep-learning"]
+
+[[queries]]
+id = "recall.name.neural-network"
+q = "\"neural network\" in:name,description,readme"
+domains = ["general-ml"]
+methods = ["neural-network"]
+
+[[queries]]
+id = "recall.name.artificial-intelligence"
+q = "\"artificial intelligence\" in:name,description,readme"
+domains = ["general-ml"]
+methods = ["artificial-intelligence"]
+
+[[queries]]
+id = "recall.name.language-model"
+q = "\"language model\" in:name,description,readme"
+domains = ["natural-language-processing"]
+methods = ["language-model"]
+
+[[queries]]
+id = "recall.name.large-language-model"
+q = "\"large language model\" in:name,description,readme"
+domains = ["natural-language-processing"]
+methods = ["large-language-model"]
+
+[[queries]]
+id = "recall.name.transformer-model"
+q = "transformer model in:name,description,readme"
+domains = ["general-ml"]
+methods = ["transformer"]
+
+[[queries]]
+id = "recall.name.diffusion-model"
+q = "diffusion model in:name,description,readme"
+domains = ["generative-ai"]
+methods = ["diffusion"]
+
+[[queries]]
+id = "recall.name.foundation-model"
+q = "foundation model in:name,description,readme"
+domains = ["general-ml"]
+methods = ["foundation-model"]
+
+[[queries]]
+id = "recall.name.multimodal-model"
+q = "multimodal model in:name,description,readme"
+domains = ["multimodal"]
+methods = ["multimodal-learning"]
+
+[[queries]]
+id = "recall.legal-nlp"
+q = "legal NLP in:name,description,readme"
+domains = ["law", "legal-technology", "natural-language-processing"]
+methods = ["natural-language-processing"]
+
+[[queries]]
+id = "recall.legal-document-classification"
+q = "\"legal document classification\" in:name,description,readme"
+domains = ["law", "legal-technology"]
+methods = ["document-classification"]
+
+[[queries]]
+id = "recall.case-outcome-prediction"
+q = "\"case outcome prediction\" in:name,description,readme"
+domains = ["law", "legal-technology"]
+methods = ["prediction"]
+
+[[queries]]
+id = "recall.student-performance-prediction"
+q = "\"student performance prediction\" in:name,description,readme"
+domains = ["education", "learning-analytics"]
+methods = ["prediction"]
+
+[[queries]]
+id = "recall.educational-recommendation"
+q = "\"educational recommendation\" in:name,description,readme"
+domains = ["education", "recommender-systems"]
+methods = ["recommendation"]
+
+[[queries]]
+id = "recall.computational-social-science"
+q = "\"computational social science\" in:name,description,readme"
+domains = ["social-sciences"]
+methods = ["computational-social-science"]
+
+[[queries]]
+id = "recall.social-media-analysis"
+q = "\"social media analysis\" NLP in:name,description,readme"
+domains = ["social-sciences", "natural-language-processing"]
+methods = ["text-analysis"]
+
+[[queries]]
+id = "recall.digital-humanities-nlp"
+q = "\"digital humanities\" NLP in:name,description,readme"
+domains = ["digital-humanities", "natural-language-processing"]
+methods = ["natural-language-processing"]
+
+[[queries]]
+id = "recall.historical-document-recognition"
+q = "\"historical document recognition\" in:name,description,readme"
+domains = ["digital-humanities", "document-understanding"]
+methods = ["document-recognition"]
+
+[[queries]]
+id = "recall.archaeological-remote-sensing"
+q = "archaeology \"remote sensing\" in:name,description,readme"
+domains = ["archaeology", "remote-sensing"]
+methods = ["object-detection"]
+
+[[queries]]
+id = "recall.computational-linguistics"
+q = "\"computational linguistics\" model in:name,description,readme"
+domains = ["linguistics", "natural-language-processing"]
+methods = ["language-modeling"]
+
+[[queries]]
+id = "recall.sports-analytics"
+q = "\"sports analytics\" model in:name,description,readme"
+domains = ["sports-analytics"]
+methods = ["predictive-modeling"]
+
+[[queries]]
+id = "recall.player-tracking"
+q = "\"player tracking\" computer vision in:name,description,readme"
+domains = ["sports-analytics", "computer-vision"]
+methods = ["tracking"]
+
+[[queries]]
+id = "recall.insurance-risk-modeling"
+q = "\"insurance risk\" machine learning in:name,description,readme"
+domains = ["insurance", "actuarial-science"]
+methods = ["risk-modeling"]
+
+[[queries]]
+id = "recall.power-system-forecasting"
+q = "\"power system forecasting\" in:name,description,readme"
+domains = ["energy", "power-systems"]
+methods = ["forecasting"]
+
+[[queries]]
+id = "recall.grid-stability-prediction"
+q = "\"grid stability prediction\" in:name,description,readme"
+domains = ["energy", "power-systems"]
+methods = ["prediction"]
+
+[[queries]]
+id = "recall.structural-health-monitoring"
+q = "\"structural health monitoring\" machine learning in:name,description,readme"
+domains = ["civil-engineering", "structural-engineering"]
+methods = ["anomaly-detection", "condition-monitoring"]
+
+[[queries]]
+id = "recall.infrastructure-damage-detection"
+q = "\"infrastructure damage detection\" deep learning in:name,description,readme"
+domains = ["civil-engineering", "computer-vision"]
+methods = ["damage-detection"]
+
+[[queries]]
+id = "recall.epidemiological-modeling"
+q = "\"epidemiological modeling\" machine learning in:name,description,readme"
+domains = ["epidemiology", "public-health"]
+methods = ["predictive-modeling"]
+
+[[queries]]
+id = "recall.epidemic-forecasting"
+q = "\"epidemic forecasting\" in:name,description,readme"
+domains = ["epidemiology", "public-health"]
+methods = ["forecasting"]
+
+[[queries]]
+id = "recall.disease-surveillance"
+q = "\"disease surveillance\" machine learning in:name,description,readme"
+domains = ["epidemiology", "public-health"]
+methods = ["anomaly-detection"]
+
+[[queries]]
+id = "recall.population-health-prediction"
+q = "\"population health prediction\" in:name,description,readme"
+domains = ["epidemiology", "public-health"]
+methods = ["prediction"]

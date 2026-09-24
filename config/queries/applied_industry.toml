@@ -2,7 +2,7 @@
 id = "applied.recommender-systems"
 q = "\"recommender system\" in:readme"
 domains = ["recommender-systems"]
-methods = ["recommendation"]
+methods = []
 
 [[queries]]
 id = "applied.collaborative-filtering"
@@ -13,20 +13,20 @@ methods = ["collaborative-filtering"]
 [[queries]]
 id = "applied.click-through-rate"
 q = "\"click-through rate prediction\" in:readme"
-domains = ["advertising", "recommender-systems"]
-methods = ["click-through-rate-prediction"]
+domains = ["advertising", "click-through-rate-prediction", "recommender-systems"]
+methods = []
 
 [[queries]]
 id = "applied.ad-ranking"
 q = "\"ad ranking\" in:description"
-domains = ["advertising"]
-methods = ["ad-ranking"]
+domains = ["ad-ranking", "advertising"]
+methods = []
 
 [[queries]]
 id = "applied.search-ranking"
 q = "\"search ranking\" in:readme"
-domains = ["search", "information-retrieval"]
-methods = ["search-ranking"]
+domains = ["information-retrieval", "search", "search-ranking"]
+methods = []
 
 [[queries]]
 id = "applied.learning-to-rank"
@@ -43,26 +43,26 @@ methods = ["tabular-learning"]
 [[queries]]
 id = "applied.time-series-forecasting"
 q = "\"time series forecasting\" manufacturing in:description"
-domains = ["time-series", "forecasting"]
-methods = ["time-series-forecasting"]
+domains = ["forecasting", "time-series", "time-series-forecasting"]
+methods = []
 
 [[queries]]
 id = "applied.quantitative-finance"
 q = "\"quantitative finance\" in:readme"
-domains = ["finance"]
-methods = ["quantitative-finance"]
+domains = ["finance", "quantitative-finance"]
+methods = []
 
 [[queries]]
 id = "applied.algorithmic-trading"
 q = "\"algorithmic trading\" in:description"
-domains = ["finance"]
-methods = ["algorithmic-trading"]
+domains = ["algorithmic-trading", "finance"]
+methods = []
 
 [[queries]]
 id = "applied.ml-econometrics"
 q = "\"machine learning econometrics\" in:readme"
-domains = ["economics"]
-methods = ["machine-learning-econometrics"]
+domains = ["economics", "machine-learning-econometrics"]
+methods = []
 
 [[queries]]
 id = "applied.causal-inference"
@@ -74,37 +74,37 @@ methods = ["causal-inference"]
 id = "applied.fraud-detection"
 q = "\"fraud detection\" in:readme"
 domains = ["fraud-detection"]
-methods = ["fraud-detection"]
+methods = []
 
 [[queries]]
 id = "applied.predictive-maintenance"
 q = "\"predictive maintenance\" industrial in:description"
-domains = ["industrial-ml", "manufacturing"]
-methods = ["predictive-maintenance"]
+domains = ["industrial-ml", "manufacturing", "predictive-maintenance"]
+methods = []
 
 [[queries]]
 id = "applied.supply-chain-optimization"
 q = "\"supply chain optimization\" in:readme"
-domains = ["supply-chain", "operations-research"]
-methods = ["supply-chain-optimization"]
+domains = ["supply-chain", "supply-chain-optimization", "operations-research"]
+methods = []
 
 [[queries]]
 id = "applied.churn-prediction"
 q = "\"customer churn prediction\" in:description"
-domains = ["customer-analytics", "business-analytics"]
-methods = ["churn-prediction", "classification"]
+domains = ["business-analytics", "churn-prediction", "customer-analytics"]
+methods = ["classification"]
 
 [[queries]]
 id = "applied.credit-scoring"
 q = "\"credit scoring\" in:description"
-domains = ["finance", "credit-risk"]
-methods = ["credit-scoring", "risk-modeling"]
+domains = ["credit-risk", "credit-scoring", "finance"]
+methods = []
 
 [[queries]]
 id = "applied.demand-forecasting"
 q = "\"demand forecasting\" in:description"
-domains = ["retail", "supply-chain", "forecasting"]
-methods = ["demand-forecasting"]
+domains = ["demand-forecasting", "forecasting", "retail", "supply-chain"]
+methods = []
 
 [[queries]]
 id = "applied.uplift-modeling"
@@ -115,101 +115,101 @@ methods = ["uplift-modeling", "treatment-effect-estimation"]
 [[queries]]
 id = "applied.customer-lifetime-value"
 q = "\"customer lifetime value\" in:description"
-domains = ["marketing", "customer-analytics"]
-methods = ["customer-lifetime-value-prediction"]
+domains = ["customer-analytics", "customer-lifetime-value-prediction", "marketing"]
+methods = []
 
 [[queries]]
 id = "applied.dynamic-pricing"
 q = "\"dynamic pricing\" in:readme"
-domains = ["pricing", "retail", "finance"]
-methods = ["dynamic-pricing", "price-optimization"]
+domains = ["dynamic-pricing", "finance", "pricing", "retail"]
+methods = []
 
 [[queries]]
 id = "applied.inventory-optimization"
 q = "\"inventory optimization\" in:readme"
-domains = ["retail", "supply-chain", "operations-research"]
-methods = ["inventory-optimization", "demand-forecasting"]
+domains = ["demand-forecasting", "inventory-optimization", "operations-research", "retail", "supply-chain"]
+methods = []
 
 [[queries]]
 id = "applied.portfolio-optimization"
 q = "\"portfolio optimization\" in:readme"
-domains = ["finance", "investment"]
-methods = ["portfolio-optimization", "asset-allocation"]
+domains = ["asset-allocation", "finance", "investment", "portfolio-optimization"]
+methods = []
 
 [[queries]]
 id = "applied.customer-segmentation"
 q = "\"customer segmentation\" in:readme"
-domains = ["marketing", "customer-analytics"]
-methods = ["customer-segmentation", "clustering"]
+domains = ["customer-analytics", "customer-segmentation", "marketing"]
+methods = ["clustering"]
 
 [[queries]]
 id = "applied.educational-data-mining"
 q = "\"educational data mining\" in:description,readme"
-domains = ["education", "learning-analytics"]
-methods = ["educational-data-mining", "student-modeling"]
+domains = ["education", "educational-data-mining", "learning-analytics", "student-modeling"]
+methods = []
 
 [[queries]]
 id = "applied.cybersecurity-ml"
 q = "\"machine learning\" cybersecurity in:description,readme"
-domains = ["cybersecurity", "security-ml"]
-methods = ["threat-detection", "classification"]
+domains = ["cybersecurity", "security-ml", "threat-detection"]
+methods = ["classification"]
 
 [[queries]]
 id = "applied.malware-detection"
 q = "\"malware detection\" \"machine learning\" in:description,readme"
-domains = ["cybersecurity", "malware-analysis"]
-methods = ["malware-detection", "static-analysis"]
+domains = ["cybersecurity", "malware-analysis", "malware-detection", "static-analysis"]
+methods = []
 
 [[queries]]
 id = "applied.intrusion-detection"
 q = "\"intrusion detection\" \"machine learning\" in:description,readme"
-domains = ["cybersecurity", "network-security"]
-methods = ["intrusion-detection", "anomaly-detection"]
+domains = ["anomaly-detection", "cybersecurity", "intrusion-detection", "network-security"]
+methods = []
 
 [[queries]]
 id = "applied.agricultural-ml"
 q = "\"agricultural machine learning\" in:description,readme"
-domains = ["agriculture", "agricultural-ml"]
-methods = ["yield-prediction", "classification"]
+domains = ["agriculture", "agricultural-ml", "yield-prediction"]
+methods = ["classification"]
 
 [[queries]]
 id = "applied.plant-disease-detection"
 q = "\"plant disease detection\" \"deep learning\" in:description,readme"
-domains = ["agriculture", "plant-science"]
-methods = ["plant-disease-detection", "image-classification"]
+domains = ["agriculture", "image-classification", "plant-disease-detection", "plant-science"]
+methods = []
 
 [[queries]]
 id = "applied.ecological-forecasting"
 q = "\"ecological forecasting\" \"machine learning\" in:description,readme"
-domains = ["ecology", "environmental-science"]
-methods = ["ecological-forecasting", "species-distribution-modeling"]
+domains = ["ecological-forecasting", "ecology", "environmental-science", "species-distribution-modeling"]
+methods = []
 
 [[queries]]
 id = "applied.species-distribution-modeling"
 q = "\"species distribution modeling\" in:description,readme"
-domains = ["ecology", "biodiversity"]
-methods = ["species-distribution-modeling", "habitat-suitability-modeling"]
+domains = ["biodiversity", "ecology", "habitat-suitability-modeling", "species-distribution-modeling"]
+methods = []
 
 [[queries]]
 id = "applied.traffic-prediction"
 q = "\"traffic prediction\" \"machine learning\" in:description,readme"
-domains = ["transportation", "smart-cities"]
-methods = ["traffic-forecasting", "spatiotemporal-modeling"]
+domains = ["smart-cities", "traffic-forecasting", "transportation"]
+methods = ["spatiotemporal-modeling"]
 
 [[queries]]
 id = "applied.energy-load-forecasting"
 q = "\"load forecasting\" energy in:description,readme"
-domains = ["energy", "power-systems"]
-methods = ["energy-load-forecasting", "time-series-forecasting"]
+domains = ["energy", "energy-load-forecasting", "power-systems"]
+methods = []
 
 [[queries]]
 id = "applied.industrial-defect-detection"
 q = "\"industrial defect detection\" \"deep learning\" in:description,readme"
-domains = ["manufacturing", "industrial-ml"]
-methods = ["defect-detection", "visual-anomaly-detection"]
+domains = ["defect-detection", "industrial-ml", "manufacturing"]
+methods = []
 
 [[queries]]
 id = "applied.process-mining-prediction"
 q = "\"predictive process monitoring\" in:description,readme"
-domains = ["process-mining", "business-analytics"]
-methods = ["predictive-process-monitoring", "sequence-modeling"]
+domains = ["business-analytics", "predictive-process-monitoring", "process-mining"]
+methods = ["sequence-modeling"]

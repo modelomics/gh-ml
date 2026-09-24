@@ -1,0 +1,330 @@
+"""Build a deterministic latest-observation view from append-only JSONL runs."""
+
+from __future__ import annotations
+
+import json
+import os
+import sqlite3
+import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from .schema import normalize_method_label
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+_PARQUET_BATCH_ROWS = 2048
+
+
+def export_current_view_parquet(
+    jsonl_path: str | Path,
+    parquet_path: str | Path,
+    *,
+    compression: str = "zstd",
+) -> dict[str, int | str]:
+    """Stream a current-view JSONL file to a typed Parquet file.
+
+    PyArrow is imported lazily because Parquet export is an optional feature.
+    The canonical observation schema is explicit so ISO timestamps remain
+    strings and nullable/list fields keep consistent types across batches.
+    Source fields outside that schema are retained as canonical JSON in the
+    ``extra_json`` column. The destination is replaced atomically after the
+    Parquet footer is closed.
+    """
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as parquet
+    except ImportError as exc:
+        raise ImportError("Parquet export requires the optional 'parquet' dependencies; install with `uv sync --extra parquet`") from exc
+
+    source = Path(jsonl_path)
+    destination = Path(parquet_path)
+    if source.resolve() == destination.resolve():
+        raise ValueError("parquet_path must be distinct from jsonl_path")
+
+    string = pa.string()
+    strings = pa.list_(pa.string())
+    schema = pa.schema([
+        pa.field("archived", pa.bool_()),
+        pa.field("candidate_status", string),
+        pa.field("created_at", string),
+        pa.field("description", string),
+        pa.field("domains", strings),
+        pa.field("fork", pa.bool_()),
+        pa.field("forks", pa.int64()),
+        pa.field("github_id", pa.int64()),
+        pa.field("homepage", string),
+        pa.field("language", string),
+        pa.field("license", string),
+        pa.field("methods", strings),
+        pa.field("name", string),
+        pa.field("novelty_signals", strings),
+        pa.field("observed_at", string),
+        pa.field("pushed_at", string),
+        pa.field("query_ids", strings),
+        pa.field("stars", pa.int64()),
+        pa.field("topics", strings),
+        pa.field("updated_at", string),
+        pa.field("url", string),
+        pa.field("extra_json", string),
+    ])
+    canonical_fields = set(schema.names) - {"extra_json"}
+
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=f".{destination.name}.", suffix=".tmp", dir=destination.parent)
+    os.close(fd)
+    count = 0
+    try:
+        with parquet.ParquetWriter(temporary, schema, compression=compression) as writer:
+            prepared_rows: list[dict[str, Any]] = []
+            with source.open("r", encoding="utf-8") as stream:
+                for line_number, line in enumerate(stream, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        row = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise ValueError(f"{source}:{line_number}: invalid JSON: {exc.msg}") from exc
+                    if not isinstance(row, dict):
+                        raise ValueError(f"{source}:{line_number}: observation must be a JSON object")
+                    github_id = row.get("github_id")
+                    if (isinstance(github_id, bool) or not isinstance(github_id, int)
+                            or not 0 < github_id <= 9_223_372_036_854_775_807):
+                        raise ValueError(f"{source}:{line_number}: github_id must be a positive numeric integer")
+                    extra = {key: value for key, value in row.items() if key not in canonical_fields}
+                    try:
+                        extra_json = json.dumps(extra, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                                                separators=(",", ":")) if extra else None
+                    except (TypeError, ValueError) as exc:
+                        raise ValueError(f"{source}:{line_number}: extra fields are not valid JSON data: {exc}") from exc
+                    prepared_rows.append({**{field: row.get(field) for field in schema.names
+                                             if field in canonical_fields},
+                                          "extra_json": extra_json})
+                    if len(prepared_rows) >= _PARQUET_BATCH_ROWS:
+                        batch = pa.Table.from_pylist(prepared_rows, schema=schema)
+                        writer.write_table(batch)
+                        count += batch.num_rows
+                        prepared_rows.clear()
+                if prepared_rows:
+                    batch = pa.Table.from_pylist(prepared_rows, schema=schema)
+                    writer.write_table(batch)
+                    count += batch.num_rows
+        with open(temporary, "rb") as stream:
+            os.fsync(stream.fileno())
+        size = os.path.getsize(temporary)
+        os.replace(temporary, destination)
+        return {"row_count": count, "size_bytes": size, "compression": compression}
+    except BaseException:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def _timestamp_key(value: Any, *, source: Path, line_number: int) -> int:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{source}:{line_number}: observed_at must be a non-empty ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{source}:{line_number}: invalid observed_at timestamp {value!r}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{source}:{line_number}: observed_at must include a timezone")
+    delta = parsed.astimezone(timezone.utc) - _EPOCH
+    return ((delta.days * 86400 + delta.seconds) * 1_000_000) + delta.microseconds
+
+
+_AGGREGATED_LABEL_FIELDS = {
+    "query_ids": "all_query_ids",
+    "domains": "all_domains",
+    "methods": "all_methods",
+    "novelty_signals": "all_novelty_signals",
+}
+
+
+def _labels_from_row(row: dict[str, Any], *, source: Path, line_number: int) -> dict[str, list[str]]:
+    labels: dict[str, list[str]] = {}
+    for source_field in _AGGREGATED_LABEL_FIELDS:
+        values = row.get(source_field, [])
+        if values is None:
+            values = []
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            raise ValueError(f"{source}:{line_number}: {source_field} must be an array of strings")
+        cleaned: set[str] = set()
+        for value in values:
+            value = value.strip()
+            if not value:
+                raise ValueError(f"{source}:{line_number}: {source_field} cannot contain empty labels")
+            if source_field == "methods":
+                value = normalize_method_label(value)
+                if not value:
+                    raise ValueError(f"{source}:{line_number}: methods contains a label with no slug characters")
+            cleaned.add(value)
+        labels[source_field] = sorted(cleaned)
+    return labels
+
+
+def materialize_current_view(
+    observation_paths: Iterable[str | Path],
+    output_path: str | Path,
+    *,
+    manifest_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Write one latest observation per GitHub id using bounded-memory SQLite.
+
+    The greatest timezone-aware ``observed_at`` instant wins for the source
+    snapshot. Equal instants use the lexicographically greatest canonical JSON
+    row as a stable tie-break, so results do not depend on source-file order.
+    That row's fields, including its ``query_ids``, ``domains``, and ``methods``,
+    remain intact. Sorted cross-observation unions are added as ``all_query_ids``,
+    ``all_domains``, ``all_methods``, and ``all_novelty_signals``; aggregated
+    methods use the canonical slug normalizer. ``observation_count`` counts all
+    input rows for that ID. ``first_observed_at`` comes from the earliest
+    observed instant, with the lexicographically smallest timestamp string
+    breaking equal-instant ties. A JSON manifest is written alongside the
+    output unless an explicit ``manifest_path`` is supplied.
+    """
+    sources = [Path(item) for item in observation_paths]
+    output = Path(output_path)
+    manifest = Path(manifest_path) if manifest_path is not None else output.with_suffix(output.suffix + ".manifest.json")
+    resolved_output = output.resolve()
+    if any(source.resolve() == resolved_output for source in sources):
+        raise ValueError("output_path must not also be an observation input")
+    if manifest.resolve() in {resolved_output, *(source.resolve() for source in sources)}:
+        raise ValueError("manifest_path must be distinct from output and observation inputs")
+
+    per_source: list[dict[str, Any]] = []
+    with tempfile.TemporaryDirectory(prefix="gh-ml-current-view-") as temp_dir:
+        database = Path(temp_dir) / "current.sqlite3"
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute(
+                "CREATE TABLE chosen (github_id INTEGER PRIMARY KEY, latest_stamp INTEGER NOT NULL, "
+                "row_json TEXT NOT NULL, first_stamp INTEGER NOT NULL, first_observed_at TEXT NOT NULL, "
+                "observation_count INTEGER NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE labels (github_id INTEGER NOT NULL, field TEXT NOT NULL, label TEXT NOT NULL, "
+                "PRIMARY KEY (github_id, field, label))"
+            )
+            total_rows = 0
+            for source in sources:
+                source_rows = 0
+                try:
+                    stream = source.open("r", encoding="utf-8")
+                except OSError as exc:
+                    raise ValueError(f"cannot open observation file {source}: {exc}") from exc
+                with stream:
+                    for line_number, line in enumerate(stream, start=1):
+                        if not line.strip():
+                            continue
+                        try:
+                            row = json.loads(line)
+                        except json.JSONDecodeError as exc:
+                            raise ValueError(f"{source}:{line_number}: invalid JSON: {exc.msg}") from exc
+                        if not isinstance(row, dict):
+                            raise ValueError(f"{source}:{line_number}: observation must be a JSON object")
+                        github_id = row.get("github_id")
+                        if (isinstance(github_id, bool) or not isinstance(github_id, int)
+                                or not 0 < github_id <= 9_223_372_036_854_775_807):
+                            raise ValueError(f"{source}:{line_number}: github_id must be a positive SQLite-safe integer")
+                        stamp = _timestamp_key(row.get("observed_at"), source=source, line_number=line_number)
+                        first_observed_at = row["observed_at"].strip()
+                        labels = _labels_from_row(row, source=source, line_number=line_number)
+                        try:
+                            encoded = json.dumps(row, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                                                 separators=(",", ":"))
+                        except (TypeError, ValueError) as exc:
+                            raise ValueError(f"{source}:{line_number}: observation is not valid JSON data: {exc}") from exc
+                        connection.execute(
+                            "INSERT INTO chosen VALUES (?, ?, ?, ?, ?, ?) "
+                            "ON CONFLICT(github_id) DO UPDATE SET "
+                            "latest_stamp=CASE WHEN excluded.latest_stamp > chosen.latest_stamp OR "
+                            "(excluded.latest_stamp = chosen.latest_stamp AND excluded.row_json > chosen.row_json) "
+                            "THEN excluded.latest_stamp ELSE chosen.latest_stamp END, "
+                            "row_json=CASE WHEN excluded.latest_stamp > chosen.latest_stamp OR "
+                            "(excluded.latest_stamp = chosen.latest_stamp AND excluded.row_json > chosen.row_json) "
+                            "THEN excluded.row_json ELSE chosen.row_json END, "
+                            "first_observed_at=CASE WHEN excluded.first_stamp < chosen.first_stamp OR "
+                            "(excluded.first_stamp = chosen.first_stamp AND "
+                            "excluded.first_observed_at < chosen.first_observed_at) "
+                            "THEN excluded.first_observed_at ELSE chosen.first_observed_at END, "
+                            "first_stamp=MIN(chosen.first_stamp, excluded.first_stamp), "
+                            "observation_count=chosen.observation_count + 1",
+                            (github_id, stamp, encoded, stamp, first_observed_at, 1),
+                        )
+                        connection.executemany(
+                            "INSERT OR IGNORE INTO labels (github_id, field, label) VALUES (?, ?, ?)",
+                            ((github_id, source_field, label)
+                             for source_field, values in labels.items() for label in values),
+                        )
+                        source_rows += 1
+                        total_rows += 1
+                per_source.append({"path": str(source.resolve()), "observations": source_rows})
+            connection.commit()
+
+            output.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary_output = tempfile.mkstemp(prefix=f".{output.name}.", suffix=".tmp", dir=output.parent)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                    chosen_rows = connection.execute(
+                        "SELECT github_id, row_json, first_observed_at, observation_count "
+                        "FROM chosen ORDER BY github_id"
+                    )
+                    for github_id, row_json, first_observed_at, observation_count in chosen_rows:
+                        row = json.loads(row_json)
+                        row["observation_count"] = observation_count
+                        row["first_observed_at"] = first_observed_at
+                        all_labels = {source_field: [] for source_field in _AGGREGATED_LABEL_FIELDS}
+                        for source_field, label in connection.execute(
+                            "SELECT field, label FROM labels WHERE github_id=? ORDER BY field, label", (github_id,)
+                        ):
+                            all_labels[source_field].append(label)
+                        for source_field, output_field in _AGGREGATED_LABEL_FIELDS.items():
+                            row[output_field] = all_labels[source_field]
+                        stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False, sort_keys=True,
+                                                separators=(",", ":")) + "\n")
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                row_count = connection.execute("SELECT COUNT(*) FROM chosen").fetchone()[0]
+                report = {
+                    "format": "gh_ml_current_view",
+                    "version": 1,
+                    "selection": "maximum observed_at instant; equal instants choose lexicographically greatest canonical JSON row",
+                    "aggregation": "sorted label unions across all observations; methods normalized to canonical slugs",
+                    "ordering": "ascending github_id",
+                    "input_files": per_source,
+                    "observation_count": total_rows,
+                    "current_view_count": row_count,
+                    "output_file": str(output.resolve()),
+                }
+                report_text = json.dumps(report, ensure_ascii=False, allow_nan=False, sort_keys=True, indent=2) + "\n"
+                # Stage both files before either destination is replaced.
+                manifest.parent.mkdir(parents=True, exist_ok=True)
+                fd, temporary_manifest = tempfile.mkstemp(prefix=f".{manifest.name}.", suffix=".tmp", dir=manifest.parent)
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
+                        stream.write(report_text)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    os.replace(temporary_output, output)
+                    os.replace(temporary_manifest, manifest)
+                except BaseException:
+                    for staged in (temporary_output, temporary_manifest):
+                        try:
+                            os.unlink(staged)
+                        except FileNotFoundError:
+                            pass
+                    raise
+            except BaseException:
+                try:
+                    os.unlink(temporary_output)
+                except FileNotFoundError:
+                    pass
+                raise
+            report["manifest_file"] = str(manifest.resolve())
+            return report
+        finally:
+            connection.close()

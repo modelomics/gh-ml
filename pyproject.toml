@@ -16,6 +16,12 @@ dependencies = [
 dev = [
   "pytest>=8.3",
 ]
+pwc = [
+  "datasets>=3.3,<5",
+]
+parquet = [
+  "pyarrow>=20",
+]
 
 [project.scripts]
 gh-ml = "gh_ml.cli:main"

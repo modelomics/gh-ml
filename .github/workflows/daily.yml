@@ -82,26 +82,37 @@ jobs:
         run: |
           uv run --frozen python -c 'import os; from huggingface_hub import get_token; token = os.environ.get("HF_TOKEN") or get_token(); assert token, "No Hugging Face token available from HF_TOKEN or the configured GitHub OIDC trusted publisher"'
       - name: Sample broad repository queries
+        id: sample
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml sample --max-requests "$SAMPLE_MAX_REQUESTS" --since-days 1
       - name: Collect recent repositories
+        id: recent
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml run --max-requests "$RECENT_MAX_REQUESTS"
       - name: Sample historical repositories by year
+        id: historical_sample
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml historical-sample --max-requests "$HISTORICAL_SAMPLE_MAX_REQUESTS"
       - name: Fair backfill historical repositories
+        id: backfill
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml backfill-fair --max-requests "$BACKFILL_MAX_REQUESTS"
+      - name: Fail if any collection pass failed
+        if: steps.sample.outcome == 'failure' || steps.recent.outcome == 'failure' || steps.historical_sample.outcome == 'failure' || steps.backfill.outcome == 'failure'
+        run: exit 1

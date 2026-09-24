@@ -20,11 +20,16 @@ from .github import GitHubAPIError, GitHubClient, SearchProgress
 from .hub import load_checkpoint, publish_run
 from .query_catalog import load_queries
 from .schema import observation_from_repository, write_jsonl
+from .pwc import DEFAULT_DIR as DEFAULT_PWC_DIR, import_pwc
+from .current_view import materialize_current_view, export_current_view_parquet
+from .census import collect_census
 
 DEFAULT_REPO = "modelomics/gh-ml"
 DISPLAY_NAME = "GitHub ML"
 DEFAULT_CONFIG = Path(__file__).resolve().parents[2] / "config" / "queries"
 DEFAULT_OUTPUT = Path.home() / ".local" / "share" / "modelomics-gh-ml" / "runs"
+DEFAULT_CURRENT_VIEW_OUTPUT = Path.home() / ".local" / "share" / "modelomics-gh-ml" / "current-view.jsonl"
+DEFAULT_CENSUS_OUTPUT = Path.home() / ".local" / "share" / "modelomics-gh-ml" / "census"
 
 
 def _utc_now() -> datetime:
@@ -152,7 +157,60 @@ def _parser() -> argparse.ArgumentParser:
     historical.add_argument("--no-publish", action="store_true", help="write local files without publishing to Hugging Face")
     historical.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     historical.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
+    pwc = subparsers.add_parser("pwc-import", help="locally import a bounded batch from the pinned Papers with Code archive")
+    pwc.add_argument("--output-dir", type=Path, default=DEFAULT_PWC_DIR, help="local run and checkpoint directory")
+    pwc.add_argument("--max-rows", type=int, default=10_000, help="maximum source rows scanned per invocation")
+    pwc.add_argument("--max-repos", type=int, default=500, help="maximum GitHub repository resolutions per invocation")
+    pwc.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    current_view = subparsers.add_parser("current-view", help="materialize the latest local observation for each GitHub repository")
+    current_view.add_argument("dataset_root", type=Path, help="local downloaded dataset root containing data/observations JSONL files")
+    current_view.add_argument("--output", type=Path, default=DEFAULT_CURRENT_VIEW_OUTPUT, help="output current-view JSONL path")
+    current_view.add_argument("--manifest", type=Path, help="manifest path (default: <output>.manifest.json)")
+    current_view.add_argument("--parquet-output", type=Path, help="also export current view to Parquet (requires the parquet extra)")
+    census = subparsers.add_parser("census", help="locally collect bounded GitHub Core census pages as candidates")
+    census.add_argument("--output-dir", type=Path, default=DEFAULT_CENSUS_OUTPUT, help="local census output directory")
+    census.add_argument("--since", type=int, help="GitHub repository ID cursor (default: resume local checkpoint)")
+    census.add_argument("--max-pages", type=int, default=1, help="maximum Core pages to collect per invocation")
+    census.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     return parser
+
+
+def _pwc_import(args: argparse.Namespace) -> int:
+    token = _github_token(args.github_token_env)
+    manifest = import_pwc(output_dir=args.output_dir, max_rows=args.max_rows,
+                          max_repos=args.max_repos, client=GitHubClient(token=token))
+    print(f"PWC import scanned {manifest['rows_scanned']} rows; resolved {manifest['repositories_resolved']} repositories")
+    manifest_path = args.output_dir / f"manifest-{manifest['run_id']}.json"
+    print(f"Manifest: {manifest_path}")
+    return 2 if manifest.get("resolution_error") else 0
+
+
+def _current_view(args: argparse.Namespace) -> int:
+    sources = sorted(args.dataset_root.glob("data/observations/**/*.jsonl"))
+    if not sources:
+        raise ValueError(f"no observation JSONL files found under {args.dataset_root / 'data/observations'}")
+    manifest = materialize_current_view(sources, args.output, manifest_path=args.manifest)
+    print(f"Current view: {manifest['current_view_count']} repositories from {manifest['observation_count']} observations")
+    print(f"Output: {args.output}")
+    print(f"Manifest: {args.manifest or args.output.with_suffix(args.output.suffix + '.manifest.json')}")
+    if args.parquet_output:
+        result = export_current_view_parquet(args.output, args.parquet_output)
+        print(f"Parquet: {args.parquet_output} ({result['row_count']} rows)")
+    return 0
+
+
+def _census(args: argparse.Namespace) -> int:
+    if args.max_pages < 1:
+        raise ValueError("--max-pages must be at least 1")
+    checkpoint = collect_census(
+        args.output_dir,
+        token=_github_token(args.github_token_env),
+        since=args.since,
+        max_pages=args.max_pages,
+    )
+    print(f"Census checkpoint: {args.output_dir / 'checkpoint.json'}")
+    print(f"Next GitHub ID cursor: {checkpoint.get('next_since')}")
+    return 0
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -501,6 +559,12 @@ def main(argv: list[str] | None = None) -> int:
             return _sample(args)
         if args.command == "historical-sample":
             return _historical_sample(args)
+        if args.command == "pwc-import":
+            return _pwc_import(args)
+        if args.command == "current-view":
+            return _current_view(args)
+        if args.command == "census":
+            return _census(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

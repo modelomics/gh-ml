@@ -185,3 +185,112 @@ def test_search_rejects_malformed_response(payload: object, message: str) -> Non
 
     with pytest.raises(GitHubAPIError, match=message):
         client.search_repositories("machine learning")
+
+
+def _graphql_repo(repo_id: int, full_name: str | None = None) -> dict:
+    return {
+        "databaseId": repo_id,
+        "nameWithOwner": full_name or f"owner/repo-{repo_id}",
+        "url": f"https://github.com/{full_name or f'owner/repo-{repo_id}'}",
+        "description": "vision transformer model",
+        "homepageUrl": None,
+        "stargazerCount": 12,
+        "forkCount": 3,
+        "createdAt": "2020-01-01T00:00:00Z",
+        "pushedAt": "2025-01-01T00:00:00Z",
+        "updatedAt": "2025-01-02T00:00:00Z",
+        "isArchived": False,
+        "isFork": False,
+        "primaryLanguage": {"name": "Python"},
+        "licenseInfo": {"spdxId": "MIT", "name": "MIT License"},
+        "repositoryTopics": {"nodes": [{"topic": {"name": "machine-learning"}}]},
+    }
+
+
+def test_graphql_batch_resolves_50_aliases_to_canonical_rest_shape() -> None:
+    names = [f"owner/repo-{index}" for index in range(50)]
+    data = {f"repo_{index}": _graphql_repo(index + 1) for index in range(50)}
+    captured = []
+
+    def opener(request, *, timeout):
+        captured.append(request)
+        body = json.loads(request.data)
+        assert body["query"].count("repository(owner:") == 50
+        return FakeResponse({"data": data})
+
+    client = GitHubClient(opener=opener)
+    result = client.get_repositories_batch(names)
+
+    assert len(result.repositories) == 50
+    assert result.errors == (None,) * 50
+    assert [repo["id"] for repo in result.repositories] == list(range(1, 51))
+    assert result.repositories[0]["full_name"] == "owner/repo-1"
+    assert result.repositories[0]["html_url"] == "https://github.com/owner/repo-1"
+    assert result.repositories[0]["topics"] == ["machine-learning"]
+    assert result.repositories[0]["license"]["spdx_id"] == "MIT"
+    assert captured[0].get_method() == "POST"
+    assert captured[0].full_url == "https://api.github.com/graphql"
+
+
+def test_graphql_batch_escapes_names_and_keeps_nulls_and_field_errors_distinct() -> None:
+    secret = "do-not-leak-this-error"
+    payload = {
+        "data": {"repo_0": _graphql_repo(7, "new-owner/new-name"), "repo_1": None, "repo_2": None},
+        "errors": [{"message": secret, "path": ["repo_2", "databaseId"]}],
+    }
+    captured = []
+
+    def opener(request, *, timeout):
+        captured.append(json.loads(request.data)["query"])
+        return FakeResponse(payload)
+
+    client = GitHubClient(opener=opener)
+    result = client.get_repositories_batch(['own"er/repo', "old/name", "bad/name"])
+
+    assert 'owner: "own\\\"er"' in captured[0]
+    assert result.repositories[0]["full_name"] == "new-owner/new-name"
+    assert result.repositories[0]["id"] == 7
+    assert result.repositories[1] is None and result.errors[1] is None
+    assert result.repositories[2] is None and result.errors[2] == "GraphQL field error"
+    assert secret not in repr(result)
+
+
+def test_graphql_batch_retries_rate_limit_without_exposing_token() -> None:
+    token = "ghp-graphql-secret-test-value"
+    retry = HTTPError("https://api.github.com/graphql", 429, "slow down", {"Retry-After": "4"}, BytesIO(b'{"secret":"private"}'))
+    outcomes = [retry, FakeResponse({"data": {"repo_0": _graphql_repo(9)}})]
+    sleeps: list[float] = []
+    requests = []
+
+    def opener(request, *, timeout):
+        requests.append(request)
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    client = GitHubClient(token=token, opener=opener, sleeper=sleeps.append)
+    result = client.get_repositories_batch(["owner/repo"])
+
+    assert result.repositories[0]["id"] == 9
+    assert sleeps == [4.0]
+    assert requests[0].get_header("Authorization") == f"Bearer {token}"
+    assert token not in repr(result)
+
+
+def test_graphql_http_error_does_not_expose_token_or_body() -> None:
+    token = "ghp-graphql-private-token"
+    body_secret = "private-response-body"
+
+    def opener(request, *, timeout):
+        raise HTTPError(
+            "https://api.github.com/graphql", 401, "Unauthorized", {},
+            BytesIO(json.dumps({"message": body_secret, "token": token}).encode()),
+        )
+
+    client = GitHubClient(token=token, opener=opener, sleeper=lambda _: None)
+    with pytest.raises(GitHubAPIError) as error:
+        client.get_repositories_batch(["owner/repo"])
+    assert token not in str(error.value)
+    assert body_secret not in str(error.value)
+    assert token not in repr(error.value)

@@ -1,4 +1,4 @@
-"""Small, dependency-free GitHub REST API client for repository discovery."""
+"""Small, dependency-free GitHub REST and GraphQL client for repository discovery."""
 
 from __future__ import annotations
 
@@ -44,8 +44,16 @@ class SearchProgress:
     remaining: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class RepositoryBatchResult:
+    """Repository metadata aligned to batch input order, with safe item errors."""
+
+    repositories: tuple[dict[str, Any] | None, ...]
+    errors: tuple[str | None, ...]
+
+
 class GitHubClient:
-    """GitHub REST client with bounded retry for transient and rate-limit errors.
+    """GitHub API client with bounded retry for transient and rate-limit errors.
 
     ``opener`` can be supplied for tests; it must accept ``(Request, timeout=...)``.
     ``sleeper`` is injectable so retry behavior can be tested without waiting.
@@ -124,6 +132,129 @@ class GitHubClient:
         if not isinstance(payload.get("full_name"), str) or not payload["full_name"]:
             raise GitHubAPIError(None, "invalid repository response: full_name is missing")
         return payload
+
+    def get_repositories_batch(self, full_names: list[str] | tuple[str, ...]) -> RepositoryBatchResult:
+        """Look up at most 50 repositories through GraphQL aliases.
+
+        Results remain aligned with ``full_names``. GraphQL nulls are returned
+        as null items; this method does not infer 404 from a null repository.
+        Error strings are deliberately generic and never include response text.
+        """
+        if isinstance(full_names, (str, bytes)) or not isinstance(full_names, (list, tuple)):
+            raise TypeError("full_names must be a list or tuple of repository names")
+        if not 1 <= len(full_names) <= 50:
+            raise ValueError("batch size must be between 1 and 50")
+        parts: list[tuple[str, str]] = []
+        for name in full_names:
+            split = name.split("/") if isinstance(name, str) else []
+            if len(split) != 2 or any(not part.strip() or part in {".", ".."} for part in split):
+                raise ValueError("each full_name must have the form owner/name")
+            parts.append((split[0], split[1]))
+
+        fields = """databaseId nameWithOwner url description homepageUrl
+            stargazerCount forkCount createdAt pushedAt updatedAt isArchived isFork
+            primaryLanguage { name }
+            licenseInfo { spdxId name }
+            repositoryTopics(first: 100) { nodes { topic { name } } }"""
+        aliases: list[str] = []
+        for index, (owner, name) in enumerate(parts):
+            # JSON string literals are valid GraphQL string literals and escape
+            # quotes, backslashes, and control characters correctly.
+            aliases.append(
+                f"repo_{index}: repository(owner: {json.dumps(owner)}, name: {json.dumps(name)}) "
+                f"{{ {fields} }}"
+            )
+        query = "query RepositoryBatch { " + " ".join(aliases) + " }"
+        payload, response_headers = self._graphql_request(query)
+        if not isinstance(payload, dict):
+            raise GitHubAPIError(None, "invalid GraphQL response: expected an object")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise GitHubAPIError(None, "invalid GraphQL response: missing data object")
+
+        item_errors: list[str | None] = [None] * len(parts)
+        raw_errors = payload.get("errors", [])
+        if not isinstance(raw_errors, list):
+            raw_errors = [{}]
+        alias_to_index = {f"repo_{index}": index for index in range(len(parts))}
+        global_error = False
+        for error in raw_errors:
+            path = error.get("path") if isinstance(error, dict) else None
+            alias = path[0] if isinstance(path, list) and path else None
+            if alias in alias_to_index:
+                item_errors[alias_to_index[alias]] = "GraphQL field error"
+            else:
+                global_error = True
+
+        repositories: list[dict[str, Any] | None] = []
+        for index in range(len(parts)):
+            node = data.get(f"repo_{index}")
+            if node is None:
+                if global_error and item_errors[index] is None:
+                    item_errors[index] = "GraphQL response error"
+                repositories.append(None)
+                continue
+            try:
+                repositories.append(_repository_from_graphql(node))
+            except (TypeError, ValueError):
+                repositories.append(None)
+                item_errors[index] = "invalid GraphQL repository data"
+        return RepositoryBatchResult(tuple(repositories), tuple(item_errors))
+
+    def _graphql_request(self, query: str) -> tuple[Any, Any]:
+        request = Request(
+            _API_ROOT + "/graphql",
+            data=json.dumps({"query": query}, separators=(",", ":")).encode("utf-8"),
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Content-Type": "application/json",
+                "User-Agent": self.user_agent,
+                "X-GitHub-Api-Version": "2022-11-28",
+                **({"Authorization": f"Bearer {self.token}"} if self.token else {}),
+            },
+            method="POST",
+        )
+        last_error: GitHubAPIError | None = None
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                with self._opener(request, timeout=self.timeout) as response:
+                    body = response.read()
+                    status = getattr(response, "status", 200)
+                    headers = getattr(response, "headers", {})
+                    if status < 200 or status >= 300:
+                        raise GitHubAPIError(status, "unexpected HTTP status")
+                try:
+                    payload = json.loads(body.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    raise GitHubAPIError(None, "GraphQL response body was not valid JSON") from None
+                errors = payload.get("errors", []) if isinstance(payload, dict) else []
+                rate_limited = any(
+                    isinstance(error, dict) and error.get("type") == "RATE_LIMITED"
+                    for error in errors if isinstance(errors, list)
+                )
+                if rate_limited:
+                    last_error = GitHubAPIError(403, "GraphQL rate limit exceeded")
+                    if attempt + 1 == _MAX_ATTEMPTS:
+                        break
+                    self._sleep(_retry_delay(headers, attempt))
+                    continue
+                return payload, headers
+            except HTTPError as exc:
+                status = exc.code
+                headers = exc.headers or {}
+                if status not in (403, 429) and not 500 <= status <= 599:
+                    raise GitHubAPIError(status, _safe_http_message(exc)) from None
+                last_error = GitHubAPIError(status, _safe_http_message(exc))
+                if attempt + 1 == _MAX_ATTEMPTS:
+                    break
+                self._sleep(_retry_delay(headers, attempt))
+            except (TimeoutError, URLError, OSError) as exc:
+                last_error = GitHubAPIError(None, type(exc).__name__)
+                if attempt + 1 == _MAX_ATTEMPTS:
+                    break
+                self._sleep(min(2**attempt, _MAX_RETRY_SLEEP))
+        assert last_error is not None
+        raise last_error
 
     def _request(self, path: str, params: dict[str, str | int] | None = None) -> Any:
         url = _API_ROOT + path
@@ -224,6 +355,66 @@ class GitHubClient:
 def _safe_http_message(exc: HTTPError) -> str:
     # Never include request URLs, response bodies, or authorization values in errors.
     return f"HTTP {exc.code} {exc.reason}".strip()
+
+
+def _repository_from_graphql(node: Any) -> dict[str, Any]:
+    if not isinstance(node, dict):
+        raise TypeError("repository node must be an object")
+    github_id = node.get("databaseId")
+    full_name = node.get("nameWithOwner")
+    html_url = node.get("url")
+    if isinstance(github_id, bool) or not isinstance(github_id, int) or github_id <= 0:
+        raise ValueError("invalid numeric repository id")
+    if not isinstance(full_name, str) or not full_name:
+        raise ValueError("missing canonical repository name")
+    if not isinstance(html_url, str) or not html_url:
+        raise ValueError("missing repository URL")
+
+    def count(key: str) -> int:
+        value = node.get(key)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("invalid repository count")
+        return value
+
+    language = node.get("primaryLanguage")
+    if language is not None and not isinstance(language, dict):
+        raise ValueError("invalid primary language")
+    license_info = node.get("licenseInfo")
+    if license_info is not None and not isinstance(license_info, dict):
+        raise ValueError("invalid license data")
+    if license_info is not None:
+        license_info = {
+            "spdx_id": license_info.get("spdxId"),
+            "name": license_info.get("name"),
+        }
+    topic_data = node.get("repositoryTopics")
+    topics: list[str] = []
+    if isinstance(topic_data, dict):
+        topic_nodes = topic_data.get("nodes", [])
+        if isinstance(topic_nodes, list):
+            for topic_node in topic_nodes:
+                topic = topic_node.get("topic") if isinstance(topic_node, dict) else None
+                name = topic.get("name") if isinstance(topic, dict) else None
+                if isinstance(name, str) and name:
+                    topics.append(name)
+
+    return {
+        "id": github_id,
+        "full_name": full_name,
+        "html_url": html_url,
+        "description": node.get("description"),
+        "homepage": node.get("homepageUrl"),
+        "language": language.get("name") if isinstance(language, dict) else None,
+        "license": license_info,
+        "topics": topics,
+        "stargazers_count": count("stargazerCount"),
+        "forks_count": count("forkCount"),
+        "created_at": node.get("createdAt"),
+        "pushed_at": node.get("pushedAt"),
+        "updated_at": node.get("updatedAt"),
+        "archived": node.get("isArchived"),
+        "fork": node.get("isFork"),
+    }
 
 
 def _retry_delay(headers: Any, attempt: int) -> float:

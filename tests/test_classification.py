@@ -34,7 +34,45 @@ def test_applied_domains_and_classic_methods_are_open_vocabulary_labels():
 
     assert "agriculture-and-food" in labels["domains"]
     assert "computer-vision" in labels["domains"]
-    assert "convolutional neural network" in labels["methods"]
+    assert "convolutional-neural-network" in labels["methods"]
+
+
+def test_methods_are_canonical_slugs_and_equivalent_spellings_deduplicate():
+    labels = classify_repository(
+        {"description": "Reinforcement learning and graph neural networks"},
+        [
+            {
+                "methods": [
+                    "reinforcement-learning",
+                    "graph-neural-network",
+                    "reinforcement learning",
+                ]
+            }
+        ],
+    )
+
+    assert labels["methods"] == [
+        "graph-neural-network",
+        "neural-network",
+        "reinforcement-learning",
+    ]
+
+
+def test_multiword_method_terms_keep_all_words_in_slug():
+    labels = classify_repository(
+        {"description": "A neural network using test time adaptation"}, []
+    )
+
+    assert "neural-network" in labels["methods"]
+    assert "test-time-adaptation" in labels["methods"]
+
+
+def test_method_slugs_preserve_unicode_letters_and_ascii_normalization():
+    labels = classify_repository(
+        {}, [{"methods": ["Café Learning", "α-β", "reinforcement_learning"]}]
+    )
+
+    assert labels["methods"] == ["café-learning", "reinforcement-learning", "α-β"]
 
 
 def test_query_labels_remain_open_vocabulary():

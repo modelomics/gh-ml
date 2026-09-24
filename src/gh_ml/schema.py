@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,8 +33,16 @@ class QuerySpec:
                 raise TypeError(f"{field_name} must be a tuple of non-empty strings")
 
 
+def normalize_method_label(value: str) -> str:
+    """Normalize a method label to the registry's lowercase hyphen slug form."""
+    folded = unicodedata.normalize("NFC", value.casefold())
+    slug = re.sub(r"[^\w]+", "-", folded, flags=re.UNICODE).replace("_", "-")
+    return slug.strip("-")
+
+
 def _strings(
-    values: Sequence[str], field_name: str, *, casefold_values: bool = False
+    values: Sequence[str], field_name: str, *, casefold_values: bool = False,
+    slug_values: bool = False,
 ) -> list[str]:
     if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
         raise TypeError(f"{field_name} must be a sequence of strings")
@@ -41,7 +51,13 @@ def _strings(
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"{field_name} must contain only non-empty strings")
         cleaned_value = value.strip()
-        cleaned.add(cleaned_value.casefold() if casefold_values else cleaned_value)
+        if slug_values:
+            cleaned_value = normalize_method_label(cleaned_value)
+        elif casefold_values:
+            cleaned_value = cleaned_value.casefold()
+        if not cleaned_value:
+            raise ValueError(f"{field_name} must contain only non-empty strings")
+        cleaned.add(cleaned_value)
     return sorted(cleaned, key=str.casefold)
 
 
@@ -129,7 +145,7 @@ def observation_from_repository(
         "observed_at": observed_at.strip(),
         "query_ids": _strings(query_ids, "query_ids"),
         "domains": _strings(domains, "domains", casefold_values=True),
-        "methods": _strings(methods, "methods", casefold_values=True),
+        "methods": _strings(methods, "methods", slug_values=True),
         "novelty_signals": _strings(
             novelty_signals, "novelty_signals", casefold_values=True
         ),

@@ -60,6 +60,30 @@ def test_observation_uses_license_key_or_name_when_spdx_is_missing() -> None:
         assert row["license"] == expected
 
 
+def test_observation_normalizes_and_deduplicates_method_slugs() -> None:
+    row = observation_from_repository(
+        _repository(),
+        observed_at="observed",
+        query_ids=[],
+        domains=[],
+        methods=[
+            " Reinforcement Learning ",
+            "reinforcement-learning",
+            "Graph Neural Network",
+            "Café Method",
+            "α-β",
+        ],
+        novelty_signals=[],
+    )
+
+    assert row["methods"] == [
+        "café-method",
+        "graph-neural-network",
+        "reinforcement-learning",
+        "α-β",
+    ]
+
+
 @pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
 def test_write_jsonl_rejects_nonstandard_json_numbers(tmp_path: Path, value: float) -> None:
     with pytest.raises(ValueError):

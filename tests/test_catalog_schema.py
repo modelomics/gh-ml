@@ -60,6 +60,19 @@ def test_load_queries_requires_config_directory(tmp_path: Path) -> None:
         load_queries(tmp_path / "missing")
 
 
+def test_applied_application_labels_are_domains_not_methods() -> None:
+    config_dir = Path(__file__).parents[1] / "config" / "queries"
+    by_id = {query.id: query for query in load_queries(config_dir)}
+
+    for query_id, domain in [
+        ("applied.algorithmic-trading", "algorithmic-trading"),
+        ("applied.fraud-detection", "fraud-detection"),
+        ("applied.credit-scoring", "credit-scoring"),
+    ]:
+        assert domain in by_id[query_id].domains
+        assert by_id[query_id].methods == ()
+
+
 def _repository(**overrides: object) -> dict[str, object]:
     repo: dict[str, object] = {
         "id": 42,
