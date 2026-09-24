@@ -36,7 +36,7 @@ methods = ["3d-reconstruction", "neural-reconstruction"]
 
 [[queries]]
 id = "multimodal.neural-rendering"
-q = "\"neural rendering\" in:description"
+q = "\"neural rendering\" \"radiance fields\" in:description"
 domains = ["computer-vision", "graphics", "3d"]
 methods = ["neural-rendering", "novel-view-synthesis"]
 

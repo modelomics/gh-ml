@@ -48,7 +48,7 @@ methods = ["simulation-emulation", "parameter-inference", "surrogate-modeling"]
 
 [[queries]]
 id = "science.weather-forecasting"
-q = "\"weather forecasting\" in:description"
+q = "\"weather forecasting\" climate in:description"
 domains = ["climate-science", "meteorology", "earth-science"]
 methods = ["weather-forecasting", "climate-modeling", "downscaling"]
 

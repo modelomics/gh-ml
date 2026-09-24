@@ -131,6 +131,16 @@ def _parser() -> argparse.ArgumentParser:
     backfill.add_argument("--no-publish", action="store_true", help="write local files without publishing to Hugging Face")
     backfill.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     backfill.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
+    fair_backfill = subparsers.add_parser("backfill-fair", help="fairly backfill historical GitHub ML repository candidates")
+    fair_backfill.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
+    fair_backfill.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG, help="directory of TOML query files")
+    fair_backfill.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT, help="local run and checkpoint directory")
+    fair_backfill.add_argument("--start", default="2008-01-01", help="first GitHub repository created date to search (default: 2008-01-01)")
+    fair_backfill.add_argument("--end", help="last GitHub repository created date to search (default: today in UTC)")
+    fair_backfill.add_argument("--max-requests", type=int, default=100, help="maximum GitHub search API requests per invocation")
+    fair_backfill.add_argument("--no-publish", action="store_true", help="write local files without publishing to Hugging Face")
+    fair_backfill.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    fair_backfill.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
     historical = subparsers.add_parser("historical-sample", help="sample repositories across historical creation years")
     historical.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
     historical.add_argument("--config-dir", type=Path, default=DEFAULT_CONFIG, help="directory of TOML query files")
@@ -152,6 +162,10 @@ def _backfill(args: argparse.Namespace) -> int:
     return _collect(args, mode="backfill")
 
 
+def _backfill_fair(args: argparse.Namespace) -> int:
+    return _collect(args, mode="backfill-fair")
+
+
 def _sample(args: argparse.Namespace) -> int:
     return _collect(args, mode="sample")
 
@@ -169,7 +183,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     args.output_dir.mkdir(parents=True, exist_ok=True)
     now = _utc_now()
     run_id = _run_id(now)
-    state_path = args.output_dir / ({"daily": "state.json", "backfill": "backfill-state.json", "sample": "sample-state.json", "historical-sample": "historical-sample-state.json"}[mode])
+    state_path = args.output_dir / ({"daily": "state.json", "backfill": "backfill-state.json", "backfill-fair": "backfill-fair-state.json", "sample": "sample-state.json", "historical-sample": "historical-sample-state.json"}[mode])
     initial_since = (now - timedelta(days=args.since_days)).date().isoformat() if mode in {"daily", "sample"} else getattr(args, "start", "")
     if mode == "historical-sample":
         if args.start_year < 2008 or args.start_year > now.year:
@@ -202,13 +216,13 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             raise ValueError(
                 f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login"
             )
-        remote_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "sample": "state/sample.json", "historical-sample": "state/historical-sample.json"}[mode]
+        remote_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "backfill-fair": "state/backfill-fair.json", "sample": "state/sample.json", "historical-sample": "state/historical-sample.json"}[mode]
         remote_checkpoint = load_checkpoint(args.repo, hf_token, checkpoint_path=remote_path)
         if not state["initialized"] and isinstance(remote_checkpoint, dict):
             state.update(remote_checkpoint)
             state["since"] = remote_checkpoint.get("since", initial_since)
             state["cursor"] = remote_checkpoint.get("cursor")
-            if mode == "backfill":
+            if mode in {"backfill", "backfill-fair"}:
                 state["start"] = remote_checkpoint.get("start", args.start)
                 state["end"] = remote_checkpoint.get("end", args.end)
     if specs is None:
@@ -235,6 +249,21 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
                 state["end"] = requested_end
         state["start_year"] = args.start_year
         state["catalog_signature"] = catalog_signature
+    if mode == "backfill-fair":
+        matches = state.get("catalog_signature") == catalog_signature
+        if state.get("complete") and matches:
+            print("Fair backfill already complete for this query catalog; skipping.")
+            return 0
+        if state.get("complete") and not matches:
+            state["cursor"] = None
+            state.pop("complete", None)
+            # A changed catalog starts a new sweep with the requested bounds.
+            state["start"] = args.start
+            state["end"] = args.end or now.date().isoformat()
+        elif state.get("cursor") is None:
+            state["start"] = state.get("start", args.start)
+            state["end"] = state.get("end") or args.end or now.date().isoformat()
+        state["catalog_signature"] = catalog_signature
 
     client = GitHubClient(token=github_token)
 
@@ -257,8 +286,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     set_progress_callback = getattr(client, "set_progress_callback", None)
     if callable(set_progress_callback):
         set_progress_callback(report_search_progress)
-    backfill_start = state.get("start", args.start) if mode == "backfill" else None
-    backfill_end = state.get("end", args.end or now.date().isoformat()) if mode == "backfill" else None
+    backfill_start = state.get("start", args.start) if mode in {"backfill", "backfill-fair"} else None
+    backfill_end = state.get("end", args.end or now.date().isoformat()) if mode in {"backfill", "backfill-fair"} else None
     if mode == "historical-sample":
         historical_end = state["end"]
         discover_run = lambda cursor: discover_historical_sample(
@@ -284,6 +313,13 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
                 max_requests=args.max_requests,
                 cursor=cursor,
             )
+    elif mode == "backfill-fair":
+        from .fair_backfill import discover_fair_backfill
+
+        discover_run = lambda cursor: discover_fair_backfill(
+            client, specs, start=backfill_start, end=backfill_end,
+            max_requests=args.max_requests, cursor=cursor,
+        )
     else:
         from .discovery import discover_backfill
 
@@ -306,7 +342,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             # A catalog edit invalidates a cursor's query signature. Restart
             # this exact date window; the previous invocation's observations
             # and coverage remain in their already-written run artifacts.
-            if str(exc) != "cursor specs does not match this discovery run":
+            if mode == "backfill-fair" or str(exc) != "cursor specs does not match this discovery run":
                 raise
             print(
                 f"Query catalog changed; restarting {mode} window "
@@ -323,7 +359,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
                 "run_id": run_id,
                 "started_at": now.isoformat().replace("+00:00", "Z"),
                 **({"since": state["since"], "until": state.get("until")} if mode in {"daily", "sample"} else {"start": backfill_start, "end": backfill_end}),
-                **({"mode": "sample", "date_field": "created"} if mode == "sample" else ({"mode": mode, "date_field": "created", "start_year": args.start_year, "end": state.get("end")} if mode == "historical-sample" else {})),
+                **({"mode": "sample", "date_field": "created"} if mode == "sample" else ({"mode": mode, "date_field": "created", "start_year": args.start_year, "end": state.get("end")} if mode == "historical-sample" else ({"mode": mode, "date_field": "created"} if mode == "backfill-fair" else {}))),
                 "requests_used": None,
                 "complete_sweep": False,
                 "queries": [{"status": "error", "error": str(exc)}],
@@ -357,8 +393,8 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     coverage = {
         "run_id": run_id,
         "started_at": observed_at,
-        **({"since": state["since"], "until": state["until"]} if mode in {"daily", "sample"} else {"start": state["start"], "end": state["end"]} if mode == "backfill" else {"end": state["end"]}),
-        **({"mode": "sample", "date_field": "created"} if mode == "sample" else ({"mode": mode, "date_field": "created", "start_year": args.start_year} if mode == "historical-sample" else {})),
+        **({"since": state["since"], "until": state["until"]} if mode in {"daily", "sample"} else {"start": state["start"], "end": state["end"]} if mode in {"backfill", "backfill-fair"} else {"end": state["end"]}),
+        **({"mode": "sample", "date_field": "created"} if mode == "sample" else ({"mode": mode, "date_field": "created", "start_year": args.start_year} if mode == "historical-sample" else ({"mode": mode, "date_field": "created"} if mode == "backfill-fair" else {}))),
         "requests_used": outcome.requests_used,
         "complete_sweep": outcome.next_cursor is None,
         "queries": outcome.coverage,
@@ -389,6 +425,12 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             "cursor": outcome.next_cursor, "complete": outcome.next_cursor is None,
             "catalog_signature": catalog_signature,
         }
+    elif mode == "backfill-fair":
+        next_state = {
+            "start": state["start"], "end": state["end"],
+            "cursor": outcome.next_cursor, "complete": outcome.next_cursor is None,
+            "catalog_signature": catalog_signature,
+        }
     else:
         next_state = {"start": state["start"], "end": state["end"], "cursor": outcome.next_cursor}
     failures = [row for row in outcome.coverage if row.get("error") or row.get("status") == "error"]
@@ -411,7 +453,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             raise ValueError(
                 f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login"
             )
-        checkpoint_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "sample": "state/sample.json", "historical-sample": "state/historical-sample.json"}[mode]
+        checkpoint_path = {"daily": "state/checkpoint.json", "backfill": "state/backfill.json", "backfill-fair": "state/backfill-fair.json", "sample": "state/sample.json", "historical-sample": "state/historical-sample.json"}[mode]
         checkpoint = {**(remote_checkpoint or {}), **next_state, "updated_at": observed_at}
         url = publish_run(
             args.repo,
@@ -458,6 +500,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run(args)
         if args.command == "backfill":
             return _backfill(args)
+        if args.command == "backfill-fair":
+            return _backfill_fair(args)
         if args.command == "sample":
             return _sample(args)
         if args.command == "historical-sample":

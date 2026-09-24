@@ -84,7 +84,7 @@ methods = ["safe-learning", "robustness"]
 
 [[queries]]
 id = "trust.safe-reinforcement-learning"
-q = "\"safe reinforcement learning\" in:description"
+q = "\"safe reinforcement learning\" constrained in:description"
 domains = ["ai-safety", "reinforcement-learning"]
 methods = ["safe-learning", "constrained-reinforcement-learning"]
 

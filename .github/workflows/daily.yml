@@ -17,7 +17,7 @@ on:
         type: number
         default: 500
       backfill_max_requests:
-        description: "Maximum Search requests for historical backfill (1–700)"
+        description: "Maximum Search requests for fair historical backfill (1–700)"
         required: true
         type: number
         default: 700
@@ -99,9 +99,9 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml historical-sample --max-requests "$HISTORICAL_SAMPLE_MAX_REQUESTS"
-      - name: Backfill historical repositories
+      - name: Fair backfill historical repositories
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
-        run: uv run --frozen gh-ml backfill --max-requests "$BACKFILL_MAX_REQUESTS"
+        run: uv run --frozen gh-ml backfill-fair --max-requests "$BACKFILL_MAX_REQUESTS"

@@ -12,7 +12,7 @@ methods = ["robot-learning"]
 
 [[queries]]
 id = "robotics.imitation-learning"
-q = "\"imitation learning\" in:description"
+q = "\"imitation learning\" robotics in:description"
 domains = ["robotics", "reinforcement-learning"]
 methods = ["imitation-learning"]
 

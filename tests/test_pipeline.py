@@ -666,3 +666,81 @@ def test_publish_run_creates_missing_dataset_without_private_visibility_argument
 
     assert api.created == [("modelomics/gh-ml", "dataset", True)]
     assert len(api.commits) == 1
+
+
+def test_fair_backfill_resumes_frozen_bounds_publishes_own_checkpoint_and_keeps_legacy_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    spec = QuerySpec(id="fair-q", q="protein model", domains=(), methods=())
+    signature = [{"id": spec.id, "query": spec.q}]
+    fair_cursor = {"lanes": {"fair-q": {"page": 3}}}
+    fair_state = {
+        "start": "2019-01-01", "end": "2020-12-31", "cursor": fair_cursor,
+        # A changed catalog must reach fair discovery with the existing lane
+        # cursor so it can preserve unchanged lanes and restart changed ones.
+        "complete": False, "catalog_signature": [{"id": spec.id, "query": "old protein query"}],
+    }
+    legacy_state = {"start": "2008-01-01", "end": "2026-09-24", "cursor": {"query_index": 4}}
+    (tmp_path / "backfill-fair-state.json").write_text(json.dumps(fair_state), encoding="utf-8")
+    (tmp_path / "backfill-state.json").write_text(json.dumps(legacy_state), encoding="utf-8")
+    outcome = SimpleNamespace(
+        repositories={}, matched_query_ids={}, next_cursor={"lanes": {"fair-q": {"page": 4}}},
+        requests_used=2, coverage=[{"query_id": "fair-q", "status": "ok", "success": True}],
+    )
+    calls: list[dict] = []
+    published: list[dict] = []
+    remote_paths: list[str] = []
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_queries", lambda _: [spec])
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: remote_paths.append(kwargs["checkpoint_path"]) or None)
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_backfill", SimpleNamespace(
+        discover_fair_backfill=lambda *args, **kwargs: calls.append(kwargs) or outcome
+    ))
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: published.append(kwargs) or "https://example.test/run")
+
+    assert cli.main(["backfill-fair", "--output-dir", str(tmp_path)]) == 0
+
+    assert calls[0]["cursor"] == fair_cursor
+    assert (calls[0]["start"], calls[0]["end"]) == ("2019-01-01", "2020-12-31")
+    assert remote_paths == ["state/backfill-fair.json"]
+    assert published[0]["checkpoint_path"] == "state/backfill-fair.json"
+    assert published[0]["checkpoint"]["cursor"] == outcome.next_cursor
+    assert published[0]["checkpoint"]["catalog_signature"] == signature
+    assert json.loads((tmp_path / "backfill-fair-state.json").read_text(encoding="utf-8"))["cursor"] == outcome.next_cursor
+    assert json.loads((tmp_path / "backfill-state.json").read_text(encoding="utf-8")) == legacy_state
+    manifest = json.loads(next(tmp_path.glob("manifest-*.json")).read_text(encoding="utf-8"))
+    coverage = json.loads((tmp_path / manifest["coverage_file"]).read_text(encoding="utf-8"))
+    assert manifest["mode"] == coverage["mode"] == "backfill-fair"
+    assert coverage["date_field"] == "created"
+    assert (coverage["start"], coverage["end"]) == ("2019-01-01", "2020-12-31")
+    assert coverage["complete_sweep"] is False
+
+
+def test_fair_backfill_completed_catalog_skips_and_changed_catalog_starts_new_sweep(
+    tmp_path: Path, monkeypatch
+) -> None:
+    old_spec = QuerySpec(id="fair-q", q="old protein query", domains=(), methods=())
+    new_spec = QuerySpec(id="fair-q", q="new protein query", domains=(), methods=())
+    (tmp_path / "backfill-fair-state.json").write_text(json.dumps({
+        "start": "2018-01-01", "end": "2020-12-31", "cursor": None,
+        "complete": True, "catalog_signature": [{"id": old_spec.id, "query": old_spec.q}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_queries", lambda _: [old_spec])
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should skip")))
+    assert cli.main(["backfill-fair", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+
+    calls: list[dict] = []
+    outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor={"lane": 0}, requests_used=1,
+                              coverage=[{"query_id": new_spec.id, "status": "ok", "success": True}])
+    monkeypatch.setattr(cli, "load_queries", lambda _: [new_spec])
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_backfill", SimpleNamespace(
+        discover_fair_backfill=lambda *args, **kwargs: calls.append(kwargs) or outcome
+    ))
+    assert cli.main(["backfill-fair", "--no-publish", "--start", "2010-01-01", "--end", "2011-12-31",
+                     "--output-dir", str(tmp_path)]) == 0
+    assert calls[0]["cursor"] is None
+    assert (calls[0]["start"], calls[0]["end"]) == ("2010-01-01", "2011-12-31")

@@ -153,3 +153,111 @@ id = "general.meta-learning"
 q = "\"meta-learning\" in:description,readme"
 domains = ["general-ml", "automl"]
 methods = ["meta-learning", "few-shot-learning"]
+
+[[queries]]
+id = "general.logistic-regression"
+q = "\"logistic regression\" in:description,readme"
+domains = ["classical-ml", "tabular-ml", "statistical-learning"]
+methods = ["logistic-regression", "classification"]
+
+[[queries]]
+id = "general.decision-trees"
+q = "\"decision tree\" \"machine learning\" in:description,readme"
+domains = ["classical-ml", "tabular-ml"]
+methods = ["decision-trees", "classification"]
+
+[[queries]]
+id = "general.naive-bayes"
+q = "\"naive Bayes\" in:description,readme"
+domains = ["classical-ml", "probabilistic-ml"]
+methods = ["naive-bayes", "classification"]
+
+[[queries]]
+id = "general.nearest-neighbors"
+q = "\"nearest neighbors\" \"machine learning\" in:description,readme"
+domains = ["classical-ml", "metric-learning"]
+methods = ["nearest-neighbors", "classification"]
+
+[[queries]]
+id = "general.dimensionality-reduction"
+q = "\"dimensionality reduction\" in:description,readme"
+domains = ["classical-ml", "unsupervised-learning"]
+methods = ["dimensionality-reduction", "representation-learning"]
+
+[[queries]]
+id = "general.matrix-factorization"
+q = "\"matrix factorization\" \"machine learning\" in:description,readme"
+domains = ["classical-ml", "recommender-systems"]
+methods = ["matrix-factorization", "collaborative-filtering"]
+
+[[queries]]
+id = "general.contrastive-learning"
+q = "\"contrastive learning\" in:description,readme"
+domains = ["representation-learning", "deep-learning"]
+methods = ["contrastive-learning", "self-supervised-learning"]
+
+[[queries]]
+id = "general.metric-learning"
+q = "\"metric learning\" in:description,readme"
+domains = ["representation-learning", "classical-ml"]
+methods = ["metric-learning", "representation-learning"]
+
+[[queries]]
+id = "general.domain-adaptation"
+q = "\"domain adaptation\" \"machine learning\" in:description,readme"
+domains = ["representation-learning", "transfer-learning"]
+methods = ["domain-adaptation", "transfer-learning"]
+
+[[queries]]
+id = "general.continual-learning"
+q = "\"continual learning\" in:description,readme"
+domains = ["deep-learning", "representation-learning"]
+methods = ["continual-learning", "lifelong-learning"]
+
+[[queries]]
+id = "general.multi-task-learning"
+q = "\"multi-task learning\" in:description,readme"
+domains = ["deep-learning", "representation-learning"]
+methods = ["multi-task-learning", "transfer-learning"]
+
+[[queries]]
+id = "general.weak-supervision"
+q = "\"weak supervision\" \"machine learning\" in:description,readme"
+domains = ["data-centric-ai", "semi-supervised-learning"]
+methods = ["weak-supervision", "label-modeling"]
+
+[[queries]]
+id = "general.probabilistic-programming"
+q = "\"probabilistic programming\" in:description,readme"
+domains = ["probabilistic-ml", "bayesian-ml"]
+methods = ["probabilistic-programming", "bayesian-inference"]
+
+[[queries]]
+id = "general.bayesian-deep-learning"
+q = "\"Bayesian deep learning\" in:description,readme"
+domains = ["probabilistic-ml", "deep-learning"]
+methods = ["bayesian-deep-learning", "uncertainty-estimation"]
+
+[[queries]]
+id = "general.normalizing-flows"
+q = "\"normalizing flows\" \"machine learning\" in:description,readme"
+domains = ["generative-modeling", "probabilistic-ml"]
+methods = ["normalizing-flows", "density-estimation"]
+
+[[queries]]
+id = "general.hidden-markov-models"
+q = "\"hidden Markov model\" \"machine learning\" in:description,readme"
+domains = ["classical-ml", "probabilistic-ml", "sequence-modeling"]
+methods = ["hidden-markov-models", "sequence-modeling"]
+
+[[queries]]
+id = "general.gaussian-mixture-models"
+q = "\"Gaussian mixture model\" in:description,readme"
+domains = ["classical-ml", "probabilistic-ml", "unsupervised-learning"]
+methods = ["gaussian-mixture-models", "clustering"]
+
+[[queries]]
+id = "general.neural-processes"
+q = "\"neural processes\" in:description,readme"
+domains = ["probabilistic-ml", "meta-learning"]
+methods = ["neural-processes", "meta-learning"]

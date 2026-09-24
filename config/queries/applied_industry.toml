@@ -42,7 +42,7 @@ methods = ["tabular-learning"]
 
 [[queries]]
 id = "applied.time-series-forecasting"
-q = "\"time series forecasting\" in:description"
+q = "\"time series forecasting\" manufacturing in:description"
 domains = ["time-series", "forecasting"]
 methods = ["time-series-forecasting"]
 
@@ -78,7 +78,7 @@ methods = ["fraud-detection"]
 
 [[queries]]
 id = "applied.predictive-maintenance"
-q = "\"predictive maintenance\" in:description"
+q = "\"predictive maintenance\" industrial in:description"
 domains = ["industrial-ml", "manufacturing"]
 methods = ["predictive-maintenance"]
 
@@ -141,3 +141,75 @@ id = "applied.customer-segmentation"
 q = "\"customer segmentation\" in:readme"
 domains = ["marketing", "customer-analytics"]
 methods = ["customer-segmentation", "clustering"]
+
+[[queries]]
+id = "applied.educational-data-mining"
+q = "\"educational data mining\" in:description,readme"
+domains = ["education", "learning-analytics"]
+methods = ["educational-data-mining", "student-modeling"]
+
+[[queries]]
+id = "applied.cybersecurity-ml"
+q = "\"machine learning\" cybersecurity in:description,readme"
+domains = ["cybersecurity", "security-ml"]
+methods = ["threat-detection", "classification"]
+
+[[queries]]
+id = "applied.malware-detection"
+q = "\"malware detection\" \"machine learning\" in:description,readme"
+domains = ["cybersecurity", "malware-analysis"]
+methods = ["malware-detection", "static-analysis"]
+
+[[queries]]
+id = "applied.intrusion-detection"
+q = "\"intrusion detection\" \"machine learning\" in:description,readme"
+domains = ["cybersecurity", "network-security"]
+methods = ["intrusion-detection", "anomaly-detection"]
+
+[[queries]]
+id = "applied.agricultural-ml"
+q = "\"agricultural machine learning\" in:description,readme"
+domains = ["agriculture", "agricultural-ml"]
+methods = ["yield-prediction", "classification"]
+
+[[queries]]
+id = "applied.plant-disease-detection"
+q = "\"plant disease detection\" \"deep learning\" in:description,readme"
+domains = ["agriculture", "plant-science"]
+methods = ["plant-disease-detection", "image-classification"]
+
+[[queries]]
+id = "applied.ecological-forecasting"
+q = "\"ecological forecasting\" \"machine learning\" in:description,readme"
+domains = ["ecology", "environmental-science"]
+methods = ["ecological-forecasting", "species-distribution-modeling"]
+
+[[queries]]
+id = "applied.species-distribution-modeling"
+q = "\"species distribution modeling\" in:description,readme"
+domains = ["ecology", "biodiversity"]
+methods = ["species-distribution-modeling", "habitat-suitability-modeling"]
+
+[[queries]]
+id = "applied.traffic-prediction"
+q = "\"traffic prediction\" \"machine learning\" in:description,readme"
+domains = ["transportation", "smart-cities"]
+methods = ["traffic-forecasting", "spatiotemporal-modeling"]
+
+[[queries]]
+id = "applied.energy-load-forecasting"
+q = "\"load forecasting\" energy in:description,readme"
+domains = ["energy", "power-systems"]
+methods = ["energy-load-forecasting", "time-series-forecasting"]
+
+[[queries]]
+id = "applied.industrial-defect-detection"
+q = "\"industrial defect detection\" \"deep learning\" in:description,readme"
+domains = ["manufacturing", "industrial-ml"]
+methods = ["defect-detection", "visual-anomaly-detection"]
+
+[[queries]]
+id = "applied.process-mining-prediction"
+q = "\"predictive process monitoring\" in:description,readme"
+domains = ["process-mining", "business-analytics"]
+methods = ["predictive-process-monitoring", "sequence-modeling"]
