@@ -14,7 +14,8 @@ from shutil import copyfile
 from typing import Any
 
 from .classification import classify_repository
-from .discovery import discover, discover_sample, discover_historical_sample
+from .discovery import discover, discover_sample
+from .historical_ledger import discover_historical_ledger
 from .github import GitHubAPIError, GitHubClient, SearchProgress
 from .hub import load_checkpoint, publish_run
 from .query_catalog import load_queries
@@ -232,21 +233,15 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
 
     catalog_signature = [{"id": spec.id, "query": spec.q} for spec in specs]
     if mode == "historical-sample":
-        was_partial = state.get("cursor") is not None
         matches = state.get("catalog_signature") == catalog_signature and state.get("start_year") == args.start_year
         if state.get("complete") and matches:
             print("Historical sample already complete for this query catalog; skipping.")
             return 0
-        if state.get("cursor") is not None and not matches:
-            state["cursor"] = None
-            state.pop("complete", None)
-        if state.get("complete") and not matches:
+        # Keep the original campaign bounds and cursor when the query catalog
+        # changes. The ledger reconciles v1/v2 cursors by query/year identity.
+        # An old completed checkpoint with no cursor safely starts a full grid.
+        if "end" not in state:
             state["end"] = requested_end
-            state["cursor"] = None
-            state.pop("complete", None)
-        if state.get("cursor") is None and not state.get("complete"):
-            if not was_partial or "end" not in state:
-                state["end"] = requested_end
         state["start_year"] = args.start_year
         state["catalog_signature"] = catalog_signature
     if mode == "backfill-fair":
@@ -290,7 +285,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     backfill_end = state.get("end", args.end or now.date().isoformat()) if mode in {"backfill", "backfill-fair"} else None
     if mode == "historical-sample":
         historical_end = state["end"]
-        discover_run = lambda cursor: discover_historical_sample(
+        discover_run = lambda cursor: discover_historical_ledger(
             client, specs, start_year=args.start_year, end=historical_end,
             max_requests=args.max_requests, cursor=cursor,
         )
@@ -342,7 +337,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
             # A catalog edit invalidates a cursor's query signature. Restart
             # this exact date window; the previous invocation's observations
             # and coverage remain in their already-written run artifacts.
-            if mode == "backfill-fair" or str(exc) != "cursor specs does not match this discovery run":
+            if mode in {"backfill-fair", "historical-sample"} or str(exc) != "cursor specs does not match this discovery run":
                 raise
             print(
                 f"Query catalog changed; restarting {mode} window "
@@ -396,7 +391,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         **({"since": state["since"], "until": state["until"]} if mode in {"daily", "sample"} else {"start": state["start"], "end": state["end"]} if mode in {"backfill", "backfill-fair"} else {"end": state["end"]}),
         **({"mode": "sample", "date_field": "created"} if mode == "sample" else ({"mode": mode, "date_field": "created", "start_year": args.start_year} if mode == "historical-sample" else ({"mode": mode, "date_field": "created"} if mode == "backfill-fair" else {}))),
         "requests_used": outcome.requests_used,
-        "complete_sweep": outcome.next_cursor is None,
+        "complete_sweep": (bool(outcome.next_cursor.get("complete")) if mode == "historical-sample" else outcome.next_cursor is None),
         "queries": outcome.coverage,
     }
     _write_json(coverage_path, coverage)
@@ -422,7 +417,7 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     elif mode == "historical-sample":
         next_state = {
             "start_year": args.start_year, "end": state["end"],
-            "cursor": outcome.next_cursor, "complete": outcome.next_cursor is None,
+            "cursor": outcome.next_cursor, "complete": bool(outcome.next_cursor.get("complete")),
             "catalog_signature": catalog_signature,
         }
     elif mode == "backfill-fair":
