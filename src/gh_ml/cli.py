@@ -156,34 +156,50 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     client = GitHubClient(token=github_token)
     backfill_start = state.get("start", args.start) if mode == "backfill" else None
     backfill_end = state.get("end", args.end or now.date().isoformat()) if mode == "backfill" else None
-    try:
-        if mode == "daily":
-            # A new sweep gets a fresh upper bound; a truncated sweep retains
-            # the exact bound alongside its cursor so it can resume safely.
-            until = state.get("until") if state.get("cursor") is not None else now.date().isoformat()
-            state["until"] = until
-            outcome = discover(
-                client,
-                specs,
-                since=state["since"],
-                until=until,
-                max_requests=args.max_requests,
-                cursor=state["cursor"],
-            )
-        else:
-            from .discovery import discover_backfill
+    if mode == "daily":
+        # A new sweep gets a fresh upper bound; a truncated sweep retains
+        # the exact bound alongside its cursor so it can resume safely.
+        until = state.get("until") if state.get("cursor") is not None else now.date().isoformat()
+        state["until"] = until
+        discover_run = lambda cursor: discover(
+            client,
+            specs,
+            since=state["since"],
+            until=until,
+            max_requests=args.max_requests,
+            cursor=cursor,
+        )
+    else:
+        from .discovery import discover_backfill
 
-            start = backfill_start
-            end = backfill_end
-            outcome = discover_backfill(
-                client,
-                specs,
-                start=start,
-                end=end,
-                max_requests=args.max_requests,
-                cursor=state.get("cursor"),
+        start = backfill_start
+        end = backfill_end
+        state["start"], state["end"] = start, end
+        discover_run = lambda cursor: discover_backfill(
+            client,
+            specs,
+            start=start,
+            end=end,
+            max_requests=args.max_requests,
+            cursor=cursor,
+        )
+
+    try:
+        try:
+            outcome = discover_run(state.get("cursor"))
+        except ValueError as exc:
+            # A catalog edit invalidates a cursor's query signature. Restart
+            # this exact date window; the previous invocation's observations
+            # and coverage remain in their already-written run artifacts.
+            if str(exc) != "cursor specs does not match this discovery run":
+                raise
+            print(
+                f"Query catalog changed; restarting {mode} window "
+                f"from the beginning ({state.get('since') if mode == 'daily' else backfill_start}"
+                f"..{until if mode == 'daily' else backfill_end}).",
+                file=sys.stderr,
             )
-            state["start"], state["end"] = start, end
+            outcome = discover_run(None)
     except GitHubAPIError as exc:
         coverage_path = args.output_dir / f"coverage-{run_id}.json"
         _write_json(
@@ -258,7 +274,11 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
         _write_json(manifest_path, {**coverage, "repo": args.repo, "published": False, "error": True})
         return 2
 
-    should_publish = not args.no_publish and bool(observations)
+    # Publish even an empty successful sweep: its coverage and checkpoint are
+    # the durable record that lets an ephemeral runner resume past this window.
+    # Failed discovery exits above, and publish_run commits the checkpoint in
+    # the same Hub commit as the run metadata.
+    should_publish = not args.no_publish
     if should_publish:
         checkpoint_path = "state/checkpoint.json" if mode == "daily" else "state/backfill.json"
         checkpoint = {**(remote_checkpoint or {}), **next_state, "updated_at": observed_at}
@@ -292,7 +312,10 @@ def _collect(args: argparse.Namespace, *, mode: str) -> int:
     print(f"{DISPLAY_NAME} {mode} {run_id}: {len(observations)} candidate repositories, {outcome.requests_used} requests")
     print(f"Coverage: {coverage_path}")
     if not observations and not failures:
-        print("No candidates found; skipped publishing.")
+        if should_publish:
+            print("No candidates found; empty run published with coverage and checkpoint.")
+        else:
+            print("No candidates found; empty run saved locally.")
     return 0
 
 

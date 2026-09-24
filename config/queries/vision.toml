@@ -87,3 +87,51 @@ id = "vision.vision-language"
 q = "\"vision-language model\" in:readme"
 domains = ["computer-vision", "multimodal"]
 methods = ["vision-language", "multimodal-learning"]
+
+[[queries]]
+id = "vision.image-classification"
+q = "\"image classification\" in:description"
+domains = ["computer-vision"]
+methods = ["image-classification"]
+
+[[queries]]
+id = "vision.depth-estimation"
+q = "\"depth estimation\" in:readme"
+domains = ["computer-vision", "3d-vision"]
+methods = ["depth-estimation", "3d-perception"]
+
+[[queries]]
+id = "vision.pose-estimation"
+q = "\"human pose estimation\" in:readme"
+domains = ["computer-vision"]
+methods = ["pose-estimation", "keypoint-detection"]
+
+[[queries]]
+id = "vision.image-captioning"
+q = "\"image captioning\" in:readme"
+domains = ["computer-vision", "multimodal"]
+methods = ["image-captioning", "vision-language"]
+
+[[queries]]
+id = "vision.video-generation"
+q = "\"video generation\" in:readme"
+domains = ["computer-vision", "generative-ai"]
+methods = ["video-generation", "generative-modeling"]
+
+[[queries]]
+id = "vision.image-to-image-translation"
+q = "\"image-to-image translation\" in:readme"
+domains = ["computer-vision", "generative-ai"]
+methods = ["image-to-image-translation", "generative-modeling"]
+
+[[queries]]
+id = "vision.change-detection"
+q = "\"change detection\" in:readme"
+domains = ["computer-vision"]
+methods = ["change-detection", "image-analysis"]
+
+[[queries]]
+id = "vision.visual-localization"
+q = "\"visual localization\" in:readme"
+domains = ["computer-vision", "robotics"]
+methods = ["visual-localization", "visual-place-recognition"]

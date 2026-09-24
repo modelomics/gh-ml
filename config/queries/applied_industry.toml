@@ -87,3 +87,33 @@ id = "applied.supply-chain-optimization"
 q = "\"supply chain optimization\" in:readme"
 domains = ["supply-chain", "operations-research"]
 methods = ["supply-chain-optimization"]
+
+[[queries]]
+id = "applied.churn-prediction"
+q = "\"customer churn prediction\" in:description"
+domains = ["customer-analytics", "business-analytics"]
+methods = ["churn-prediction", "classification"]
+
+[[queries]]
+id = "applied.credit-scoring"
+q = "\"credit scoring\" in:description"
+domains = ["finance", "credit-risk"]
+methods = ["credit-scoring", "risk-modeling"]
+
+[[queries]]
+id = "applied.demand-forecasting"
+q = "\"demand forecasting\" in:description"
+domains = ["retail", "supply-chain", "forecasting"]
+methods = ["demand-forecasting"]
+
+[[queries]]
+id = "applied.uplift-modeling"
+q = "\"uplift modeling\" in:description"
+domains = ["marketing", "causal-inference"]
+methods = ["uplift-modeling", "treatment-effect-estimation"]
+
+[[queries]]
+id = "applied.customer-lifetime-value"
+q = "\"customer lifetime value\" in:description"
+domains = ["marketing", "customer-analytics"]
+methods = ["customer-lifetime-value-prediction"]

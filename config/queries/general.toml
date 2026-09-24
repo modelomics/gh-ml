@@ -81,3 +81,57 @@ id = "general.novel-method"
 q = "\"novel method\" in:description"
 domains = ["general-ml"]
 methods = ["novel-method"]
+
+[[queries]]
+id = "general.gradient-boosting"
+q = "\"gradient boosting\" in:description"
+domains = ["classical-ml", "tabular-ml"]
+methods = ["gradient-boosting", "ensemble-learning"]
+
+[[queries]]
+id = "general.random-forest"
+q = "\"random forest\" in:description"
+domains = ["classical-ml", "tabular-ml"]
+methods = ["random-forest", "ensemble-learning"]
+
+[[queries]]
+id = "general.support-vector-machine"
+q = "\"support vector machine\" in:description"
+domains = ["classical-ml"]
+methods = ["support-vector-machine", "kernel-methods"]
+
+[[queries]]
+id = "general.gaussian-process"
+q = "\"Gaussian process\" in:description"
+domains = ["classical-ml", "probabilistic-ml"]
+methods = ["gaussian-process", "kernel-methods"]
+
+[[queries]]
+id = "general.bayesian-optimization"
+q = "\"Bayesian optimization\" in:description"
+domains = ["optimization", "automl"]
+methods = ["bayesian-optimization", "black-box-optimization"]
+
+[[queries]]
+id = "general.clustering"
+q = "clustering in:description"
+domains = ["classical-ml", "unsupervised-learning"]
+methods = ["clustering", "unsupervised-learning"]
+
+[[queries]]
+id = "general.self-supervised-learning"
+q = "\"self-supervised learning\" in:description"
+domains = ["representation-learning", "deep-learning"]
+methods = ["self-supervised-learning", "representation-learning"]
+
+[[queries]]
+id = "general.active-learning"
+q = "\"active learning\" in:description"
+domains = ["data-centric-ai", "machine-learning"]
+methods = ["active-learning", "sample-selection"]
+
+[[queries]]
+id = "general.automated-machine-learning"
+q = "\"automated machine learning\" in:readme"
+domains = ["automl", "optimization"]
+methods = ["automl", "feature-engineering"]

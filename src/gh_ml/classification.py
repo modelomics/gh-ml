@@ -12,11 +12,11 @@ from typing import Any
 
 
 _DOMAIN_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("computer-vision", (r"computer vision", r"image classification", r"object detection", r"segmentation", r"image generation", r"vision transformer", r"\b(?:cv|vision)\b")),
+    ("computer-vision", (r"computer vision", r"image classification", r"object detection", r"image segmentation", r"semantic segmentation", r"image generation", r"vision transformer", r"\b(?:cv|vision)\b")),
     ("natural-language-processing", (r"natural language", r"\bnlp\b", r"language model", r"text generation", r"question answering", r"machine translation", r"\bllm\b")),
     ("speech-and-audio", (r"speech recognition", r"speech synthesis", r"text.to.speech", r"\basr\b", r"audio processing", r"\baudio\b", r"\bvoice\b")),
-    ("reinforcement-learning", (r"reinforcement learning", r"\brl\b", r"policy gradient", r"\bq.learning\b", r"\bppo\b", r"\bsac\b")),
-    ("robotics-and-control", (r"robotics?", r"robot manipulation", r"embodied ai", r"\bcontrol\b", r"autonomous driving", r"\bvla\b")),
+    ("reinforcement-learning", (r"reinforcement learning", r"policy gradient", r"\bq.learning\b", r"\bppo\b", r"\bsac\b")),
+    ("robotics-and-control", (r"robotics?", r"robot manipulation", r"embodied ai", r"robot control", r"control policy", r"autonomous driving", r"\bvla\b")),
     ("graph-learning", (r"graph neural", r"\bgnn\b", r"graph learning", r"knowledge graph", r"geometric deep learning")),
     ("time-series-and-forecasting", (r"time.series", r"forecast(?:ing)?", r"temporal model", r"sequence prediction")),
     ("recommender-systems", (r"recommend(?:er|ation|ing)", r"collaborative filtering", r"ranking model")),
@@ -29,6 +29,12 @@ _DOMAIN_RULES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("interpretability-and-safety", (r"interpretability", r"explainable ai", r"\bxai\b", r"alignment", r"ai safety", r"adversarial robustness")),
     ("privacy-and-federated-learning", (r"federated learning", r"differential privacy", r"privacy preserving", r"secure aggregation")),
     ("optimization", (r"optimization algorithm", r"\bmetaheuristic\b", r"\boptimizer\b", r"hyperparameter optimization")),
+    ("cybersecurity", (r"cybersecurity", r"cyber security", r"intrusion detection", r"malware detection", r"network security", r"security vulnerability")),
+    ("finance-and-economics", (r"financial machine learning", r"algorithmic trading", r"quantitative finance", r"financial forecasting", r"econometric")),
+    ("education", (r"educational technology", r"\bedtech\b", r"intelligent tutoring", r"student learning analytics")),
+    ("agriculture-and-food", (r"precision agriculture", r"agricultural machine learning", r"crop disease", r"plant disease detection", r"food recognition")),
+    ("materials-science", (r"materials science", r"materials discovery", r"computational materials", r"molecular property prediction")),
+    ("social-sciences", (r"computational social science", r"social science", r"human behavior modeling", r"sociological")),
 )
 
 _METHOD_TERMS = (
@@ -38,6 +44,9 @@ _METHOD_TERMS = (
     "reinforcement learning", "federated learning", "quantization", "distillation", "pruning",
     "low rank adaptation", "lora", "test time adaptation", "meta learning", "causal inference",
     "bayesian optimization", "gradient boosting", "policy gradient", "world model",
+    "convolutional neural network", "recurrent neural network", "long short term memory",
+    "support vector machine", "random forest", "k means", "hierarchical clustering",
+    "self attention", "masked language modeling", "knowledge distillation", "ensemble learning",
 )
 
 
@@ -82,7 +91,10 @@ def classify_repository(repo: Mapping[str, Any], matched_specs: Sequence[Any]) -
     methods: set[str] = set()
     for method in _METHOD_TERMS:
         # Avoid very short abbreviations matching as arbitrary substrings.
-        pattern = rf"(?<![a-z0-9]){re.escape(method).replace(r'\ ', r'\s+')}(?![a-z0-9])"
+        escaped = re.escape(method).replace(r"\ ", r"\s+")
+        if method.endswith("network"):
+            escaped += "s?"
+        pattern = rf"(?<![a-z0-9]){escaped}(?![a-z0-9])"
         if re.search(pattern, corpus, re.IGNORECASE):
             methods.add(method)
     for spec in matched_specs:

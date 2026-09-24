@@ -145,18 +145,31 @@ def write_jsonl(rows: Sequence[Mapping[str, Any]], path: str | Path) -> None:
         if not isinstance(row, Mapping):
             raise TypeError("each row must be a mapping")
         # Round-trip catches non-JSON values and detaches caller-owned mappings.
-        encoded = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        encoded = json.dumps(
+            row,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
         decoded = json.loads(encoded)
         github_id = decoded.get("github_id")
-        if isinstance(github_id, bool) or not isinstance(github_id, int):
-            raise ValueError("each row must contain an integer github_id")
+        if isinstance(github_id, bool) or not isinstance(github_id, int) or github_id <= 0:
+            raise ValueError("each row must contain a positive integer github_id")
         normalized.append(decoded)
     normalized.sort(key=lambda row: (row["github_id"], json.dumps(row, sort_keys=True, separators=(",", ":"))))
 
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     contents = "".join(
-        json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        json.dumps(
+            row,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
         for row in normalized
     )
     destination.write_text(contents, encoding="utf-8")

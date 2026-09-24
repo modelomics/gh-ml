@@ -87,3 +87,69 @@ id = "trust.safe-reinforcement-learning"
 q = "\"safe reinforcement learning\" in:description"
 domains = ["ai-safety", "reinforcement-learning"]
 methods = ["safe-learning", "constrained-reinforcement-learning"]
+
+[[queries]]
+id = "trust.conformal-prediction"
+q = "\"conformal prediction\" in:description"
+domains = ["trustworthy-ml", "probabilistic-ml"]
+methods = ["conformal-prediction", "uncertainty-quantification"]
+
+[[queries]]
+id = "trust.out-of-distribution-detection"
+q = "\"out-of-distribution detection\" in:description"
+domains = ["trustworthy-ml", "robust-ml"]
+methods = ["out-of-distribution-detection", "uncertainty-estimation"]
+
+[[queries]]
+id = "trust.distribution-shift"
+q = "\"distribution shift\" in:description"
+domains = ["trustworthy-ml", "robust-ml"]
+methods = ["distribution-shift-detection", "domain-generalization"]
+
+[[queries]]
+id = "trust.model-calibration"
+q = "\"model calibration\" in:description"
+domains = ["trustworthy-ml", "probabilistic-ml"]
+methods = ["probability-calibration", "uncertainty-quantification"]
+
+[[queries]]
+id = "trust.counterfactual-explanations"
+q = "\"counterfactual explanation\" in:description"
+domains = ["trustworthy-ml", "explainable-ai"]
+methods = ["counterfactual-explanations", "interpretability"]
+
+[[queries]]
+id = "trust.shap"
+q = "SHAP in:description"
+domains = ["trustworthy-ml", "explainable-ai"]
+methods = ["feature-attribution", "shap"]
+
+[[queries]]
+id = "trust.robustness-certification"
+q = "\"certified robustness\" in:description"
+domains = ["trustworthy-ml", "robust-ml"]
+methods = ["certified-robustness", "verification"]
+
+[[queries]]
+id = "trust.domain-generalization"
+q = "\"domain generalization\" in:description"
+domains = ["trustworthy-ml", "robust-ml"]
+methods = ["domain-generalization", "distribution-shift"]
+
+[[queries]]
+id = "trust.instrumental-variable-ml"
+q = "\"double machine learning\" in:description"
+domains = ["causal-ml", "economics"]
+methods = ["double-machine-learning", "causal-inference"]
+
+[[queries]]
+id = "trust.causal-effect-estimation"
+q = "\"causal effect estimation\" in:description"
+domains = ["causal-ml"]
+methods = ["treatment-effect-estimation", "causal-inference"]
+
+[[queries]]
+id = "trust.causal-representation-learning"
+q = "\"causal representation learning\" in:description"
+domains = ["causal-ml", "representation-learning"]
+methods = ["causal-representation-learning", "causal-discovery"]

@@ -101,13 +101,24 @@ def publish_run(
         api = HfApi(token=token)
 
     repo_info = getattr(api, "repo_info", None)
+    repo_revision = None
     if callable(repo_info):
         try:
-            repo_info(repo_id, repo_type="dataset")
+            info = repo_info(repo_id, repo_type="dataset")
+            repo_revision = getattr(info, "sha", None)
         except Exception as exc:
             if not _is_missing(exc):
                 raise
             api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
+            # Pin the commit to the repository head observed after creation.
+            # This makes concurrent publishers race on the same parent and
+            # prevents a stale check-then-commit from overwriting run data.
+            try:
+                info = repo_info(repo_id, repo_type="dataset")
+                repo_revision = getattr(info, "sha", None)
+            except Exception as refresh_exc:
+                if not _is_missing(refresh_exc):
+                    raise
     else:
         # Lightweight injected API doubles predating repo_info remain supported.
         api.create_repo(repo_id, repo_type="dataset", exist_ok=True)
@@ -121,7 +132,7 @@ def publish_run(
     existing = (
         set(list_files(repo_id, repo_type="dataset")) if callable(list_files) else set()
     )
-    if coverage_name in existing or observation_name in existing:
+    if coverage_name in existing:
         return f"https://huggingface.co/datasets/{repo_id}"
 
     try:
@@ -142,12 +153,24 @@ def publish_run(
             CommitOperationAdd(path_in_repo=observation_name, path_or_fileobj=str(observations_path))
         )
     try:
-        response = api.create_commit(
-            repo_id=repo_id,
-            repo_type="dataset",
-            operations=operations,
-            commit_message=f"Add GitHub ML run {run_id}",
-        )
+        commit_args = {
+            "repo_id": repo_id,
+            "repo_type": "dataset",
+            "operations": operations,
+            "commit_message": f"Add GitHub ML run {run_id}",
+        }
+        if repo_revision:
+            commit_args["parent_commit"] = repo_revision
+        response = api.create_commit(**commit_args)
+    except Exception:
+        # A concurrent publisher may have committed this run after our listing
+        # but before our pinned commit. Confirm the durable run marker before
+        # treating the conflict as a successful retry.
+        if callable(list_files):
+            latest = set(list_files(repo_id, repo_type="dataset"))
+            if coverage_name in latest:
+                return f"https://huggingface.co/datasets/{repo_id}"
+        raise
     finally:
         Path(operations[1].path_or_fileobj).unlink(missing_ok=True)
     return getattr(response, "commit_url", None) or f"https://huggingface.co/datasets/{repo_id}"

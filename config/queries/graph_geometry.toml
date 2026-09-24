@@ -81,3 +81,63 @@ id = "graph.graph-generation"
 q = "\"graph generation\" in:readme"
 domains = ["graph-learning", "generative-ai"]
 methods = ["graph-generation", "generative-modeling"]
+
+[[queries]]
+id = "graph.graph-transformer"
+q = "\"graph transformer\" in:description"
+domains = ["graph-learning", "deep-learning"]
+methods = ["graph-transformer", "message-passing"]
+
+[[queries]]
+id = "graph.link-prediction"
+q = "\"link prediction\" in:description"
+domains = ["graph-learning", "knowledge-graphs"]
+methods = ["link-prediction", "graph-representation-learning"]
+
+[[queries]]
+id = "graph.graph-classification"
+q = "\"graph classification\" in:description"
+domains = ["graph-learning"]
+methods = ["graph-classification", "graph-representation-learning"]
+
+[[queries]]
+id = "graph.graph-contrastive-learning"
+q = "\"graph contrastive learning\" in:description"
+domains = ["graph-learning", "representation-learning"]
+methods = ["graph-contrastive-learning", "self-supervised-learning"]
+
+[[queries]]
+id = "graph.graph-foundation-model"
+q = "\"graph foundation model\" in:description"
+domains = ["graph-learning", "foundation-models"]
+methods = ["graph-foundation-model", "graph-pretraining"]
+
+[[queries]]
+id = "graph.hypergraph-neural-network"
+q = "\"hypergraph neural network\" in:description"
+domains = ["graph-learning", "geometric-learning"]
+methods = ["hypergraph-learning", "message-passing"]
+
+[[queries]]
+id = "graph.graph-diffusion"
+q = "\"graph diffusion model\" in:description"
+domains = ["graph-learning", "generative-ai"]
+methods = ["graph-diffusion", "graph-generation"]
+
+[[queries]]
+id = "graph.neural-ode-graph"
+q = "\"graph neural ODE\" in:description"
+domains = ["graph-learning", "geometric-learning"]
+methods = ["graph-neural-ode", "continuous-depth-learning"]
+
+[[queries]]
+id = "graph.mesh-graph-learning"
+q = "\"mesh graph neural network\" in:description"
+domains = ["geometric-learning", "3d", "physics-ml"]
+methods = ["mesh-learning", "graph-neural-network"]
+
+[[queries]]
+id = "graph.manifold-learning"
+q = "\"manifold learning\" in:description"
+domains = ["geometric-learning", "unsupervised-learning"]
+methods = ["manifold-learning", "dimensionality-reduction"]

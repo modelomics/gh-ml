@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from io import BytesIO
 from urllib.error import HTTPError
 
@@ -75,6 +76,58 @@ def test_rate_limit_responses_retry_with_retry_after(status: int) -> None:
 
     assert client.get_repository("lab/model")["id"] == 9
     assert sleeps == [3.0]
+
+
+def test_search_requests_are_spaced_at_authenticated_search_limit() -> None:
+    sleeps: list[float] = []
+    client = GitHubClient(
+        opener=lambda request, *, timeout: FakeResponse(
+            {"total_count": 0, "incomplete_results": False, "items": []}
+        ),
+        sleeper=sleeps.append,
+    )
+
+    client.search_repositories("first")
+    client.search_repositories("second")
+
+    assert len(sleeps) == 1
+    assert sleeps[0] == pytest.approx(2.0, abs=0.01)
+
+
+def test_rate_limit_retry_after_is_not_truncated_to_short_backoff() -> None:
+    outcomes = [http_error(429, {"Retry-After": "95"}), FakeResponse({"id": 9, "full_name": "lab/model"})]
+    sleeps: list[float] = []
+
+    def opener(request, *, timeout):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    client = GitHubClient(opener=opener, sleeper=sleeps.append)
+    assert client.get_repository("lab/model")["id"] == 9
+    assert sleeps == [95.0]
+
+
+def test_primary_search_reset_header_is_respected() -> None:
+    reset = str(time.time() + 90)
+    outcomes = [
+        http_error(403, {"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": reset}),
+        FakeResponse({"total_count": 0, "incomplete_results": False, "items": []}),
+    ]
+    sleeps: list[float] = []
+
+    def opener(request, *, timeout):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    client = GitHubClient(opener=opener, sleeper=sleeps.append)
+    client.search_repositories("models")
+
+    assert len(sleeps) == 1
+    assert 89 <= sleeps[0] <= 90
 
 
 def test_auth_header_is_sent_but_token_is_not_exposed_in_errors() -> None:

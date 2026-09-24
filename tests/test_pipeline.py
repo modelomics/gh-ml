@@ -6,7 +6,10 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from gh_ml import cli
+from gh_ml import discovery
 from gh_ml.classification import classify_repository
 from gh_ml.hub import load_checkpoint, publish_run
 from gh_ml.schema import QuerySpec, observation_from_repository
@@ -143,6 +146,175 @@ def test_cli_dry_run_writes_candidate_without_publishing(tmp_path: Path, monkeyp
     assert row["candidate_status"] == "candidate"
     assert manifest["published"] is False
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["cursor"] is None
+
+
+def test_cli_publishes_empty_sweep_checkpoint_for_ephemeral_runners(
+    tmp_path: Path, monkeypatch
+) -> None:
+    outcome = SimpleNamespace(
+        repositories={},
+        matched_query_ids={},
+        next_cursor=None,
+        requests_used=1,
+        coverage=[{"query_id": "query", "success": True}],
+    )
+    saved: list[dict] = []
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "discover", lambda *args, **kwargs: outcome)
+
+    def publish(*args, **kwargs):
+        saved.append(kwargs["checkpoint"])
+        assert Path(kwargs["observations_path"]).stat().st_size == 0
+        return "https://huggingface.co/datasets/modelomics/gh-ml/commit/empty"
+
+    monkeypatch.setattr(cli, "publish_run", publish)
+    status = cli.main(
+        [
+            "run",
+            "--config-dir",
+            str(Path(__file__).parents[1] / "config" / "queries"),
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert status == 0
+    assert saved == [{"since": "2026-09-24", "cursor": None, "updated_at": "2026-09-24T00:00:00Z"}]
+    manifest = json.loads(next(tmp_path.glob("manifest-*.json")).read_text(encoding="utf-8"))
+    assert manifest["published"] is True
+    assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["since"] == "2026-09-24"
+
+
+@pytest.mark.parametrize(
+    ("command", "state_name", "state", "bounds"),
+    [
+        (
+            "run",
+            "state.json",
+            {"since": "2026-09-20", "until": "2026-09-24", "cursor": {"page": 2}},
+            {"since": "2026-09-20", "until": "2026-09-24"},
+        ),
+        (
+            "backfill",
+            "backfill-state.json",
+            {"start": "2020-01-01", "end": "2020-12-31", "cursor": {"page": 2}},
+            {"start": "2020-01-01", "end": "2020-12-31"},
+        ),
+    ],
+)
+def test_cli_restarts_same_window_after_query_catalog_change(
+    tmp_path: Path, monkeypatch, capsys, command, state_name, state, bounds
+) -> None:
+    state_path = tmp_path / state_name
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    prior_observations = tmp_path / "observations-prior.jsonl"
+    prior_observations.write_text('{"github_id":99}\n', encoding="utf-8")
+    prior_coverage = tmp_path / "coverage-prior.json"
+    prior_coverage.write_text('{"complete_sweep":false}\n', encoding="utf-8")
+    calls: list[tuple[dict | None, dict]] = []
+    outcome = SimpleNamespace(
+        repositories={},
+        matched_query_ids={},
+        next_cursor=None,
+        requests_used=1,
+        coverage=[],
+    )
+
+    def changed_catalog(_client, _specs, **kwargs):
+        calls.append((kwargs.get("cursor"), kwargs))
+        if kwargs.get("cursor") is not None:
+            raise ValueError("cursor specs does not match this discovery run")
+        return outcome
+
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    if command == "run":
+        monkeypatch.setattr(cli, "discover", changed_catalog)
+    else:
+        monkeypatch.setattr(discovery, "discover_backfill", changed_catalog)
+
+    argv = [
+        command,
+        "--no-publish",
+        "--config-dir",
+        str(Path(__file__).parents[1] / "config" / "queries"),
+        "--output-dir",
+        str(tmp_path),
+    ]
+    if command == "backfill":
+        argv.extend(["--start", "2020-01-01", "--end", "2020-12-31"])
+
+    assert cli.main(argv) == 0
+
+    assert [cursor for cursor, _ in calls] == [state["cursor"], None]
+    assert all({key: kwargs[key] for key in bounds} == bounds for _, kwargs in calls)
+    assert prior_observations.read_text(encoding="utf-8") == '{"github_id":99}\n'
+    assert prior_coverage.read_text(encoding="utf-8") == '{"complete_sweep":false}\n'
+    assert "restarting" in capsys.readouterr().err
+
+
+def test_empty_successful_published_run_reports_publication(tmp_path: Path, monkeypatch, capsys) -> None:
+    outcome = SimpleNamespace(
+        repositories={},
+        matched_query_ids={},
+        next_cursor=None,
+        requests_used=1,
+        coverage=[{"query_id": "query", "success": True}],
+    )
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "discover", lambda *args, **kwargs: outcome)
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: "https://example.test/run")
+
+    assert cli.main(
+        [
+            "run",
+            "--config-dir",
+            str(Path(__file__).parents[1] / "config" / "queries"),
+            "--output-dir",
+            str(tmp_path),
+        ]
+    ) == 0
+    output = capsys.readouterr().out
+    assert "empty run published" in output
+    assert "skipped publishing" not in output
+
+
+def test_cli_failed_publish_does_not_advance_local_checkpoint(tmp_path: Path, monkeypatch) -> None:
+    outcome = SimpleNamespace(
+        repositories={},
+        matched_query_ids={},
+        next_cursor=None,
+        requests_used=1,
+        coverage=[{"query_id": "query", "success": True}],
+    )
+    monkeypatch.setenv("HF_TOKEN", "secret")
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "discover", lambda *args, **kwargs: outcome)
+    monkeypatch.setattr(
+        cli,
+        "publish_run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("Hub unavailable")),
+    )
+
+    status = cli.main(
+        [
+            "run",
+            "--config-dir",
+            str(Path(__file__).parents[1] / "config" / "queries"),
+            "--output-dir",
+            str(tmp_path),
+        ]
+    )
+
+    assert status == 2
+    assert not (tmp_path / "state.json").exists()
 
 
 def _publish_test_run(tmp_path: Path, api: FakeHub) -> str:

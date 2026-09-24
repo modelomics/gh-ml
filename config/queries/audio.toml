@@ -87,3 +87,51 @@ id = "audio-neural-codec"
 q = "\"neural audio codec\" in:readme"
 domains = ["audio"]
 methods = ["compression", "representation", "architecture"]
+
+[[queries]]
+id = "audio-audio-classification"
+q = "\"audio classification\" in:readme"
+domains = ["audio"]
+methods = ["audio-classification", "representation-learning"]
+
+[[queries]]
+id = "audio-audio-captioning"
+q = "\"audio captioning\" in:readme"
+domains = ["audio", "multimodal"]
+methods = ["audio-captioning", "audio-language"]
+
+[[queries]]
+id = "audio-audio-question-answering"
+q = "\"audio question answering\" in:readme"
+domains = ["audio", "language", "multimodal"]
+methods = ["question-answering", "audio-language"]
+
+[[queries]]
+id = "audio-speech-emotion-recognition"
+q = "\"speech emotion recognition\" in:readme"
+domains = ["audio", "speech"]
+methods = ["emotion-recognition", "speech-understanding"]
+
+[[queries]]
+id = "audio-speech-translation"
+q = "\"speech translation\" in:readme"
+domains = ["audio", "speech", "language"]
+methods = ["speech-translation", "machine-translation"]
+
+[[queries]]
+id = "audio-music-transcription"
+q = "\"automatic music transcription\" in:readme"
+domains = ["audio", "music"]
+methods = ["music-transcription", "audio-understanding"]
+
+[[queries]]
+id = "audio-acoustic-event-classification"
+q = "\"acoustic scene classification\" in:readme"
+domains = ["audio"]
+methods = ["acoustic-scene-classification", "audio-classification"]
+
+[[queries]]
+id = "audio-audio-super-resolution"
+q = "\"audio super-resolution\" in:readme"
+domains = ["audio"]
+methods = ["audio-super-resolution", "restoration"]

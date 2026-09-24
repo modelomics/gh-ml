@@ -87,3 +87,39 @@ id = "multimodal.embodied-world-models"
 q = "\"embodied world model\" in:description"
 domains = ["multimodal", "robotics", "reinforcement-learning"]
 methods = ["world-model", "embodied-ai"]
+
+[[queries]]
+id = "multimodal.image-to-3d"
+q = "\"image to 3D\" in:readme"
+domains = ["multimodal", "computer-vision", "3d"]
+methods = ["image-to-3d", "3d-generation"]
+
+[[queries]]
+id = "multimodal.text-to-3d"
+q = "\"text to 3D\" in:readme"
+domains = ["multimodal", "computer-vision", "3d", "generative-ai"]
+methods = ["text-to-3d", "3d-generation"]
+
+[[queries]]
+id = "multimodal.3d-generation"
+q = "\"3D generation\" in:readme"
+domains = ["computer-vision", "graphics", "3d", "generative-ai"]
+methods = ["3d-generation", "generative-modeling"]
+
+[[queries]]
+id = "multimodal.motion-generation"
+q = "\"human motion generation\" in:readme"
+domains = ["multimodal", "computer-vision", "generative-ai"]
+methods = ["motion-generation", "generative-modeling"]
+
+[[queries]]
+id = "multimodal.audio-visual-learning"
+q = "\"audio visual learning\" in:readme"
+domains = ["multimodal", "audio", "computer-vision"]
+methods = ["audio-visual-learning", "multimodal-learning"]
+
+[[queries]]
+id = "multimodal.video-language-model"
+q = "\"video language model\" in:readme"
+domains = ["multimodal", "video", "language"]
+methods = ["video-language-model", "video-understanding"]

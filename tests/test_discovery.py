@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from gh_ml.discovery import discover, discover_backfill
 from gh_ml.schema import QuerySpec
 
@@ -90,6 +92,50 @@ def test_pagination_budget_cursor_resumes_at_exact_next_page():
     assert second.requests_used == 1
     assert set(second.repositories) == {3}
     assert second.next_cursor is None
+
+
+def test_resumed_sweep_emits_only_coverage_completed_in_this_invocation():
+    first_query, second_query = spec("first"), spec("second")
+    first_search = first_query.q + " fork:true pushed:>=2026-09-01"
+    second_search = second_query.q + " fork:true pushed:>=2026-09-01"
+    client = FakeGitHubClient(
+        {
+            (first_search, 1): SearchResult(1, False, [repo(11)]),
+            (second_search, 1): SearchResult(1, False, [repo(22)]),
+        }
+    )
+
+    first = discover(
+        client, [first_query, second_query], since="2026-09-01", max_requests=1,
+    )
+    assert [row["query_id"] for row in first.coverage] == ["first"]
+    assert first.next_cursor is not None
+    assert "coverage" not in first.next_cursor
+
+    second = discover(
+        client, [first_query, second_query], since="2026-09-01", max_requests=1,
+        cursor=first.next_cursor,
+    )
+    assert [row["query_id"] for row in second.coverage] == ["second"]
+    assert second.next_cursor is None
+
+
+def test_regular_cursor_rejects_changed_filter_or_page_size():
+    query = spec("identity")
+    search = query.q + " fork:true pushed:>=2026-09-01"
+    client = FakeGitHubClient({(search, 1): SearchResult(3, False, [repo(1), repo(2)])})
+    first = discover(client, [query], since="2026-09-01", max_requests=1, per_page=2)
+
+    with pytest.raises(ValueError, match="since bound"):
+        discover(
+            client, [query], since="2026-09-02", max_requests=1, per_page=2,
+            cursor=first.next_cursor,
+        )
+    with pytest.raises(ValueError, match="per_page"):
+        discover(
+            client, [query], since="2026-09-01", max_requests=1, per_page=3,
+            cursor=first.next_cursor,
+        )
 
 
 def test_github_search_1000_result_cap_is_reported_as_incomplete_coverage():
@@ -199,3 +245,46 @@ def test_backfill_cursor_resumes_at_exact_page_and_range():
     assert client.calls == [(search, 1, 2), (search, 2, 2)]
     assert set(second.repositories) == {203}
     assert second.next_cursor is None
+
+
+def test_backfill_cursor_rejects_changed_page_size_or_query():
+    query = spec("backfill-identity")
+    search = query.q + " fork:true created:2021-01-01..2021-01-02"
+    client = FakeGitHubClient({(search, 1): SearchResult(3, False, [repo(301), repo(302)])})
+    first = discover_backfill(
+        client, [query], start="2021-01-01", end="2021-01-02", max_requests=1, per_page=2
+    )
+
+    with pytest.raises(ValueError, match="per_page"):
+        discover_backfill(
+            client, [query], start="2021-01-01", end="2021-01-02", max_requests=1,
+            per_page=3, cursor=first.next_cursor,
+        )
+    with pytest.raises(ValueError, match="specs"):
+        discover_backfill(
+            client, [spec("backfill-identity", "topic:changed")], start="2021-01-01",
+            end="2021-01-02", max_requests=1, per_page=2, cursor=first.next_cursor,
+        )
+
+
+def test_backfill_cursor_does_not_republish_prior_partition_coverage():
+    query = spec("partition-coverage")
+    root = query.q + " fork:true created:2020-01-01..2020-01-04"
+    left = query.q + " fork:true created:2020-01-01..2020-01-02"
+    client = FakeGitHubClient({
+        (root, 1): SearchResult(1100, False, [repo(n + 1) for n in range(100)]),
+        (left, 1): SearchResult(1, False, [repo(1)]),
+    })
+
+    first_run = discover_backfill(
+        client, [query], start="2020-01-01", end="2020-01-04", max_requests=1
+    )
+    assert [row["status"] for row in first_run.coverage] == ["partitioned"]
+    assert "coverage" not in first_run.next_cursor
+
+    resumed = discover_backfill(
+        client, [query], start="2020-01-01", end="2020-01-04", max_requests=1,
+        cursor=first_run.next_cursor,
+    )
+    assert [row["status"] for row in resumed.coverage] == ["complete"]
+    assert resumed.coverage[0]["range_start"] == "2020-01-01"

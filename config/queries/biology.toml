@@ -87,3 +87,51 @@ id = "bio.transcriptomics"
 q = "\"transcriptomics\" in:description"
 domains = ["biology", "computational-biology", "transcriptomics"]
 methods = ["gene-expression-modeling", "representation-learning"]
+
+[[queries]]
+id = "bio.microbiome"
+q = "\"microbiome\" \"machine learning\" in:description,readme"
+domains = ["biology", "microbiology", "computational-biology"]
+methods = ["microbiome-analysis", "classification", "representation-learning"]
+
+[[queries]]
+id = "bio.crispr"
+q = "\"CRISPR screen\" in:description,readme"
+domains = ["biology", "genomics", "computational-biology"]
+methods = ["perturbation-prediction", "gene-essentiality", "representation-learning"]
+
+[[queries]]
+id = "bio.spatial-transcriptomics"
+q = "\"spatial transcriptomics\" in:description,readme"
+domains = ["biology", "transcriptomics", "computational-biology"]
+methods = ["spatial-modeling", "gene-expression-modeling", "representation-learning"]
+
+[[queries]]
+id = "bio.gene-regulatory-networks"
+q = "\"gene regulatory network\" in:description,readme"
+domains = ["biology", "genomics", "computational-biology"]
+methods = ["network-inference", "gene-expression-modeling", "graph-neural-network"]
+
+[[queries]]
+id = "bio.cell-atlas"
+q = "\"cell atlas\" in:description,readme"
+domains = ["biology", "single-cell", "computational-biology"]
+methods = ["foundation-model", "cell-type-annotation", "representation-learning"]
+
+[[queries]]
+id = "bio.metagenomics"
+q = "\"metagenomic classification\" in:description,readme"
+domains = ["biology", "microbiology", "bioinformatics"]
+methods = ["sequence-classification", "metagenomics", "self-supervised-learning"]
+
+[[queries]]
+id = "bio.genome-assembly"
+q = "\"genome assembly\" \"neural network\" in:description,readme"
+domains = ["biology", "genomics", "bioinformatics"]
+methods = ["genome-assembly", "sequence-model", "classification"]
+
+[[queries]]
+id = "bio.chemical-biology"
+q = "\"protein function prediction\" in:description,readme"
+domains = ["biology", "computational-biology", "bioinformatics"]
+methods = ["function-prediction", "protein-language-model", "representation-learning"]

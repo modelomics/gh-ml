@@ -87,3 +87,63 @@ id = "llm.synthetic-data-generation"
 q = "\"synthetic data generation\" in:description"
 domains = ["language", "data-centric-ai"]
 methods = ["synthetic-data"]
+
+[[queries]]
+id = "llm.instruction-tuning"
+q = "\"instruction tuning\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["instruction-tuning", "fine-tuning"]
+
+[[queries]]
+id = "llm.parameter-efficient-finetuning"
+q = "\"parameter-efficient fine-tuning\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["parameter-efficient-fine-tuning", "fine-tuning"]
+
+[[queries]]
+id = "llm.quantization"
+q = "\"LLM quantization\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["quantization", "efficient-inference"]
+
+[[queries]]
+id = "llm.speculative-decoding"
+q = "\"speculative decoding\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["speculative-decoding", "efficient-inference"]
+
+[[queries]]
+id = "llm.long-context"
+q = "\"long context\" \"language model\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["long-context-modeling", "language-model"]
+
+[[queries]]
+id = "llm.preference-optimization"
+q = "\"direct preference optimization\" in:readme"
+domains = ["language", "generative-ai", "safety"]
+methods = ["preference-optimization", "alignment"]
+
+[[queries]]
+id = "llm-reasoning"
+q = "\"reasoning model\" in:readme"
+domains = ["language", "generative-ai"]
+methods = ["reasoning", "language-model"]
+
+[[queries]]
+id = "llm-code-generation"
+q = "\"code generation\" \"language model\" in:readme"
+domains = ["language", "software-engineering", "generative-ai"]
+methods = ["code-generation", "language-model"]
+
+[[queries]]
+id = "llm-retrieval-augmented-generation"
+q = "\"retrieval-augmented generation\" in:readme"
+domains = ["language", "information-retrieval"]
+methods = ["retrieval-augmented-generation", "rag"]
+
+[[queries]]
+id = "llm-text-to-speech"
+q = "\"text-to-speech\" \"language model\" in:readme"
+domains = ["language", "audio", "speech", "generative-ai"]
+methods = ["text-to-speech", "speech-generation"]

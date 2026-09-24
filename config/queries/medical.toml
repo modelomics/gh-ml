@@ -87,3 +87,57 @@ id = "medical.clinical-trials"
 q = "\"clinical trial prediction\" in:description"
 domains = ["health-and-biomedicine", "clinical-research"]
 methods = ["patient-matching", "outcome-prediction"]
+
+[[queries]]
+id = "medical.ecg"
+q = "ECG \"deep learning\" in:description,readme"
+domains = ["health-and-biomedicine", "cardiology", "signal-processing"]
+methods = ["signal-classification", "diagnosis", "time-series-modeling"]
+
+[[queries]]
+id = "medical.eeg"
+q = "EEG \"deep learning\" in:description,readme"
+domains = ["health-and-biomedicine", "neuroscience", "signal-processing"]
+methods = ["signal-classification", "neural-decoding", "representation-learning"]
+
+[[queries]]
+id = "medical.genomics"
+q = "\"clinical genomics\" in:description,readme"
+domains = ["health-and-biomedicine", "genomics", "clinical-informatics"]
+methods = ["variant-effect-prediction", "diagnosis", "sequence-model"]
+
+[[queries]]
+id = "medical.pathology-foundation-model"
+q = "\"pathology foundation model\" in:description,readme"
+domains = ["health-and-biomedicine", "pathology", "medical-imaging"]
+methods = ["foundation-model", "representation-learning", "image-analysis"]
+
+[[queries]]
+id = "medical.medical-image-registration"
+q = "\"medical image registration\" in:description,readme"
+domains = ["health-and-biomedicine", "medical-imaging"]
+methods = ["image-registration", "reconstruction", "image-analysis"]
+
+[[queries]]
+id = "medical.medical-image-reconstruction"
+q = "\"MRI reconstruction\" in:description,readme"
+domains = ["health-and-biomedicine", "medical-imaging", "radiology"]
+methods = ["image-reconstruction", "inverse-problems", "deep-learning"]
+
+[[queries]]
+id = "medical.drug-response"
+q = "\"drug response prediction\" in:description,readme"
+domains = ["health-and-biomedicine", "drug-discovery", "bioinformatics"]
+methods = ["response-prediction", "precision-medicine", "representation-learning"]
+
+[[queries]]
+id = "medical.patient-risk"
+q = "\"patient deterioration prediction\" in:description,readme"
+domains = ["health-and-biomedicine", "clinical-informatics"]
+methods = ["risk-prediction", "early-warning", "time-series-modeling"]
+
+[[queries]]
+id = "medical.medical-robotics"
+q = "\"surgical robotics\" \"machine learning\" in:description,readme"
+domains = ["health-and-biomedicine", "robotics", "surgery"]
+methods = ["robot-learning", "image-guidance", "control"]

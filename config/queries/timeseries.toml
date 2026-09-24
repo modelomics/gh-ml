@@ -87,3 +87,45 @@ id = "timeseries.temporal-fusion-transformer"
 q = "\"temporal fusion transformer\" in:description"
 domains = ["time-series", "forecasting"]
 methods = ["transformer", "forecasting"]
+
+[[queries]]
+id = "timeseries.traffic-forecasting"
+q = "\"traffic forecasting\" in:description"
+domains = ["time-series", "transportation", "forecasting"]
+methods = ["traffic-forecasting", "spatio-temporal-forecasting"]
+
+[[queries]]
+id = "timeseries.energy-forecasting"
+q = "\"energy forecasting\" in:description"
+domains = ["time-series", "energy", "forecasting"]
+methods = ["energy-forecasting", "load-forecasting"]
+
+[[queries]]
+id = "timeseries.weather-forecasting"
+q = "\"weather forecasting\" in:description"
+domains = ["time-series", "weather", "forecasting"]
+methods = ["weather-forecasting"]
+
+[[queries]]
+id = "timeseries.nbeats"
+q = "N-BEATS in:description"
+domains = ["time-series", "forecasting"]
+methods = ["neural-forecasting", "forecasting"]
+
+[[queries]]
+id = "timeseries.patchtst"
+q = "PatchTST in:description"
+domains = ["time-series", "forecasting"]
+methods = ["transformer", "forecasting"]
+
+[[queries]]
+id = "timeseries.unevenly-spaced"
+q = "\"irregular time series\" in:description"
+domains = ["time-series", "healthcare"]
+methods = ["irregular-time-series-modeling", "sequence-modeling"]
+
+[[queries]]
+id = "timeseries.event-forecasting"
+q = "\"event forecasting\" in:description"
+domains = ["time-series", "forecasting"]
+methods = ["event-forecasting", "temporal-modeling"]

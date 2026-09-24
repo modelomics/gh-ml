@@ -56,14 +56,19 @@ def discover(
 
     query_index = _cursor_int(cursor, "query_index", 0)
     page = _cursor_int(cursor, "page", 1)
+    if cursor is not None:
+        _validate_cursor_identity(
+            cursor, field=None, start=since, end=None, per_page=per_page,
+            specs=specs,
+        )
     if query_index > len(specs) or page < 1:
         raise ValueError("cursor is outside the configured query sequence")
     repositories: dict[int, dict[str, Any]] = {}
     matched: dict[int, list[str]] = {}
-    coverage: list[dict[str, Any]] = [
-        dict(item) for item in (cursor or {}).get("coverage", [])
-        if isinstance(item, Mapping)
-    ]
+    # Coverage is emitted once per invocation and stored in that run's
+    # artifact. Keeping it in a checkpoint makes every resumed run republish
+    # all historical rows and causes state to grow with each completed query.
+    coverage: list[dict[str, Any]] = []
     active_pages = _cursor_int(cursor, "active_pages_scanned", 0)
     active_incomplete = bool((cursor or {}).get("active_incomplete_results", False))
     active_total_count = (cursor or {}).get("active_total_count")
@@ -80,8 +85,9 @@ def discover(
             return DiscoveryOutcome(
                 repositories, matched, coverage, requests_used,
                 _make_cursor(
-                    query_index, page, spec_id, coverage, active_pages,
-                    active_total_count, active_incomplete,
+                    query_index, page, spec_id, active_pages,
+                    active_total_count, active_incomplete, since=since,
+                    per_page=per_page, specs=specs,
                 ),
             )
 
@@ -183,6 +189,10 @@ def _discover_partitioned(
             raise ValueError("cursor start bound does not match this discovery run")
         if cursor_end != initial_range["end"]:
             raise ValueError("cursor end bound does not match this discovery run")
+        _validate_cursor_identity(
+            cursor, field=field, start=initial_range["start"],
+            end=initial_range["end"], per_page=per_page, specs=specs,
+        )
     query_index = _cursor_int(cursor, "query_index", 0)
     if query_index > len(specs):
         raise ValueError("cursor is outside the configured query sequence")
@@ -191,10 +201,10 @@ def _discover_partitioned(
     stack = [dict(item) for item in (cursor or {}).get("range_stack", [])]
     if cursor is None and specs:
         stack = [initial_range]
-    coverage = [
-        dict(item) for item in (cursor or {}).get("coverage", [])
-        if isinstance(item, Mapping)
-    ]
+    # Completed range coverage has already been published with the invocation
+    # that scanned it. The cursor only needs the remaining range stack and the
+    # active range's pagination state.
+    coverage: list[dict[str, Any]] = []
     active_pages = _cursor_int(cursor, "active_pages_scanned", 0)
     active_incomplete = bool((cursor or {}).get("active_incomplete_results", False))
     active_total_count = (cursor or {}).get("active_total_count")
@@ -235,10 +245,11 @@ def _discover_partitioned(
                 "range_stack": stack,
                 "active_range": dict(active_range),
                 "page": page,
-                "coverage": coverage,
                 "active_pages_scanned": active_pages,
                 "active_total_count": active_total_count,
                 "active_incomplete_results": active_incomplete,
+                "per_page": per_page,
+                "specs": _spec_signature(specs),
             }
             return DiscoveryOutcome(repositories, matched, coverage, requests_used, next_cursor)
 
@@ -433,17 +444,49 @@ def _make_cursor(
     query_index: int,
     page: int,
     query_id: str,
-    coverage: list[dict[str, Any]],
     active_pages: int,
     active_total_count: int | None,
     active_incomplete: bool,
+    *,
+    since: str,
+    per_page: int,
+    specs: Sequence[QuerySpec],
 ) -> dict[str, Any]:
     return {
         "query_index": query_index,
         "query_id": query_id,
         "page": page,
-        "coverage": coverage,
         "active_pages_scanned": active_pages,
         "active_total_count": active_total_count,
         "active_incomplete_results": active_incomplete,
+        "since": since,
+        "per_page": per_page,
+        "specs": _spec_signature(specs),
     }
+
+
+def _spec_signature(specs: Sequence[QuerySpec]) -> list[dict[str, str]]:
+    return [{"id": str(spec.id), "query": spec.q} for spec in specs]
+
+
+def _validate_cursor_identity(
+    cursor: Mapping[str, Any],
+    *,
+    field: str | None,
+    start: str,
+    end: str | None,
+    per_page: int,
+    specs: Sequence[QuerySpec],
+) -> None:
+    expected = {
+        "field": field,
+        "start": start,
+        "end": end,
+        "per_page": per_page,
+        "specs": _spec_signature(specs),
+    }
+    for key, value in expected.items():
+        if key in cursor and cursor[key] != value:
+            raise ValueError(f"cursor {key} does not match this discovery run")
+    if field is None and "since" in cursor and cursor["since"] != start:
+        raise ValueError("cursor since bound does not match this discovery run")

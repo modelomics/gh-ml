@@ -87,3 +87,51 @@ id = "science.inverse-problems"
 q = "\"inverse problems\" in:description"
 domains = ["applied-physics", "computational-science", "applied-mathematics"]
 methods = ["inverse-problems", "data-assimilation", "reconstruction"]
+
+[[queries]]
+id = "science.quantum-physics"
+q = "\"quantum many-body\" \"machine learning\" in:description,readme"
+domains = ["physics", "quantum-physics", "computational-physics"]
+methods = ["quantum-simulation", "scientific-machine-learning", "representation-learning"]
+
+[[queries]]
+id = "science.gravitational-waves"
+q = "\"gravitational wave\" \"machine learning\" in:description,readme"
+domains = ["astrophysics", "gravitational-physics", "astronomy"]
+methods = ["signal-detection", "anomaly-detection", "signal-classification"]
+
+[[queries]]
+id = "science.exoplanets"
+q = "exoplanet in:description \"machine learning\""
+domains = ["astronomy", "astrophysics", "space-science"]
+methods = ["planet-detection", "time-series-classification", "anomaly-detection"]
+
+[[queries]]
+id = "science.fusion-plasma"
+q = "fusion plasma in:description \"machine learning\""
+domains = ["fusion-energy", "plasma-physics", "nuclear-engineering"]
+methods = ["control", "disruption-prediction", "surrogate-modeling"]
+
+[[queries]]
+id = "science.turbulence"
+q = "turbulence in:description \"machine learning\""
+domains = ["fluid-dynamics", "computational-fluid-dynamics", "physics"]
+methods = ["turbulence-modeling", "surrogate-modeling", "scientific-machine-learning"]
+
+[[queries]]
+id = "science.weather-nowcasting"
+q = "nowcasting in:description \"machine learning\""
+domains = ["meteorology", "climate-science", "earth-science"]
+methods = ["weather-forecasting", "spatiotemporal-modeling", "deep-learning"]
+
+[[queries]]
+id = "science.seismic"
+q = "\"seismic data\" \"machine learning\" in:description,readme"
+domains = ["geophysics", "earth-science", "computational-science"]
+methods = ["signal-classification", "event-detection", "inverse-problems"]
+
+[[queries]]
+id = "science.quantum-materials"
+q = "\"quantum materials\" \"machine learning\" in:description,readme"
+domains = ["physics", "materials-science", "condensed-matter-physics"]
+methods = ["property-prediction", "materials-discovery", "scientific-machine-learning"]

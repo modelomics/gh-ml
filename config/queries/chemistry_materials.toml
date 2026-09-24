@@ -87,3 +87,57 @@ id = "chem-catalyst-discovery"
 q = "\"catalyst discovery\" in:description,readme"
 domains = ["chemistry", "materials-science", "catalysis"]
 methods = ["catalyst-discovery", "property-prediction", "materials-design"]
+
+[[queries]]
+id = "chem-quantum-chemistry"
+q = "\"quantum chemistry\" \"machine learning\" in:description,readme"
+domains = ["chemistry", "computational-chemistry"]
+methods = ["quantum-chemistry", "surrogate-modeling", "property-prediction"]
+
+[[queries]]
+id = "chem-molecular-dynamics"
+q = "\"molecular dynamics\" \"machine learning\" in:description,readme"
+domains = ["chemistry", "computational-chemistry", "materials-science"]
+methods = ["molecular-dynamics", "scientific-machine-learning", "simulation"]
+
+[[queries]]
+id = "chem-retrosynthesis-planning"
+q = "retrosynthesis in:description,readme"
+domains = ["chemistry", "organic-chemistry"]
+methods = ["reaction-prediction", "planning", "generative-modeling"]
+
+[[queries]]
+id = "chem-reaction-conditions"
+q = "\"reaction condition prediction\" in:description,readme"
+domains = ["chemistry", "organic-chemistry"]
+methods = ["reaction-prediction", "condition-prediction", "property-prediction"]
+
+[[queries]]
+id = "chem-protein-ligand-docking"
+q = "\"protein-ligand docking\" in:description,readme"
+domains = ["chemistry", "drug-discovery", "structural-biology"]
+methods = ["docking", "structure-prediction", "scoring"]
+
+[[queries]]
+id = "chem-molecular-property-benchmark"
+q = "MoleculeNet in:description,readme"
+domains = ["chemistry", "drug-discovery", "computational-chemistry"]
+methods = ["property-prediction", "benchmarking", "representation-learning"]
+
+[[queries]]
+id = "materials-battery"
+q = "\"battery materials\" \"machine learning\" in:description,readme"
+domains = ["materials-science", "chemistry", "energy"]
+methods = ["materials-discovery", "property-prediction", "materials-design"]
+
+[[queries]]
+id = "materials-perovskite"
+q = "perovskite in:description \"machine learning\""
+domains = ["materials-science", "chemistry", "energy"]
+methods = ["property-prediction", "materials-discovery", "surrogate-modeling"]
+
+[[queries]]
+id = "materials-crystal-graph"
+q = "\"crystal graph\" in:description,readme"
+domains = ["materials-science", "chemistry"]
+methods = ["graph-neural-network", "property-prediction", "materials-discovery"]

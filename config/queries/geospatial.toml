@@ -87,3 +87,51 @@ id = "geo.climate-mapping"
 q = "\"climate downscaling\" in:readme"
 domains = ["geospatial", "climate-science", "earth-observation"]
 methods = ["downscaling", "spatiotemporal-modeling", "scientific-machine-learning"]
+
+[[queries]]
+id = "geo.change-detection"
+q = "\"remote sensing change detection\" in:description,readme"
+domains = ["geospatial", "remote-sensing", "earth-observation"]
+methods = ["change-detection", "image-analysis", "representation-learning"]
+
+[[queries]]
+id = "geo.object-detection"
+q = "\"object detection\" \"remote sensing\" in:description,readme"
+domains = ["geospatial", "remote-sensing", "satellite-imagery"]
+methods = ["object-detection", "image-analysis", "deep-learning"]
+
+[[queries]]
+id = "geo.foundation-models-earth"
+q = "\"Earth observation foundation model\" in:description,readme"
+domains = ["geospatial", "earth-observation", "remote-sensing"]
+methods = ["foundation-model", "self-supervised-learning", "representation-learning"]
+
+[[queries]]
+id = "geo.trajectory-prediction"
+q = "\"trajectory prediction\" geospatial in:description,readme"
+domains = ["geospatial", "transportation", "spatial-data-science"]
+methods = ["trajectory-prediction", "spatiotemporal-modeling", "forecasting"]
+
+[[queries]]
+id = "geo.mobility-modeling"
+q = "\"human mobility\" \"machine learning\" in:description,readme"
+domains = ["geospatial", "urban-computing", "transportation"]
+methods = ["mobility-modeling", "spatiotemporal-modeling", "forecasting"]
+
+[[queries]]
+id = "geo.geospatial-knowledge-graph"
+q = "\"geospatial knowledge graph\" in:description,readme"
+domains = ["geospatial", "spatial-data-science", "geoinformatics"]
+methods = ["knowledge-graph", "information-extraction", "spatial-modeling"]
+
+[[queries]]
+id = "geo.lidar"
+q = "LiDAR in:description \"deep learning\""
+domains = ["geospatial", "remote-sensing", "earth-observation"]
+methods = ["point-cloud-learning", "segmentation", "object-detection"]
+
+[[queries]]
+id = "geo.precipitation-forecasting"
+q = "\"precipitation forecasting\" in:description,readme"
+domains = ["geospatial", "hydrology", "meteorology"]
+methods = ["forecasting", "spatiotemporal-modeling", "scientific-machine-learning"]

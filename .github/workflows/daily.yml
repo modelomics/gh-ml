@@ -38,9 +38,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run --frozen gh-ml run --max-requests 120
+        run: uv run --frozen gh-ml run --max-requests 600
       - name: Backfill historical repositories
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: uv run --frozen gh-ml backfill --max-requests 30
+        run: uv run --frozen gh-ml backfill --max-requests 900

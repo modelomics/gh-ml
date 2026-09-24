@@ -87,3 +87,57 @@ id = "efficiency.edge-ai"
 q = "\"edge AI\" in:description"
 domains = ["edge-ai", "efficient-ml"]
 methods = ["edge-inference", "on-device-learning", "embedded-machine-learning"]
+
+[[queries]]
+id = "efficiency.mixture-of-experts"
+q = "\"mixture of experts\" in:description"
+domains = ["efficient-ml", "language", "deep-learning"]
+methods = ["mixture-of-experts", "conditional-computation", "sparse-activation"]
+
+[[queries]]
+id = "efficiency.parameter-efficient-finetuning"
+q = "\"parameter-efficient fine-tuning\" in:description"
+domains = ["efficient-ml", "language"]
+methods = ["parameter-efficient-fine-tuning", "adapter-tuning"]
+
+[[queries]]
+id = "efficiency.lora"
+q = "LoRA in:description"
+domains = ["efficient-ml", "language"]
+methods = ["low-rank-adaptation", "parameter-efficient-fine-tuning"]
+
+[[queries]]
+id = "efficiency.speculative-decoding"
+q = "\"speculative decoding\" in:description"
+domains = ["efficient-ml", "inference-systems", "language"]
+methods = ["speculative-decoding", "inference-optimization"]
+
+[[queries]]
+id = "efficiency.kv-cache"
+q = "\"KV cache\" in:description"
+domains = ["efficient-ml", "inference-systems", "language"]
+methods = ["kv-cache-optimization", "memory-optimization"]
+
+[[queries]]
+id = "efficiency.flash-attention"
+q = "\"FlashAttention\" in:description"
+domains = ["efficient-ml", "ml-systems"]
+methods = ["attention-optimization", "gpu-kernels"]
+
+[[queries]]
+id = "efficiency.gpu-kernels"
+q = "\"GPU kernel\" in:description"
+domains = ["ml-systems", "high-performance-computing"]
+methods = ["gpu-kernels", "kernel-optimization"]
+
+[[queries]]
+id = "efficiency.compiler-optimization"
+q = "\"machine learning compiler\" in:description"
+domains = ["ml-systems", "compilers"]
+methods = ["machine-learning-compilers", "graph-optimization"]
+
+[[queries]]
+id = "efficiency.energy-efficient-ml"
+q = "\"energy efficient machine learning\" in:description"
+domains = ["efficient-ml", "green-ai"]
+methods = ["energy-efficient-inference", "green-ai"]

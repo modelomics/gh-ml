@@ -87,3 +87,33 @@ id = "robotics.robotics-reinforcement-learning"
 q = "\"robotics reinforcement learning\" in:description"
 domains = ["robotics", "reinforcement-learning"]
 methods = ["reinforcement-learning", "robot-learning"]
+
+[[queries]]
+id = "robotics.diffusion-policy"
+q = "\"diffusion policy\" in:description"
+domains = ["robotics", "embodied-ai"]
+methods = ["diffusion-policy", "imitation-learning"]
+
+[[queries]]
+id = "robotics.robot-manipulation-learning"
+q = "\"robot manipulation learning\" in:readme"
+domains = ["robotics", "embodied-ai"]
+methods = ["manipulation", "robot-learning"]
+
+[[queries]]
+id = "robotics.visual-language-action"
+q = "\"vision-language-action\" in:description"
+domains = ["robotics", "embodied-ai", "multimodal"]
+methods = ["vision-language-action", "robot-learning"]
+
+[[queries]]
+id = "robotics.robot-motion-planning"
+q = "\"robot motion planning\" in:description"
+domains = ["robotics", "planning"]
+methods = ["motion-planning", "robotics"]
+
+[[queries]]
+id = "robotics.slam"
+q = "SLAM robotics in:description"
+domains = ["robotics", "computer-vision"]
+methods = ["simultaneous-localization-and-mapping", "visual-odometry"]

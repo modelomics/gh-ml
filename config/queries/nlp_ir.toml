@@ -87,3 +87,57 @@ id = "nlp.text-generation"
 q = '"text generation" in:readme'
 domains = ["natural-language-processing"]
 methods = ["text-generation"]
+
+[[queries]]
+id = "nlp.topic-modeling"
+q = "\"topic modeling\" in:readme"
+domains = ["natural-language-processing"]
+methods = ["topic-modeling", "text-clustering"]
+
+[[queries]]
+id = "nlp.dependency-parsing"
+q = "\"dependency parsing\" in:readme"
+domains = ["natural-language-processing"]
+methods = ["dependency-parsing", "syntactic-parsing"]
+
+[[queries]]
+id = "nlp.coreference-resolution"
+q = "\"coreference resolution\" in:readme"
+domains = ["natural-language-processing"]
+methods = ["coreference-resolution", "discourse-understanding"]
+
+[[queries]]
+id = "nlp.cross-encoder-reranking"
+q = "\"cross-encoder\" \"reranking\" in:readme"
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["neural-reranking", "cross-encoder"]
+
+[[queries]]
+id = "nlp-sparse-retrieval"
+q = "\"sparse retrieval\" in:readme"
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["sparse-retrieval", "lexical-retrieval"]
+
+[[queries]]
+id = "nlp-document-retrieval"
+q = "\"document retrieval\" in:readme"
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["document-retrieval", "information-retrieval"]
+
+[[queries]]
+id = "nlp-query-understanding"
+q = "\"query understanding\" in:readme"
+domains = ["natural-language-processing", "information-retrieval"]
+methods = ["query-understanding", "information-retrieval"]
+
+[[queries]]
+id = "nlp-natural-language-inference"
+q = "\"natural language inference\" in:readme"
+domains = ["natural-language-processing"]
+methods = ["natural-language-inference", "textual-entailment"]
+
+[[queries]]
+id = "nlp-speech-language-modeling"
+q = "\"speech language model\" in:readme"
+domains = ["natural-language-processing", "audio", "speech"]
+methods = ["speech-language-model", "multimodal-learning"]

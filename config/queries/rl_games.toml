@@ -87,3 +87,33 @@ id = "rl.safe"
 q = "\"safe reinforcement learning\" in:description"
 domains = ["reinforcement-learning", "safety"]
 methods = ["safe-reinforcement-learning", "constrained-reinforcement-learning"]
+
+[[queries]]
+id = "rl.ppo"
+q = "\"proximal policy optimization\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["policy-gradient", "policy-optimization"]
+
+[[queries]]
+id = "rl.deep-q-learning"
+q = "\"deep q-learning\" in:description"
+domains = ["reinforcement-learning"]
+methods = ["q-learning", "value-based-reinforcement-learning"]
+
+[[queries]]
+id = "rl.soft-actor-critic"
+q = "\"soft actor-critic\" in:description"
+domains = ["reinforcement-learning", "robotics"]
+methods = ["actor-critic", "off-policy-reinforcement-learning"]
+
+[[queries]]
+id = "rl.reinforcement-learning-from-human-feedback"
+q = "\"reinforcement learning from human feedback\" in:description"
+domains = ["reinforcement-learning", "human-ai-interaction"]
+methods = ["reinforcement-learning-from-human-feedback", "preference-learning"]
+
+[[queries]]
+id = "rl.imitation-learning"
+q = "\"imitation learning\" in:description"
+domains = ["reinforcement-learning", "robotics"]
+methods = ["imitation-learning", "behavior-cloning"]
