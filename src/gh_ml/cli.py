@@ -218,6 +218,18 @@ def _parser() -> argparse.ArgumentParser:
     topic_daily.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     topic_daily.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
     topic_daily.add_argument("--no-publish", action="store_true", help="collect locally without downloading or publishing Hub state")
+    papers_daily = subparsers.add_parser("hf-papers-daily", help="collect and publish a bounded Hugging Face Daily Papers run")
+    papers_daily.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
+    papers_daily.add_argument("--work-dir", type=Path, required=True, help="directory for isolated papers run files")
+    papers_daily.add_argument("--max-pages", type=int, default=20, help="maximum paper pages to collect (1..100)")
+    papers_daily.add_argument("--github-batches", type=int, default=4, help="maximum GitHub lookup batches (1..40)")
+    papers_daily.add_argument("--paper-page-size", type=int, default=100, help="papers per API page (1..100)")
+    papers_daily.add_argument("--recent-days", type=int, default=3, help="recent papers lookback in days (1..7)")
+    papers_daily.add_argument("--recent-page-cap", type=int, default=5, help="maximum pages per recent day (1..20)")
+    papers_daily.add_argument("--historical-start", default="2023-01-01", help="first date for historical paper collection")
+    papers_daily.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    papers_daily.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
+    papers_daily.add_argument("--no-publish", action="store_true", help="collect locally without downloading or publishing Hub state")
     snapshot = subparsers.add_parser(
         "publish-current-view",
         help="publish a current-view Parquet snapshot derived from the Hub observation history",
@@ -538,6 +550,129 @@ def _topic_breadth_daily(args: argparse.Namespace, *, api: Any = None, downloade
     elif not args.no_publish:
         print("No topic pages or state changes; skipping Hub publication.")
     print(f"Topic breadth {run_id}: {len(observations)} repositories across {result.get('pages_fetched', 0)} pages")
+    print(f"Coverage: {coverage_path}")
+    return 0
+
+
+def _hf_papers_daily(args: argparse.Namespace, *, api: Any = None, downloader: Any = None,
+                     token_provider: Any = None, paper_api: Any = None,
+                     client_factory: Any = None, collector: Any = None,
+                     publisher: Any = None) -> int:
+    """Collect a bounded Hugging Face Daily Papers run and optionally publish it."""
+    bounds = (("max_pages", 1, 100), ("github_batches", 1, 40),
+              ("paper_page_size", 1, 100), ("recent_days", 1, 7),
+              ("recent_page_cap", 1, 20))
+    for name, low, high in bounds:
+        value = getattr(args, name)
+        if not low <= value <= high:
+            option = name.replace("_", "-")
+            raise ValueError(f"--{option} must be between {low} and {high}")
+
+    github_token = _github_token(args.github_token_env)
+    initial_hf_token = None if args.no_publish else _hf_token(args.hf_token_env)
+    if not args.no_publish and not initial_hf_token:
+        raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+
+    if paper_api is None:
+        from huggingface_hub import HfApi
+        paper_api = HfApi(token=False)
+    if not args.no_publish:
+        if api is None:
+            from huggingface_hub import HfApi
+            api = HfApi(token=initial_hf_token)
+        if downloader is None:
+            from huggingface_hub import hf_hub_download
+            downloader = hf_hub_download
+        try:
+            info = api.repo_info(args.repo, repo_type="dataset", token=initial_hf_token)
+        except TypeError:
+            info = api.repo_info(args.repo, repo_type="dataset")
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face dataset lookup failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        except Exception:
+            raise ValueError("Hugging Face dataset lookup failed") from None
+        base_revision = getattr(info, "sha", None)
+        if not isinstance(base_revision, str) or not base_revision:
+            raise ValueError("could not pin Hugging Face dataset revision")
+    else:
+        base_revision = None
+
+    from .hf_papers_state import hydrate_paper_state, serialize_paper_state
+    if collector is None:
+        from .hf_papers import collect_paper_run
+        collector = collect_paper_run
+    if client_factory is None:
+        client_factory = GitHubClient
+
+    args.work_dir.mkdir(parents=True, exist_ok=True)
+    run_id = _run_id(_utc_now())
+    run_dir = args.work_dir / run_id
+    run_dir.mkdir()
+    if not args.no_publish:
+        try:
+            remote_state = downloader(repo_id=args.repo, filename="state/hf-daily-papers.json", repo_type="dataset",
+                                      revision=base_revision, token=initial_hf_token,
+                                      cache_dir=str(args.work_dir / "hf-cache"))
+            before_state_bytes = Path(remote_state).read_bytes()
+        except Exception as exc:
+            if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+                before_state_bytes = serialize_paper_state(run_dir)
+            else:
+                raise ValueError("Hugging Face paper state download failed") from None
+        else:
+            hydrate_paper_state(before_state_bytes, run_dir)
+    else:
+        before_state_bytes = serialize_paper_state(run_dir)
+
+    github = client_factory(token=github_token)
+    result = collector(
+        run_dir, paper_api=paper_api, github=github,
+        today_utc=_utc_now().date().isoformat(), page_budget=args.max_pages,
+        github_batch_budget=args.github_batches, paper_page_size=args.paper_page_size,
+        recent_days=args.recent_days, recent_page_cap=args.recent_page_cap,
+        historical_start=args.historical_start,
+    )
+    observations_path = run_dir / "observations.jsonl"
+    paper_links_path = run_dir / "paper-links.jsonl"
+    coverage_path = run_dir / "coverage.json"
+    # The collector owns these canonical run outputs. Validate them before any
+    # publication so a partial or malformed source result cannot be published.
+    for path in (observations_path, paper_links_path, coverage_path, run_dir / "checkpoint.json"):
+        if not path.is_file():
+            raise ValueError(f"Hugging Face paper collection did not produce {path.name}")
+    coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+    if not isinstance(coverage, dict):
+        raise ValueError("Hugging Face paper coverage must be a JSON object")
+    if coverage.get("api_errors"):
+        raise ValueError("Hugging Face Daily Papers source collection failed; refusing to publish incomplete results")
+    state_bytes = serialize_paper_state(run_dir)
+    pages = result.get("pages", result.get("pages_collected", result.get("pages_fetched", 0))) if isinstance(result, dict) else 0
+    has_delta = bool(pages) or state_bytes != before_state_bytes
+    if not args.no_publish and has_delta:
+        fresh_token = (token_provider or (lambda: _hf_token(args.hf_token_env)))()
+        if not fresh_token:
+            raise ValueError(f"Hugging Face token missing from {args.hf_token_env} or Hugging Face CLI login")
+        if publisher is None:
+            from .hf_papers_publish import publish_paper_run
+            publisher = publish_paper_run
+        try:
+            url = publisher(args.repo, fresh_token, base_revision=base_revision, run_id=run_id,
+                            observations_path=observations_path if observations_path.stat().st_size else None,
+                            paper_links_path=paper_links_path,
+                            coverage_path=coverage_path, state_bytes=state_bytes, api=api,
+                            downloader=downloader)
+        except HfHubHTTPError as exc:
+            response = getattr(exc, "response", None)
+            status = getattr(response, "status_code", None)
+            raise ValueError(f"Hugging Face paper publication failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
+        except Exception:
+            raise ValueError("Hugging Face paper publication failed") from None
+        print(f"Published Hugging Face Daily Papers run to {url}")
+    elif not args.no_publish:
+        print("No paper pages or state changes; skipping Hub publication.")
+    print(f"Hugging Face Daily Papers {run_id}: {result.get('papers_collected', 0) if isinstance(result, dict) else 0} papers across {pages} pages")
     print(f"Coverage: {coverage_path}")
     return 0
 
@@ -1047,6 +1182,8 @@ def main(argv: list[str] | None = None) -> int:
             return _census_daily(args)
         if args.command == "topic-breadth-daily":
             return _topic_breadth_daily(args)
+        if args.command == "hf-papers-daily":
+            return _hf_papers_daily(args)
         if args.command == "publish-current-view":
             return _publish_current_view(args)
         if args.command == "readme-enrich":

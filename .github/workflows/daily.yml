@@ -41,6 +41,11 @@ on:
         required: false
         type: number
         default: 68
+      hf_papers_max_pages:
+        description: "Maximum Hugging Face Daily Papers pages to collect (1–100; daily default 20)"
+        required: false
+        type: number
+        default: 20
 
 permissions:
   contents: read
@@ -60,6 +65,7 @@ jobs:
       BACKFILL_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 700 || inputs.backfill_max_requests }}
       CENSUS_MAX_PAGES: ${{ github.event_name == 'schedule' && 50 || inputs.census_max_pages }}
       TOPIC_MAX_PAGES: ${{ github.event_name == 'schedule' && 68 || inputs.topic_max_pages }}
+      HF_PAPERS_MAX_PAGES: ${{ github.event_name == 'schedule' && 20 || inputs.hf_papers_max_pages }}
     permissions:
       contents: read
       id-token: write
@@ -80,6 +86,7 @@ jobs:
               "BACKFILL_MAX_REQUESTS": (1, 700),
               "CENSUS_MAX_PAGES": (1, 100),
               "TOPIC_MAX_PAGES": (1, 100),
+              "HF_PAPERS_MAX_PAGES": (1, 100),
           }
           for name, (minimum, maximum) in limits.items():
               value = os.environ.get(name, "")
@@ -164,6 +171,15 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen gh-ml readme-enrich --max-requests 150
+      - name: Collect Hugging Face Daily Papers links
+        if: ${{ !inputs.snapshot_only }}
+        id: hf_papers
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
+        run: uv run --frozen gh-ml hf-papers-daily --work-dir "$RUNNER_TEMP/gh-ml-hf-papers" --max-pages "$HF_PAPERS_MAX_PAGES"
       - name: Publish current-view snapshot
         id: snapshot
         env:
@@ -171,5 +187,5 @@ jobs:
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
         run: uv run --frozen --extra parquet gh-ml publish-current-view --work-dir "$RUNNER_TEMP/gh-ml-current-view"
       - name: Fail if any collection or snapshot step failed
-        if: always() && (steps.sample.outcome == 'failure' || steps.recent.outcome == 'failure' || steps.historical_sample.outcome == 'failure' || steps.backfill.outcome == 'failure' || steps.census.outcome == 'failure' || steps.readme.outcome == 'failure' || steps.topic_breadth.outcome == 'failure' || steps.snapshot.outcome == 'failure')
+        if: always() && (steps.sample.outcome == 'failure' || steps.recent.outcome == 'failure' || steps.historical_sample.outcome == 'failure' || steps.backfill.outcome == 'failure' || steps.census.outcome == 'failure' || steps.readme.outcome == 'failure' || steps.topic_breadth.outcome == 'failure' || steps.hf_papers.outcome == 'failure' || steps.snapshot.outcome == 'failure')
         run: exit 1
