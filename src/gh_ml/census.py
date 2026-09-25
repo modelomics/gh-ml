@@ -658,7 +658,15 @@ def _json(value: Any) -> str:
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    rows = []
+    for line in path.read_text(encoding="utf-8").split("\n"):
+        # JSON strings may contain U+2028/U+2029. Split only on JSONL's
+        # physical line terminator so those characters remain part of values.
+        if line.endswith("\r"):
+            line = line[:-1]
+        if line:
+            rows.append(json.loads(line))
+    return rows
 
 
 def _atomic_write(path: Path, text: str) -> None:

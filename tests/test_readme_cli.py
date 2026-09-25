@@ -120,6 +120,33 @@ def test_readme_cli_skips_checkpoint_download_when_absent_at_pinned_revision(tmp
     assert downloads == ["data/observations/a.jsonl"]
 
 
+def test_readme_cli_preserves_unicode_line_separator_in_current_view(tmp_path, monkeypatch):
+    hub = FakeHub(["data/observations/a.jsonl"])
+    source = tmp_path / "obs.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    description = "first part\u2028second part"
+    row = {"github_id": 9, "description": description}
+    monkeypatch.setattr(
+        cli,
+        "materialize_current_view",
+        lambda _paths, output, **_: Path(output).write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8"),
+    )
+    captured = {}
+
+    def enrich(rows, *_args, **_kwargs):
+        captured["rows"] = rows
+        return [], {}, {"attempted": 0, "rate_limited": 0}
+
+    monkeypatch.setattr(cli, "enrich_readmes", enrich)
+
+    assert cli._readme_enrich(
+        _args(tmp_path / "work"), api=hub,
+        downloader=lambda **_kwargs: source,
+        client_factory=lambda token: object(),
+    ) == 0
+    assert captured["rows"][0]["description"] == description
+
+
 def test_readme_cli_rejects_corrupt_checkpoint_without_resetting_it(tmp_path, monkeypatch):
     hub = FakeHub(["data/observations/a.jsonl", "state/readme-evidence.json"])
     source = tmp_path / "obs.jsonl"

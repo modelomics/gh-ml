@@ -41,7 +41,7 @@ def test_topic_daily_pins_state_collects_deduplicates_and_publishes(tmp_path, mo
     def collect(root, *, topics, client, max_pages):
         calls["collect"] = (topics, client, max_pages)
         a, b = root / "page-a.jsonl", root / "page-b.jsonl"
-        a.write_text('{"github_id":4,"name":"owner/repo","topic_names":["vision"]}\n')
+        a.write_text('{"github_id":4,"name":"owner/repo","description":"first\u2028second\u2029third","topic_names":["vision"]}\n')
         b.write_text('{"github_id":4,"name":"owner/repo","topic_names":["robotics"]}\n')
         coverage = root / "topic.json"
         coverage.write_text('{"topic":"vision","source_notes":"search pages"}')
@@ -72,7 +72,8 @@ def test_topic_daily_pins_state_collects_deduplicates_and_publishes(tmp_path, mo
     assert calls["collect"] == (calls["collect"][0], {"token": "github-token"}, 100)
     assert calls["publish"][2]["base_revision"] == "parent-sha"
     assert calls["publish"][2]["state_bytes"] == b"changed-state"
-    assert calls["rows"] == [{"github_id": 4, "name": "owner/repo", "topic_names": ["robotics", "vision"]}]
+    assert calls["rows"] == [{"github_id": 4, "name": "owner/repo", "description": "first\u2028second\u2029third",
+                               "topic_names": ["robotics", "vision"]}]
     assert calls["coverage"]["rate_limit_remaining"] == 4999
     assert calls["coverage"]["source_notes"] == [
         "GitHub GraphQL topic repository connections; pages correspond to the configured topic catalog.",

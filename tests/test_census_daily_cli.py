@@ -26,7 +26,7 @@ def test_census_daily_pins_state_collects_fresh_run_and_publishes_delta(tmp_path
         assert (root / "hydrated.marker").read_bytes() == b"pinned-state"
         (root / "pages").mkdir()
         (root / "coverage").mkdir()
-        (root / "pages" / "0.jsonl").write_text('{"github_id": 7, "name": "a"}\n')
+        (root / "pages" / "0.jsonl").write_text('{"github_id": 7, "name": "a", "description": "first\u2028second\u2029third"}\n')
         (root / "pages" / "9.jsonl").write_text('{"github_id": 8, "name": "b"}\n')
         (root / "coverage" / "0.json").write_text('{"since":0,"enumerated":1,"unresolved_ids":[]}\n')
         (root / "coverage" / "9.json").write_text('{"since":9,"enumerated":1,"unresolved_ids":[]}\n')
@@ -70,7 +70,8 @@ def test_census_daily_pins_state_collects_fresh_run_and_publishes_delta(tmp_path
     assert (repo_id, token, publish_kwargs["base_revision"]) == ("modelomics/gh-ml", "fresh-hf", "base-sha")
     assert publish_kwargs["run_id"] == "run123"
     assert calls["published_rows"] == [
-        {"github_id": 7, "name": "a"}, {"github_id": 8, "name": "b"}
+        {"github_id": 7, "name": "a", "description": "first\u2028second\u2029third"},
+        {"github_id": 8, "name": "b"},
     ]
 
 

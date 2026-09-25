@@ -118,7 +118,12 @@ def _validate_jsonl(raw: bytes) -> None:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError("observations must be UTF-8 JSONL") from exc
-    for number, line in enumerate(text.splitlines(), 1):
+    # JSON strings may contain literal U+2028/U+2029 characters.  ``splitlines``
+    # treats those as record boundaries too, even though JSONL uses LF only.
+    lines = text.split("\n")
+    if lines[-1] == "":  # A single final LF terminates the last record.
+        lines.pop()
+    for number, line in enumerate(lines, 1):
         if not line.strip():
             raise ValueError(f"blank observation line {number}")
         value = _parse_json(line.encode("utf-8"), f"observation line {number}")

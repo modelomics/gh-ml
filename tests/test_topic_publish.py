@@ -89,6 +89,17 @@ def test_empty_observations_still_publish_coverage_and_state(tmp_path):
     assert not any(path.startswith("data/observations/") for path in files)
 
 
+def test_literal_unicode_line_separators_remain_inside_published_jsonl_row(tmp_path):
+    observation = '{"text":"before\u2028middle\u2029after"}\n'.encode("utf-8")
+    hub, args = _inputs(tmp_path, observation=observation)
+
+    publish_topic_run(**args)
+
+    files = hub.history["head"]
+    observation_path = next(path for path in files if path.startswith("data/observations/"))
+    assert files[observation_path] == observation
+
+
 def test_existing_marker_at_base_is_conflict(tmp_path):
     hub, args = _inputs(tmp_path)
     hub.history["base"]["runs/topic-breadth-r1.manifest.json"] = b"{}"
