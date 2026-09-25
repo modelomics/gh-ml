@@ -1,7 +1,7 @@
 """Conservative, deterministic selection of repositories with ML contributions.
 
-This uses only repository-owned name, description, and topics. It is a
-heuristic triage rule, not a claim that a contribution is genuinely novel.
+This uses repository-owned name, description, and topics plus compact README
+signals. It is a heuristic triage rule, not a novelty verification.
 """
 
 from __future__ import annotations
@@ -67,6 +67,13 @@ _OFFICIAL_PAPER = re.compile(
     r"\bcode(?:\s+and\s+models?)?\s+for\s+(?:(?:icml|neurips|iclr|cvpr|iccv|aaai|acl)\s+20\d{2}\s+)?paper\b",
     re.I,
 )
+_NON_OFFICIAL_PAPER_IMPLEMENTATION = re.compile(
+    r"\b(?:non\s+official|unofficial|community|third\s+party)\b.{0,80}"
+    r"\b(?:implementations?|impls?|code|reproductions?|replicas?)\b|"
+    r"\b(?:implementations?|impls?|code|reproductions?|replicas?)\b.{0,80}"
+    r"\b(?:non\s+official|unofficial|community|third\s+party)\b",
+    re.I,
+)
 _VENUE_YEAR = re.compile(r"\b(?:icml|neurips|nips|iclr|cvpr|iccv|eccv|acl|emnlp|naacl|aaai|ijcai|kdd|www|sigir|interspeech|icassp|miccai|eccv|acm mm|ieee t[op]ami)\s*['’]?(?:19|20)?\d{2}\b", re.I)
 _EXPLICIT_EXCLUDE = re.compile(
     r"\b(?:homework\d*|assignments?|lab assignments?|textbook|book|awesome list|curated list|portfolio)\b|"
@@ -102,7 +109,8 @@ _EXPLICIT_PROFILE = re.compile(
     r"personal website|personal homepage|github profile)\b", re.I,
 )
 _SAME_NAME_TECHNICAL = re.compile(
-    r"\b(?:change detection|neural memory|remote sensing|knowledge graph(?:s)?|"
+    r"\b(?:dynamic neural networks?|end to end speech processing|speech processing toolkit|"
+    r"hyperparameter optimization|change detection|neural memory|remote sensing|knowledge graph(?:s)?|"
     r"neuroimaging|brain imaging|molecular docking|molecular modeling|"
     r"drug discovery|protein folding|time.series forecasting|"
     r"graph embeddings?|embeddings?|computer vision|natural language processing)\b",
@@ -204,6 +212,13 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         r"(?<!\d)\.(?!\d)|[!?;\n]+",
         re.sub(r"\b(impl|e\.g|i\.e)\.", r"\1", description.casefold().replace("-", " ").replace("_", " ")),
     )
+    non_official_paper_implementation = any(
+        _NON_OFFICIAL_PAPER_IMPLEMENTATION.search(sentence)
+        and (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence))
+        for sentence in description_sentences
+    )
+    # Prevent "non-official" from satisfying the official-paper phrase by
+    # itself. A separate, method-specific novelty claim can still qualify.
     official_paper_description = any(
         (claim := _OFFICIAL_PAPER.search(sentence))
         and (paper := (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence)))
@@ -213,7 +228,7 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         for sentence in description_sentences
     )
     research_name_topics = " ".join(_strings(row.get("name")) + _strings(row.get("full_name")) + _strings(row.get("topics")))
-    official_paper_code = official_paper_description or (any(
+    official_paper_code = not non_official_paper_implementation and (official_paper_description or any(
         (claim := _OFFICIAL_PAPER.search(sentence))
         and (paper := (_PAPER.search(sentence) or _VENUE_YEAR.search(sentence) or re.search(r"\bsiggraph\s*20\d{2}\b", sentence, re.I)))
         and (code := _CODE.search(sentence))
@@ -254,6 +269,8 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         signals.add("paper-and-code-cue")
     if official_paper_code:
         signals.add("official-paper-implementation-cue")
+    if non_official_paper_implementation:
+        signals.add("non-official-paper-implementation-cue")
     if tutorial:
         signals.add("tutorial-cue")
     if review_only_cue:
@@ -268,13 +285,14 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         signals.add("non-ml-utility-cue")
         return result("exclude", "non-ml-utility")
 
-    # A same-name repository is often a profile, but can also be the canonical
-    # technical project. Keep the hard exclusion for `.github`, explicit
-    # profile descriptions, and sparse same-name records; let substantive
-    # technical records continue through the ordinary conservative triage.
+    # A same-name repository is often a profile, but can also be a canonical
+    # technical project. Let clearly technical ML projects continue through
+    # ordinary triage; their names alone do not qualify them for inclusion.
     same_name_technical = bool(_SAME_NAME_TECHNICAL.search(text))
     explicit_profile = bool(_EXPLICIT_PROFILE.search(description))
-    if github_profile_repository or (same_name_repository and explicit_profile) or (same_name_repository and not same_name_technical and not official_paper_code):
+    if github_profile_repository or (same_name_repository and explicit_profile) or (
+        same_name_repository and not same_name_technical and not official_paper_code
+    ):
         signals.add("owner-profile-repository")
         return result("exclude", "owner-profile-repository")
 
@@ -329,7 +347,8 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         and bool(_METHOD.search(description_text))
     )
     readme_supports_metadata_paper = (
-        readme_active and readme_ml and readme_paper
+        (not non_official_paper_implementation or method_novelty)
+        and readme_active and readme_ml and readme_paper
         and not (negative_readme & readme_signals)
         and (
             # DragGAN-like rows tie official code to a named venue and expose
@@ -348,7 +367,8 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         )
     )
     readme_supports_standalone_method = (
-        readme_active and readme_ml and readme_contribution and readme_relation
+        (not non_official_paper_implementation or method_novelty)
+        and readme_active and readme_ml and readme_contribution and readme_relation
         and not (negative_readme & readme_signals)
     )
     if readme_supports_metadata_paper or readme_supports_standalone_method:

@@ -85,6 +85,56 @@ def test_same_name_official_novel_ml_can_be_included_but_library_stays_review() 
     assert library["selection_reason"] == "ml-relevance-without-clear-contribution"
 
 
+def test_non_official_community_implementation_of_existing_paper_goes_to_review() -> None:
+    # Archived v4 false positive: hyphen normalization exposed "official" as
+    # a substring of "non-official", which let this community reproduction
+    # satisfy the official-paper implementation rule.
+    result = assess_repository({
+        "name": "Agora-Lab-AI/SRT",
+        "description": "An open-source non-official community implementation of the model from the paper: Surgical Robot Transformer (SRT): Imitation Learning for Surgical Tasks: https://surgical-robot-transformer.github.io/",
+    })
+    assert result["selection_status"] == "review"
+    assert result["selection_reason"] == "ml-relevance-without-clear-contribution"
+    assert "non-official-paper-implementation-cue" in result["selection_signals"]
+    assert "official-paper-implementation-cue" not in result["selection_signals"]
+
+
+def test_hyphenated_third_party_existing_paper_implementation_is_not_official() -> None:
+    result = assess_repository({
+        "name": "lab/third-party-transformer",
+        "description": "Open-source third-party implementation of the paper, a transformer for image recognition (CVPR 2024).",
+    })
+    assert result["selection_status"] == "review"
+    assert "non-official-paper-implementation-cue" in result["selection_signals"]
+
+
+def test_same_name_community_paper_implementation_stays_excluded_as_profile() -> None:
+    result = assess_repository({
+        "name": "alice/alice",
+        "description": "Community implementation of a transformer paper.",
+    })
+    assert result["selection_status"] == "exclude"
+    assert result["selection_reason"] == "owner-profile-repository"
+
+
+def test_true_official_paper_implementation_remains_included() -> None:
+    result = assess_repository({
+        "name": "lab/official-transformer",
+        "description": "Official implementation of the paper \"Surgical Robot Transformer\" for imitation learning (ICRA 2024).",
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "official-paper-method-implementation"
+
+
+def test_non_official_paper_implementation_with_distinct_novel_method_can_include() -> None:
+    result = assess_repository({
+        "name": "lab/new-transformer-method",
+        "description": "A community implementation of the paper's model; we propose a novel transformer architecture for surgical imitation learning.",
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "specific-method-with-novelty-claim"
+
+
 def test_same_name_sparse_and_explicit_profiles_and_github_profile_stay_excluded() -> None:
     rows = (
         {"name": "lab/lab", "description": "Machine learning"},
@@ -103,6 +153,42 @@ def test_same_name_sparse_and_explicit_profiles_and_github_profile_stay_excluded
     })
     assert fork["selection_status"] == "exclude"
     assert fork["selection_reason"] == "fork"
+
+
+def test_canonical_same_name_ml_software_reaches_conservative_triage() -> None:
+    # Canonical projects are not profiles merely because owner and repository
+    # names match. These descriptions provide technical evidence but no claim
+    # that would independently qualify a repository for inclusion.
+    rows = (
+        {
+            "name": "pytorch/pytorch",
+            "description": "Tensors and Dynamic neural networks in Python with strong GPU acceleration",
+        },
+        {
+            "name": "espnet/espnet",
+            "description": "End-to-end speech processing toolkit",
+        },
+        {
+            "name": "hyperopt/hyperopt",
+            "description": "Distributed asynchronous hyperparameter optimization",
+        },
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "review", (row["name"], result)
+        assert result["selection_reason"] != "owner-profile-repository", (row["name"], result)
+
+
+def test_same_name_nontechnical_and_explicit_profile_records_stay_excluded() -> None:
+    for row in (
+        {"name": "alice/alice", "description": "Machine learning"},
+        {"name": "alice/alice", "description": "Researching neural networks"},
+        {"name": "alice/alice", "description": "My profile and projects about neural networks"},
+        {"name": "org/.github", "description": "Neural network research"},
+    ):
+        result = assess_repository(row)
+        assert result["selection_status"] == "exclude"
+        assert result["selection_reason"] == "owner-profile-repository"
 
 
 def test_research_workshop_venues_and_presentation_generation_are_not_utility_excluded() -> None:
