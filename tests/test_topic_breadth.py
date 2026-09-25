@@ -53,6 +53,12 @@ def test_round_robin_emits_queryless_rows_and_omits_forks(tmp_path):
                                    max_pages=2, observed_at="2026-09-24T00:00:00Z")
     assert [variables["name"] for _, variables in client.calls] == ["a", "b"]
     assert [variables["after"] for _, variables in client.calls] == [None, None]
+    query = client.calls[0][0]
+    assert "repositories(first:100,after:$after)" in query
+    assert "orderBy:" not in query
+    assert "repositoryTopics(first:20)" in query
+    assert "stargazerCount forkCount createdAt pushedAt updatedAt isArchived isFork" in query
+    assert "primaryLanguage { name } licenseInfo { spdxId key name }" in query
     rows = [json.loads(line) for path in result["observation_paths"] for line in path.read_text().splitlines()]
     assert len(rows) == 2
     assert all(row["queryless"] and row["discovery_source"] == "topic" for row in rows)
@@ -140,6 +146,22 @@ def test_missing_topic_is_coverage_completion(tmp_path):
     assert json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["gone"]["completed_at"]
 
 
+def test_graphql_error_reports_safe_context_without_advancing_state(tmp_path):
+    failed = {"errors": [{
+        "type": "FORBIDDEN", "path": ["topic", "repositories", "edges", 0, "node"],
+        "message": "private server response containing unsafe details",
+    }]}
+    client = FakeClient([failed])
+    with pytest.raises(ValueError, match=r"topic a \(sweep page 0\): FORBIDDEN at topic.repositories.edges.0.node") as error:
+        collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                              observed_at="2026-09-24T00:00:00Z")
+    assert "private server response" not in str(error.value)
+    checkpoint = json.loads((tmp_path / "checkpoint.json").read_text())
+    assert checkpoint["topics"]["a"]["after"] is None
+    assert checkpoint["topics"]["a"]["page_index"] == 0
+    assert not (tmp_path / "pages").exists()
+
+
 def test_failed_checkpoint_write_replays_and_replaces_same_artifacts(tmp_path, monkeypatch):
     client = FakeClient([response("a", ids=[1]), response("a", ids=[1])])
     original = topic_breadth._atomic
@@ -169,9 +191,11 @@ def test_failed_checkpoint_write_replays_and_replaces_same_artifacts(tmp_path, m
 
 
 def test_daily_head_finds_new_repo_during_month_cooldown_and_preserves_deep_cursor(tmp_path):
+    head = response("a", ids=[9])
+    del head["data"]["topic"]["repositories"]["edges"][0]["node"]["repositoryTopics"]
     client = FakeClient([
         response("a", ids=[1], has_next=True),
-        response("a", ids=[9]),
+        head,
     ])
     first = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                                   observed_at="2026-09-24T23:00:00Z")
@@ -179,9 +203,14 @@ def test_daily_head_finds_new_repo_during_month_cooldown_and_preserves_deep_curs
     second = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                                    observed_at="2026-09-25T00:00:00Z")
     assert client.calls[1][1] == {"name": "a", "after": None}
+    head_query = client.calls[1][0]
+    assert "repositories(first:100,after:$after,orderBy:{field:UPDATED_AT,direction:DESC})" in head_query
+    assert "repositoryTopics" not in head_query
     assert second["observation_paths"][0].name == "a-head-2026-09-25.jsonl"
     row = json.loads(second["observation_paths"][0].read_text().splitlines()[0])
     assert row["github_id"] == 9
+    assert row["topics"] == ["a"]
+    assert row["topic_names"] == ["a"]
     after = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"]
     assert after["after"] == before["after"] == "cursor-1"
     assert after["page_index"] == before["page_index"] == 1

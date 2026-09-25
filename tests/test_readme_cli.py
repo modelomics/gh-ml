@@ -30,7 +30,7 @@ def _args(path: Path, *, no_publish=True):
 
 
 def test_readme_cli_pins_all_history_and_uses_nested_checkpoint(tmp_path, monkeypatch, capsys):
-    hub = FakeHub(["data/observations/2026/01/one.jsonl", "data/observations/2026/02/two.jsonl", "README.md"])
+    hub = FakeHub(["data/observations/2026/01/one.jsonl", "data/observations/2026/02/two.jsonl", "state/readme-evidence.json", "README.md"])
     payloads = {
         "data/observations/2026/01/one.jsonl": b'{"github_id":1}\n',
         "data/observations/2026/02/two.jsonl": b'{"github_id":2}\n',
@@ -69,7 +69,7 @@ def test_readme_cli_pins_all_history_and_uses_nested_checkpoint(tmp_path, monkey
 
 
 def test_readme_cli_includes_review_rows_and_refreshes_token_before_publish(tmp_path, monkeypatch):
-    hub = FakeHub(["data/observations/a.jsonl"])
+    hub = FakeHub(["data/observations/a.jsonl", "state/readme-evidence.json"])
     remote = tmp_path / "remote.jsonl"
     remote.write_text("{}\n", encoding="utf-8")
     state = tmp_path / "state.json"
@@ -99,6 +99,42 @@ def test_readme_cli_includes_review_rows_and_refreshes_token_before_publish(tmp_
     assert captured["rows"][0]["candidate_eligible"] is False
     assert tokens == ["refreshed"]
     assert publishes[0][0] == "fresh-token"
+
+
+def test_readme_cli_skips_checkpoint_download_when_absent_at_pinned_revision(tmp_path, monkeypatch):
+    hub = FakeHub(["data/observations/a.jsonl"])
+    source = tmp_path / "obs.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    downloads = []
+    monkeypatch.setattr(cli, "materialize_current_view", lambda _paths, output, **_: Path(output).write_text("{}\n"))
+    monkeypatch.setattr(cli, "enrich_readmes", lambda rows, checkpoint, *_a, **_kw: ([], {}, {"attempted": 0, "rate_limited": 0}))
+
+    def download(**kwargs):
+        downloads.append(kwargs["filename"])
+        if kwargs["filename"].startswith("data/"):
+            return source
+        raise AssertionError("absent checkpoint must not be downloaded")
+
+    assert cli._readme_enrich(_args(tmp_path / "work"), api=hub, downloader=download,
+                              client_factory=lambda token: object()) == 0
+    assert downloads == ["data/observations/a.jsonl"]
+
+
+def test_readme_cli_rejects_corrupt_checkpoint_without_resetting_it(tmp_path, monkeypatch):
+    hub = FakeHub(["data/observations/a.jsonl", "state/readme-evidence.json"])
+    source = tmp_path / "obs.jsonl"
+    source.write_text("{}\n", encoding="utf-8")
+    broken = tmp_path / "checkpoint.json"
+    broken.write_text('{"checkpoint":{"repositories":{"123":"unterminated', encoding="utf-8")
+    monkeypatch.setattr(cli, "materialize_current_view", lambda _paths, output, **_: Path(output).write_text("{}\n"))
+    monkeypatch.setattr(cli, "enrich_readmes", lambda *_a, **_kw: (_ for _ in ()).throw(AssertionError("must not discard corrupt checkpoint")))
+
+    def download(**kwargs):
+        return source if kwargs["filename"].startswith("data/") else broken
+
+    with pytest.raises(ValueError, match="README checkpoint is unreadable at pinned revision pinned-sha"):
+        cli._readme_enrich(_args(tmp_path / "work"), api=hub, downloader=download,
+                           client_factory=lambda token: object())
 
 
 def test_readme_cli_zero_records_skips_remote_write(tmp_path, monkeypatch):
