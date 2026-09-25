@@ -759,18 +759,20 @@ def _readme_enrich(args: argparse.Namespace, *, api: Any = None, downloader: Any
     materialize_current_view(downloaded, current_path, manifest_path=args.work_dir / "current-view.manifest.json")
     rows = [json.loads(line) for line in current_path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    try:
-        raw_checkpoint = downloader(repo_id=args.repo, filename="state/readme-evidence.json", repo_type="dataset", revision=revision, token=hf_token, cache_dir=str(args.work_dir / "hf-cache"))
-        stored = json.loads(Path(raw_checkpoint).read_text(encoding="utf-8"))
-    except Exception as exc:
-        if type(exc).__name__ in {"EntryNotFoundError", "RepositoryNotFoundError", "RemoteEntryNotFoundError"} or getattr(getattr(exc, "response", None), "status_code", None) == 404:
-            stored = None
-        elif isinstance(exc, HfHubHTTPError):
+    stored = None
+    if "state/readme-evidence.json" in paths:
+        try:
+            raw_checkpoint = downloader(repo_id=args.repo, filename="state/readme-evidence.json", repo_type="dataset", revision=revision, token=hf_token, cache_dir=str(args.work_dir / "hf-cache"))
+        except TypeError:
+            raw_checkpoint = downloader(repo_id=args.repo, filename="state/readme-evidence.json", repo_type="dataset", revision=revision, token=hf_token)
+        except HfHubHTTPError as exc:
             response = getattr(exc, "response", None)
             status = getattr(response, "status_code", None)
             raise ValueError(f"Hugging Face README checkpoint download failed (HTTP {status if isinstance(status, int) else 'unknown'})") from None
-        else:
-            raise
+        try:
+            stored = json.loads(Path(raw_checkpoint).read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Hugging Face README checkpoint is unreadable at pinned revision {revision}: {exc}") from exc
     checkpoint = stored.get("checkpoint", {}) if isinstance(stored, dict) else {}
     if not isinstance(checkpoint, dict):
         checkpoint = {}

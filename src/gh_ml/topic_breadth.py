@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,9 +16,21 @@ from .github import repository_from_graphql
 from .schema import observation_from_repository
 from .topic_breadth_state import reconcile_topic_checkpoint
 
-_QUERY = """query($name:String!, $after:String) {
+_HEAD_QUERY = """query($name:String!, $after:String) {
   topic(name:$name) {
     repositories(first:100,after:$after,orderBy:{field:UPDATED_AT,direction:DESC}) {
+      edges { cursor node { databaseId nameWithOwner url description homepageUrl
+        primaryLanguage { name } licenseInfo { spdxId key name }
+        stargazerCount forkCount createdAt pushedAt updatedAt isArchived isFork } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+  rateLimit { cost remaining resetAt }
+}"""
+
+_QUERY = """query($name:String!, $after:String) {
+  topic(name:$name) {
+    repositories(first:100,after:$after) {
       edges { cursor node { databaseId nameWithOwner url description homepageUrl
         primaryLanguage { name } licenseInfo { spdxId key name }
         repositoryTopics(first:20) { nodes { topic { name } } }
@@ -27,6 +40,36 @@ _QUERY = """query($name:String!, $after:String) {
   }
   rateLimit { cost remaining resetAt }
 }"""
+
+_GRAPHQL_ERROR_TYPE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
+_GRAPHQL_PATH_PART = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+
+
+def _graphql_error_summary(errors: Any) -> str:
+    """Return a bounded, schema-only summary without echoing server messages."""
+    if not isinstance(errors, list) or not errors:
+        return "unknown GraphQL error"
+    summaries = []
+    for error in errors[:5]:
+        if not isinstance(error, dict):
+            summaries.append("unknown")
+            continue
+        error_type = error.get("type")
+        label = error_type if isinstance(error_type, str) and _GRAPHQL_ERROR_TYPE.fullmatch(error_type) else "unknown"
+        raw_path = error.get("path")
+        path = []
+        if isinstance(raw_path, list):
+            for part in raw_path[:8]:
+                if isinstance(part, int) and not isinstance(part, bool) and part >= 0:
+                    path.append(str(part))
+                elif isinstance(part, str) and _GRAPHQL_PATH_PART.fullmatch(part):
+                    path.append(part)
+                else:
+                    break
+        summaries.append(f"{label} at {'.'.join(path)}" if path else label)
+    if len(errors) > 5:
+        summaries.append("additional errors omitted")
+    return "; ".join(summaries)
 
 
 def _atomic(path: Path, text: str) -> None:
@@ -142,11 +185,14 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
     def fetch_and_write(slug: str, *, after: str | None, stem: str,
                         head_only: bool, state: dict) -> tuple[int, int | None, int | None, bool, str | None, bool]:
         nonlocal rate_remaining, pages_fetched, observations_written
-        payload, _headers = client.graphql(_QUERY, {"name": slug, "after": after})
+        query = _HEAD_QUERY if head_only else _QUERY
+        payload, _headers = client.graphql(query, {"name": slug, "after": after})
         if not isinstance(payload, dict):
             raise ValueError("invalid GraphQL response")
         if payload.get("errors"):
-            raise ValueError("GitHub GraphQL returned errors")
+            phase = "head refresh" if head_only else f"sweep page {state['page_index']}"
+            summary = _graphql_error_summary(payload["errors"])
+            raise ValueError(f"GitHub GraphQL failed for topic {slug} ({phase}): {summary}")
         data = payload.get("data")
         if not isinstance(data, dict) or "topic" not in data or "rateLimit" not in data:
             raise ValueError("invalid GraphQL topic response")
@@ -176,6 +222,8 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
         forks = 0
         for edge in edges:
             repo = repository_from_graphql(edge["node"])
+            if head_only:
+                repo["topics"] = sorted(set(repo["topics"]) | {slug})
             github_id = repo["id"]
             if github_id in seen_ids:
                 continue
