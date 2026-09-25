@@ -60,6 +60,28 @@ def test_recent_pagination_dedup_and_no_paper_text(tmp_path):
     assert result["recent_pages"] == 2
 
 
+def test_resolved_repository_gets_github_classification_without_paper_text(tmp_path):
+    d = "2026-09-24"
+    api = PaperAPI({(d, 0): [paper("paper-only-id", "https://github.com/vision/project")]})
+    repository = {
+        **repo(21, "vision/project"),
+        "description": "A vision transformer for image classification",
+        "topics": ["transformer", "computer-vision"],
+    }
+    collect_paper_run(
+        tmp_path, paper_api=api, github=GitHub({"vision/project": repository}), today_utc=d,
+        page_budget=1, paper_page_size=5, recent_days=1, historical_start="2026-09-25",
+    )
+
+    observation = lines(tmp_path / "observations.jsonl")[0]
+    assert "computer-vision" in observation["domains"]
+    assert "transformer" in observation["methods"]
+    assert observation["queryless"] is True
+    assert observation["paper_evidence"] == "unverified"
+    assert "PRIVATE TITLE" not in json.dumps(observation)
+    assert "PRIVATE ABSTRACT" not in json.dumps(observation)
+
+
 def test_invalid_and_unresolved_links_stay_distinct_and_retry(tmp_path):
     d = "2026-09-24"
     api = PaperAPI({(d, 0): [paper("bad", "https://example.com/nope"),

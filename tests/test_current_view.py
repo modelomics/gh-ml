@@ -43,11 +43,11 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
     assert _read(output) == [
         {**_row(5, "2026-09-24T12:00:00+00:00", stars=3),
          "observation_count": 2, "first_observed_at": "2025-01-01T00:00:00Z",
-         "all_query_ids": [], "all_domains": [], "all_methods": [], "all_novelty_signals": [],
+         "all_query_ids": [], "all_domains": [], "all_methods": [], "all_novelty_signals": [], "paper_ids": [],
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
              "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": [], "candidate_rule_version": "ml-candidate-v2",
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v3",
          "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
         {**_row(20, "2026-09-24T12:00:00Z", stars=50, extra={"kept": True},
                 query_ids=["new.query"], domains=["Vision"], methods=["K means"],
@@ -56,17 +56,18 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "all_query_ids": ["new.query", "old.query"], "all_domains": ["Vision", "health"],
          "all_methods": ["k-means", "transformer"],
          "all_novelty_signals": ["new-signal", "paper-reference"],
+         "paper_ids": [],
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
              "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": [], "candidate_rule_version": "ml-candidate-v2",
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v3",
          "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
     ]
     assert report["observation_count"] == 4
     assert report["current_view_count"] == 2
-    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 6
+    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 7
     manifest = json.loads((tmp_path / "view.jsonl.manifest.json").read_text())
-    assert manifest["candidate_rule_version"] == "ml-candidate-v2"
+    assert manifest["candidate_rule_version"] == "ml-candidate-v3"
     assert "queryless absent or false" in manifest["selection"]
     assert manifest["input_files"][1]["observations"] == 2
     assert repeat.read_bytes() == output.read_bytes()
@@ -93,6 +94,35 @@ def test_search_observation_wins_over_newer_census_and_retains_all_aggregates(tm
     assert row["first_observed_at"] == "2020-01-01T00:00:00Z"
     assert row["all_query_ids"] == ["census.query", "search.query"]
     assert row["all_domains"] == ["census-domain", "search-domain"]
+
+
+def test_search_winner_keeps_paper_ids_from_queryless_hf_observation(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(109, "2026-01-01T00:00:00Z", name="search-row", queryless=False),
+    ])
+    hf_daily = _write(tmp_path / "hf.jsonl", [
+        _row(109, "2025-01-01T00:00:00Z", name="hf-row", queryless=True,
+             paper_ids=["2501.00002", "2501.00001", "2501.00002"]),
+    ])
+    output = tmp_path / "view.jsonl"
+
+    materialize_current_view([search, hf_daily], output)
+
+    row = _read(output)[0]
+    assert row["name"] == "search-row"
+    assert row["paper_ids"] == ["2501.00001", "2501.00002"]
+    assert row["selection_status"] == "review"
+    assert row["candidate_eligible"] is False
+
+
+@pytest.mark.parametrize("paper_ids", [None, "2501.00001", [None], [" "]])
+def test_invalid_paper_ids_fail_closed(tmp_path, paper_ids):
+    source = _write(tmp_path / "bad.jsonl", [
+        _row(110, "2026-01-01T00:00:00Z", paper_ids=paper_ids),
+    ])
+
+    with pytest.raises(ValueError, match="paper_ids"):
+        materialize_current_view([source], tmp_path / "view.jsonl")
 
 
 @pytest.mark.parametrize("search_queryless", [None, False])
@@ -257,6 +287,7 @@ def test_parquet_export_preserves_numeric_ids_nested_lists_nulls_and_late_extra_
     assert result == {"row_count": 3, "size_bytes": output.stat().st_size, "compression": "zstd"}
     assert pa.types.is_int64(table.schema.field("github_id").type)
     assert pa.types.is_list(table.schema.field("topics").type)
+    assert pa.types.is_list(table.schema.field("paper_ids").type)
     assert pa.types.is_string(table.schema.field("observed_at").type)
     assert pa.types.is_string(table.schema.field("extra_json").type)
     assert table.to_pylist()[0]["github_id"] == 1
@@ -357,7 +388,8 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
     ])
     newer = _write(tmp_path / "newer.jsonl", [
         _row(7, "2026-01-01T00:00:00Z", query_ids=["new"], domains=["ml"],
-             methods=["Transformer"], novelty_signals=["topics"], candidate_evidence=[{"source": "census"}]),
+             methods=["Transformer"], novelty_signals=["topics"], paper_ids=["P2", "P1"],
+             candidate_evidence=[{"source": "census"}]),
     ])
     view = tmp_path / "view.jsonl"
     parquet = tmp_path / "view.parquet"
@@ -370,9 +402,11 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
     assert row["all_domains"] == ["bio", "ml"]
     assert row["all_methods"] == ["k-means", "transformer"]
     assert row["all_novelty_signals"] == ["paper", "topics"]
+    assert row["paper_ids"] == ["P1", "P2"]
     assert row["observation_count"] == 2
     assert row["first_observed_at"] == "2024-01-01T00:00:00Z"
     assert extra["candidate_evidence"] == [{"source": "census"}]
+    assert "paper_ids" not in extra
 
 
 def test_current_view_adds_evidence_only_from_latest_repository_text(tmp_path):
@@ -404,6 +438,7 @@ def test_parquet_exposes_evidence_and_accumulated_fields_as_typed_columns(tmp_pa
         "observed_at": "2026-01-01T00:00:00Z", "first_observed_at": "2025-01-01T00:00:00Z",
         "observation_count": 2, "all_query_ids": ["one"], "all_domains": ["vision"],
         "all_methods": ["transformer"], "all_novelty_signals": [],
+        "paper_ids": ["2501.00001"],
         "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "direct_ml_text",
         "evidence_signals": ["machine-learning", "transformer"],
     }])
@@ -417,6 +452,7 @@ def test_parquet_exposes_evidence_and_accumulated_fields_as_typed_columns(tmp_pa
     assert pa.types.is_list(table.schema.field("evidence_signals").type)
     assert pa.types.is_int64(table.schema.field("observation_count").type)
     assert row["all_methods"] == ["transformer"]
+    assert row["paper_ids"] == ["2501.00001"]
     assert row["evidence_tier"] == "direct_ml_text"
     assert row["evidence_signals"] == ["machine-learning", "transformer"]
     assert row["extra_json"] is None

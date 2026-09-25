@@ -7,6 +7,7 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from .classification import classify_repository
 from .github_links import normalize_github_url
 from .schema import observation_from_repository, write_jsonl
 from .hf_papers_state import load_paper_checkpoint, write_paper_checkpoint
@@ -250,7 +251,13 @@ def collect_paper_run(
                                 "github_url": item["github_url"], "normalized_repo": item["normalized_repo"],
                                 "github_id": gid, "link_status": "resolved", "source_officiality": "unverified"})
             if gid not in observations:
-                obs = observation_from_repository(repo, observed_at=_utc_timestamp(), query_ids=[], domains=[], methods=[], novelty_signals=[])
+                classification = classify_repository(repo, ())
+                obs = observation_from_repository(
+                    repo, observed_at=_utc_timestamp(), query_ids=[],
+                    domains=classification.get("domains", []),
+                    methods=classification.get("methods", []),
+                    novelty_signals=classification.get("novelty_signals", []),
+                )
                 obs.update({"discovery_source": "hf_daily_papers", "queryless": True, "candidate_status": "unknown", "paper_ids": [item["paper_id"]], "paper_evidence": "unverified"})
                 observations[gid] = obs
             else:

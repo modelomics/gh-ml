@@ -29,7 +29,7 @@ _README_SECTION_ENUMS = {
     "references", "course", "dataset", "other",
 }
 # Bump whenever current-view rows or their Parquet projection changes.
-CURRENT_VIEW_PROJECTION_VERSION = 6
+CURRENT_VIEW_PROJECTION_VERSION = 7
 
 
 def export_current_view_parquet(
@@ -119,6 +119,7 @@ def _export_observation_parquet(
         pa.field("novelty_signals", strings),
         pa.field("observation_count", pa.int64()),
         pa.field("observed_at", string),
+        pa.field("paper_ids", strings),
         pa.field("pushed_at", string),
         pa.field("query_ids", strings),
         pa.field("readme_blob_sha", string),
@@ -221,6 +222,7 @@ _AGGREGATED_LABEL_FIELDS = {
     "domains": "all_domains",
     "methods": "all_methods",
     "novelty_signals": "all_novelty_signals",
+    "paper_ids": "paper_ids",
 }
 
 
@@ -243,6 +245,13 @@ def _labels_from_row(row: dict[str, Any], *, source: Path, line_number: int) -> 
                     raise ValueError(f"{source}:{line_number}: methods contains a label with no slug characters")
             cleaned.add(value)
         labels[source_field] = sorted(cleaned)
+    paper_ids = row.get("paper_ids", [])
+    if not isinstance(paper_ids, list) or any(not isinstance(value, str) for value in paper_ids):
+        raise ValueError(f"{source}:{line_number}: paper_ids must be an array of strings")
+    cleaned_paper_ids = {value.strip() for value in paper_ids}
+    if any(not value for value in cleaned_paper_ids):
+        raise ValueError(f"{source}:{line_number}: paper_ids cannot contain empty labels")
+    labels["paper_ids"] = sorted(cleaned_paper_ids)
     return labels
 
 
@@ -263,8 +272,8 @@ def materialize_current_view(
     stable tie-break, so results do not depend on source-file order.
     That row's fields, including its ``query_ids``, ``domains``, and ``methods``,
     remain intact. Sorted cross-observation unions are added as ``all_query_ids``,
-    ``all_domains``, ``all_methods``, and ``all_novelty_signals``; aggregated
-    methods use the canonical slug normalizer. ``observation_count`` counts all
+    ``all_domains``, ``all_methods``, ``all_novelty_signals``, and ``paper_ids``;
+    aggregated methods use the canonical slug normalizer. ``observation_count`` counts all
     input rows for that ID. ``first_observed_at`` comes from the earliest
     observed instant, with the lexicographically smallest timestamp string
     breaking equal-instant ties. A JSON manifest is written alongside the
@@ -462,7 +471,7 @@ def materialize_current_view(
                     "selection_version": SELECTION_VERSION,
                     "candidate_rule_version": CANDIDATE_RULE_VERSION,
                     "selection": "Search observations (queryless absent or false) take precedence over all queryless observations (queryless true), including census and topic discovery; within each class choose maximum observed_at instant, then lexicographically greatest canonical JSON row",
-                    "aggregation": "sorted label unions across all observations; methods normalized to canonical slugs",
+                    "aggregation": "sorted label unions across all observations, including paper_ids; methods normalized to canonical slugs",
                     "ordering": "ascending github_id",
                     "input_files": per_source,
                     "readme_evidence_input_files": per_readme_source,
