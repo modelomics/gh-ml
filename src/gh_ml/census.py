@@ -263,10 +263,14 @@ def collect_census(output_dir: str | Path, *, token: str | None = None, since: i
     for stale_stage in staging_dir.glob("*.jsonl"):
         stale_stage.unlink(missing_ok=True)
 
-    # Retry at most max_pages * 100 records in 50-name batches. First retry
-    # canonical node IDs, then resolve failures by GraphQL owner/name aliases.
-    pending_paths = sorted(retry_dir.glob("*.json")) + sorted(failed_dir.glob("*.json"))
-    pending_paths = pending_paths[:max_pages * 100]
+    # Bound retries per invocation while rotating independently through each
+    # pool. A fixed sorted prefix would permanently starve IDs above the cap.
+    retry_cursors = checkpoint.get("retry_cursors", {})
+    if not isinstance(retry_cursors, Mapping):
+        retry_cursors = {}
+    pending_paths, next_retry_cursors = _select_retry_paths(
+        retry_dir, failed_dir, max_pages * 100, retry_cursors,
+    )
     for offset in range(0, len(pending_paths), 50):
         batch_paths = pending_paths[offset:offset + 50]
         batch = [_validate_retry_row(json.loads(path.read_text(encoding="utf-8")))
@@ -363,6 +367,12 @@ def collect_census(output_dir: str | Path, *, token: str | None = None, since: i
         for retry_path in remove_retry:
             retry_path.unlink(missing_ok=True)
 
+    # Commit retry progress only after all selected rows have been handled.
+    # If a crash interrupts the work above, the old cursor safely replays it.
+    if next_retry_cursors != retry_cursors:
+        checkpoint["retry_cursors"] = next_retry_cursors
+        _atomic_write(checkpoint_path, _json(checkpoint) + "\n")
+
     for _ in range(max_pages):
         def persist_core(rest_rows: list[dict[str, Any]], next_cursor: int | None) -> None:
             _atomic_write(staging_dir / f"{cursor}.jsonl", "".join(_json(row) + "\n" for row in rest_rows))
@@ -396,7 +406,7 @@ def collect_census(output_dir: str | Path, *, token: str | None = None, since: i
                                           if str(item["id"]) in enriched)
         _atomic_write(coverage_dir / f"{cursor}.json", _json(coverage) + "\n")
         # Cursor moves only after both durable files have been replaced.
-        checkpoint = {"version": 1, "next_since": next_cursor,
+        checkpoint = {**checkpoint, "version": 1, "next_since": next_cursor,
                       "last_committed_since": cursor, "observed_at": stamp}
         _atomic_write(checkpoint_path, _json(checkpoint) + "\n")
         (staging_dir / f"{cursor}.jsonl").unlink(missing_ok=True)
@@ -408,6 +418,82 @@ def collect_census(output_dir: str | Path, *, token: str | None = None, since: i
             break
         cursor = next_cursor
     return checkpoint
+
+
+def _select_retry_paths(retry_dir: Path, failed_dir: Path, limit: int,
+                        cursors: Mapping[str, Any]) -> tuple[list[Path], dict[str, int]]:
+    """Select a bounded numeric-ID round-robin slice from both retry pools."""
+    def path_id(path: Path) -> int | None:
+        try:
+            value = int(path.stem)
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    paths_by_pool = {
+        "retry": sorted(retry_dir.glob("*.json"), key=lambda path: (path_id(path) is not None,
+                                                                       path_id(path) or 0, path.name)),
+        "failed": sorted(failed_dir.glob("*.json"), key=lambda path: (path_id(path) is not None,
+                                                                         path_id(path) or 0, path.name)),
+    }
+    retry_ids = {path_id(path) for path in paths_by_pool["retry"] if path_id(path) is not None}
+    paths_by_pool["failed"] = [path for path in paths_by_pool["failed"]
+                               if path_id(path) is None or path_id(path) not in retry_ids]
+    active = [pool for pool in ("retry", "failed") if paths_by_pool[pool]]
+    if not active or limit <= 0:
+        return [], {pool: value for pool, value in cursors.items()
+                    if pool in paths_by_pool and isinstance(value, int) and not isinstance(value, bool)}
+
+    # Split the budget evenly when both pools have work; unused quota flows to
+    # the other pool when one has fewer rows.
+    quota = {pool: limit // len(active) for pool in active}
+    for pool in active[:limit % len(active)]:
+        quota[pool] += 1
+    selected: list[Path] = []
+    next_cursors = {
+        pool: value for pool, value in cursors.items()
+        if pool in paths_by_pool and isinstance(value, int) and not isinstance(value, bool)
+    }
+    remaining = limit
+    for pool in active:
+        paths = paths_by_pool[pool]
+        try:
+            last_id = int(cursors.get(pool, 0))
+        except (TypeError, ValueError):
+            last_id = 0
+        start = next((index for index, path in enumerate(paths)
+                      if path_id(path) is not None and path_id(path) > last_id), 0)
+        ordered = paths[start:] + paths[:start]
+        chosen = ordered[:min(quota[pool], len(ordered), remaining)]
+        selected.extend(chosen)
+        remaining -= len(chosen)
+        chosen_numeric_ids = [path_id(path) for path in chosen if path_id(path) is not None]
+        if chosen_numeric_ids:
+            next_cursors[pool] = chosen_numeric_ids[-1]
+
+    # Redistribute quota left unused by a small pool, preserving its own
+    # round-robin position and allowing the other pool to use the full cap.
+    if remaining:
+        for pool in active:
+            if not remaining:
+                break
+            already = {path for path in selected if path.parent == paths_by_pool[pool][0].parent}
+            paths = paths_by_pool[pool]
+            try:
+                last_id = int(next_cursors.get(pool, cursors.get(pool, 0)))
+            except (TypeError, ValueError):
+                last_id = 0
+            ordered = [path for path in paths if path not in already
+                       and path_id(path) is not None and path_id(path) > last_id]
+            ordered += [path for path in paths if path not in already
+                        and (path_id(path) is None or path_id(path) <= last_id)]
+            chosen = ordered[:remaining]
+            selected.extend(chosen)
+            remaining -= len(chosen)
+            chosen_numeric_ids = [path_id(path) for path in chosen if path_id(path) is not None]
+            if chosen_numeric_ids:
+                next_cursors[pool] = chosen_numeric_ids[-1]
+    return selected, next_cursors
 
 
 def _replace_candidate_page(pages_dir: Path, since: int, resolved_ids: set[int],

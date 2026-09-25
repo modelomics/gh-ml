@@ -35,6 +35,209 @@ def test_owner_profile_repository_is_excluded() -> None:
         assert result["selection_reason"] == "owner-profile-repository"
 
 
+def test_archived_same_name_technical_repositories_are_not_hard_excluded() -> None:
+    # Repository-owned fields from the archived 2026-09-24 observations.
+    rows = (
+        {
+            "name": "ChangeTitans/ChangeTitans",
+            "description": 'The official implementation of "ChangeTitans: Towards Remote Sensing Change Detection with Neural Memory"',
+            "topics": [],
+            "fork": False,
+        },
+        {
+            "name": "gnina/gnina",
+            "description": "A deep learning framework for molecular docking",
+            "topics": ["cheminformatics", "computational-chemistry", "convolutional-neural-networks", "drug-discovery", "molecular-modeling"],
+            "fork": False,
+        },
+        {
+            "name": "nilearn/nilearn",
+            "description": "Machine learning for NeuroImaging in Python",
+            "topics": ["brain-connectivity", "brain-imaging", "brain-mri", "decoding", "fmri", "machine-learning", "mvpa", "neuroimaging", "python"],
+            "fork": False,
+        },
+        {
+            "name": "pykeen/pykeen",
+            "description": "🤖 A Python library for learning and evaluating knowledge graph embeddings",
+            "topics": ["cuda", "deep-learning", "knowledge-base-completion", "knowledge-graph-embeddings", "knowledge-graphs", "link-prediction", "machine-learning", "pykeen", "python", "torch"],
+            "fork": False,
+        },
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "review", (row["name"], result)
+        assert result["selection_reason"] == "ml-relevance-without-clear-contribution", (row["name"], result)
+
+
+def test_same_name_official_novel_ml_can_be_included_but_library_stays_review() -> None:
+    official = assess_repository({
+        "name": "ChangeTitans/ChangeTitans",
+        "description": "Official implementation of our novel graph neural network method for remote sensing change detection, NeurIPS 2025.",
+    })
+    assert official["selection_status"] == "include"
+    assert official["selection_reason"] == "official-paper-method-implementation"
+
+    library = assess_repository({
+        "name": "gnina/gnina",
+        "description": "A deep learning framework for molecular docking",
+    })
+    assert library["selection_status"] == "review"
+    assert library["selection_reason"] == "ml-relevance-without-clear-contribution"
+
+
+def test_non_official_community_implementation_of_existing_paper_goes_to_review() -> None:
+    # Archived v4 false positive: hyphen normalization exposed "official" as
+    # a substring of "non-official", which let this community reproduction
+    # satisfy the official-paper implementation rule.
+    result = assess_repository({
+        "name": "Agora-Lab-AI/SRT",
+        "description": "An open-source non-official community implementation of the model from the paper: Surgical Robot Transformer (SRT): Imitation Learning for Surgical Tasks: https://surgical-robot-transformer.github.io/",
+    })
+    assert result["selection_status"] == "review"
+    assert result["selection_reason"] == "ml-relevance-without-clear-contribution"
+    assert "non-official-paper-implementation-cue" in result["selection_signals"]
+    assert "official-paper-implementation-cue" not in result["selection_signals"]
+
+
+def test_hyphenated_third_party_existing_paper_implementation_is_not_official() -> None:
+    result = assess_repository({
+        "name": "lab/third-party-transformer",
+        "description": "Open-source third-party implementation of the paper, a transformer for image recognition (CVPR 2024).",
+    })
+    assert result["selection_status"] == "review"
+    assert "non-official-paper-implementation-cue" in result["selection_signals"]
+
+
+def test_same_name_community_paper_implementation_stays_excluded_as_profile() -> None:
+    result = assess_repository({
+        "name": "alice/alice",
+        "description": "Community implementation of a transformer paper.",
+    })
+    assert result["selection_status"] == "exclude"
+    assert result["selection_reason"] == "owner-profile-repository"
+
+
+def test_true_official_paper_implementation_remains_included() -> None:
+    result = assess_repository({
+        "name": "lab/official-transformer",
+        "description": "Official implementation of the paper \"Surgical Robot Transformer\" for imitation learning (ICRA 2024).",
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "official-paper-method-implementation"
+
+
+def test_non_official_paper_implementation_with_distinct_novel_method_can_include() -> None:
+    result = assess_repository({
+        "name": "lab/new-transformer-method",
+        "description": "A community implementation of the paper's model; we propose a novel transformer architecture for surgical imitation learning.",
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "specific-method-with-novelty-claim"
+
+
+def test_same_name_sparse_and_explicit_profiles_and_github_profile_stay_excluded() -> None:
+    rows = (
+        {"name": "lab/lab", "description": "Machine learning"},
+        {"name": "lab/lab", "description": "My profile and projects"},
+        {"name": "org/.github", "description": "Neural network research"},
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "exclude"
+        assert result["selection_reason"] == "owner-profile-repository"
+
+    fork = assess_repository({
+        "name": "gnina/gnina",
+        "description": "A deep learning framework for molecular docking",
+        "fork": True,
+    })
+    assert fork["selection_status"] == "exclude"
+    assert fork["selection_reason"] == "fork"
+
+
+def test_canonical_same_name_ml_software_reaches_conservative_triage() -> None:
+    # Canonical projects are not profiles merely because owner and repository
+    # names match. These descriptions provide technical evidence but no claim
+    # that would independently qualify a repository for inclusion.
+    rows = (
+        {
+            "name": "pytorch/pytorch",
+            "description": "Tensors and Dynamic neural networks in Python with strong GPU acceleration",
+        },
+        {
+            "name": "espnet/espnet",
+            "description": "End-to-end speech processing toolkit",
+        },
+        {
+            "name": "hyperopt/hyperopt",
+            "description": "Distributed asynchronous hyperparameter optimization",
+        },
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "review", (row["name"], result)
+        assert result["selection_reason"] != "owner-profile-repository", (row["name"], result)
+
+
+def test_same_name_nontechnical_and_explicit_profile_records_stay_excluded() -> None:
+    for row in (
+        {"name": "alice/alice", "description": "Machine learning"},
+        {"name": "alice/alice", "description": "Researching neural networks"},
+        {"name": "alice/alice", "description": "My profile and projects about neural networks"},
+        {"name": "org/.github", "description": "Neural network research"},
+    ):
+        result = assess_repository(row)
+        assert result["selection_status"] == "exclude"
+        assert result["selection_reason"] == "owner-profile-repository"
+
+
+def test_research_workshop_venues_and_presentation_generation_are_not_utility_excluded() -> None:
+    # Repository-owned fields from the archived 2026-09-24 current view.
+    rows = (
+        {
+            "name": "mv-lab/swin2sr",
+            "description": "[ECCV] Swin2SR: SwinV2 Transformer for Compressed Image Super-Resolution and Restoration.  Advances in Image Manipulation (AIM) workshop ECCV 2022. Try it out! over 3.3M runs https://replicate.com/mv-lab/swin2sr",
+            "topics": ["compression", "compression-artifact-reduction", "computer-vision", "deblocking", "deep-learning", "denoising", "eccv2022", "image-denoising", "image-processing", "image-restoration", "image-sr", "image-super-resolution", "jpeg", "low-level-vision", "ntire", "super-resolution", "swin2sr", "swinir", "transformer", "vision-transformer"],
+            "fork": False,
+        },
+        {
+            "name": "eurecom-asp/RawGAT-ST-antispoofing",
+            "description": "This repository includes the code to reproduce our paper \"End-to-End Spectro-Temporal Graph Attention Networks for Speaker Verification Anti-Spoofing and Speech Deepfake Detection\" (https://arxiv.org/abs/2107.12710) published in the ASVspoof 2021 workshop.",
+            "topics": [],
+            "fork": False,
+        },
+        {
+            "name": "johnyang101/reticular-sae",
+            "description": "Official repo of \"Towards Interpretable Protein Structure Prediction with Sparse Autoencoders\" published at ICLR 2025 GEM workshop.",
+            "topics": [],
+            "fork": False,
+        },
+        {
+            "name": "AIGeeksGroup/PresentAgent",
+            "description": "[EMNLP 2025 Demo] PresentAgent: Multimodal Agent for Presentation Video Generation",
+            "topics": [],
+            "fork": False,
+        },
+    )
+    for row in rows:
+        result = assess_repository(row)
+        assert result["selection_status"] == "review", (row["name"], result)
+        assert result["selection_reason"] != "course-or-utility-repository", (row["name"], result)
+
+
+def test_educational_workshops_and_lecture_slides_remain_excluded() -> None:
+    educational_workshop = assess_repository({
+        "name": "lab/ml-workshop",
+        "description": "A workshop about machine learning course materials.",
+    })
+    assert educational_workshop["selection_status"] == "exclude"
+    slides = assess_repository({
+        "name": "mkang315/CST-YOLO",
+        "description": "Lecture presentation slides explaining object detection and YOLO.",
+    })
+    assert slides["selection_status"] == "exclude"
+
+
 def test_coursework_and_awesome_lists_are_excluded() -> None:
     for row in (
         {"name": "student/CS760-project", "description": "Transformer homework"},
@@ -54,7 +257,7 @@ def test_method_and_substantive_contribution_are_required_for_include() -> None:
         "stargazers_count": 0,
     })
     assert result["selection_status"] == "include"
-    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v1"
+    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v4"
     assert result["selection_signals"] == sorted(result["selection_signals"])
 
 
@@ -72,7 +275,7 @@ def test_generic_ml_or_query_match_alone_never_includes() -> None:
 def test_paper_code_alone_goes_to_review() -> None:
     result = assess_repository({
         "name": "lab/paper-implementation",
-        "description": "Official code for the diffusion model paper, arXiv:2401.12345.",
+        "description": "Code for a diffusion model paper, arXiv:2401.12345.",
     })
     assert result["selection_status"] == "review"
     assert "paper-and-code-cue" in result["selection_signals"]
@@ -289,6 +492,15 @@ def test_temporal_fusion_transformer_overview_stays_in_review() -> None:
     assert result["selection_reason"] == "overview-reproduction-or-dataset"
 
 
+def test_hpo_rl_paper_result_reproduction_stays_in_review() -> None:
+    result = assess_repository({
+        "name": "automl/HPO_for_RL",
+        "description": "Code of reproducing the results of a paper on hyperparameter optimization for reinforcement learning.",
+    })
+    assert result["selection_status"] == "review"
+    assert result["selection_reason"] == "overview-reproduction-or-dataset"
+
+
 def test_novel_dataset_is_not_included_as_a_method_contribution() -> None:
     result = assess_repository({
         "name": "tsinghua/visual-tactile-dataset",
@@ -404,3 +616,172 @@ def test_results_depend_only_on_repository_owned_text_and_fork_flag() -> None:
         "license": "MIT",
     }
     assert assess_repository(base) == assess_repository(noisy)
+
+
+
+def test_official_paper_implementations_are_included_without_novel_wording() -> None:
+    rows = (
+        ("FoundationVision/VAR", "[NeurIPS 2024 Best Paper Award] Official impl. of Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction.", ["autoregressive-image-generation"]),
+        ("WenjieDu/SAITS", "The official PyTorch implementation of the paper SAITS: Self-Attention-based Imputation for Time Series (arXiv:2202.08516).", ["time-series-imputation"]),
+        ("cure-lab/LTSF-Linear", "[AAAI-23 Oral] Official implementation of LTSF-Linear: Are Transformers Effective for Time Series Forecasting?", ["time-series-forecasting"]),
+        ("langfengQ/verl-agent", "Official code for the paper Group-in-Group Policy Optimization for Multi-Turn LLM Agents (arXiv:2505.11435).", ["agentic-reinforcement-learning"]),
+        ("yujinie98/PatchTST", "Official code for the PatchTST paper on long-term forecasting with time series transformers (ICLR 2023).", ["time-series-forecasting"]),
+        ("ali-vilab/VACE", "[ICCV 2025] Official implementations for paper: VACE: All-in-One Video Creation and Editing.", ["video-generation", "video-editing"]),
+        ("NExT-GPT/NExT-GPT", "Code and models for ICML 2024 paper, NExT-GPT: Any-to-Any Multimodal Large Language Model.", ["multimodal-large-language-model"]),
+    )
+    for name, description, topics in rows:
+        result = assess_repository({"name": name, "description": description, "topics": topics, "fork": False})
+        assert result["selection_status"] == "include", (name, result)
+        assert "official-paper-implementation-cue" in result["selection_signals"]
+
+
+def test_official_paper_route_rejects_weak_or_unrelated_evidence() -> None:
+    rows = (
+        {"name": "user/bert-reproduction", "description": "Reproduction code for the BERT paper, arXiv:1810.04805."},
+        {"name": "student/course-project", "description": "Official implementation of our transformer paper, NeurIPS 2024. Course project."},
+        {"name": "lab/survey", "description": "Official code for our survey paper on diffusion, NeurIPS 2024."},
+        {"name": "lab/zipline", "description": "Official code for our transformer paper, NeurIPS 2024.", "fork": True},
+        {"name": "octocat/octocat", "description": "A machine learning project."},
+        {"name": "lab/lora", "description": "Official code for our paper on LoRa networking, NeurIPS 2024."},
+        {"name": "lab/gpt-skill-tree", "description": "Official implementation for our Codex skill tree paper about GPT, NeurIPS 2024."},
+        {"name": "lab/misc", "description": "Official code for our unrelated image compression paper, NeurIPS 2024."},
+        {"name": "lab/concatenated", "description": "Official code for our paper on data management. Separately, discusses transformers. NeurIPS 2024."},
+    )
+    for row in rows:
+        assert assess_repository(row)["selection_status"] != "include", row["name"]
+
+
+def test_owner_profile_can_pass_only_with_official_research_evidence() -> None:
+    result = assess_repository({"name": "lab/lab", "description": "Official implementation of our PatchTST paper on time series forecasting (ICLR 2023)."})
+    assert result["selection_status"] == "include"
+    assert assess_repository({"name": "lab/lab", "description": "Machine learning"})["selection_reason"] == "owner-profile-repository"
+
+
+def test_dataset_topic_does_not_block_original_model_implementation() -> None:
+    result = assess_repository({
+        "name": "lab/new-mamba-model",
+        "description": "We propose a novel Mamba architecture for time series forecasting.",
+        "topics": ["datasets", "transformer"],
+    })
+    assert result["selection_status"] == "include"
+
+
+def test_readme_evidence_promotes_sparse_draggan_and_gpt2_metadata() -> None:
+    evidence = ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    for name in ("lab/DragGAN", "lab/gpt-2"):
+        result = assess_repository({
+            "name": name, "description": "Research implementation.",
+            "readme_status": "ok", "readme_signals": evidence,
+        })
+        assert result["selection_status"] == "include", (name, result)
+        assert result["selection_reason"] == "readme-supported-paper-method-implementation"
+        assert set(evidence) <= set(result["selection_signals"])
+
+
+def test_readme_promotion_requires_active_status_and_related_signals() -> None:
+    qualifying = ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    base = {"name": "lab/project", "description": "A useful machine learning project."}
+    assert assess_repository({**base, "readme_status": "missing", "readme_signals": qualifying})["selection_status"] == "review"
+    unrelated = ["ml-method-context", "method-contribution", "paper-reference"]
+    result = assess_repository({**base, "readme_status": "ok", "readme_signals": unrelated})
+    assert result["selection_status"] == "review"
+    assert "paper-reference" in result["selection_signals"]
+
+
+def test_readme_negative_cues_and_zipline_prevent_promotion() -> None:
+    positives = ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    for negative in ("course-cue", "reproduction-cue", "dataset-only-cue"):
+        result = assess_repository({
+            "name": "lab/project", "description": "A machine learning project.",
+            "readme_status": "unchanged", "readme_signals": [*positives, negative],
+        })
+        assert result["selection_status"] == "review", (negative, result)
+    zipline = assess_repository({
+        "name": "quantopian/zipline",
+        "description": "Zipline, a Pythonic Algorithmic Trading Library",
+        "topics": ["algorithmic-trading", "python", "quant", "zipline"],
+        "fork": False, "readme_status": "ok", "readme_signals": positives,
+    })
+    assert zipline["selection_status"] == "exclude"
+    assert zipline["selection_reason"] == "non-ml-utility"
+
+
+def test_metadata_readme_synergy_promotes_official_paper_implementations() -> None:
+    cases = (
+        (
+            {
+                "name": "XingangPan/DragGAN",
+                "description": "Official Code for DragGAN (SIGGRAPH 2023)",
+                "topics": ["artificial-intelligence", "generative-adversarial-network", "generative-models"],
+            },
+            ["paper-reference", "ml-method-context"],
+        ),
+        (
+            {
+                "name": "openai/gpt-2",
+                "description": 'Code for the paper "Language Models are Unsupervised Multitask Learners"',
+                "topics": ["paper"],
+            },
+            ["paper-reference", "ml-method-context", "paper-code-relationship"],
+        ),
+        (
+            {"name": "guoyww/AnimateDiff", "description": "Official implementation of AnimateDiff."},
+            ["paper-reference", "ml-method-context", "method-contribution"],
+        ),
+    )
+    for metadata, evidence in cases:
+        result = assess_repository({
+            **metadata, "readme_status": "ok", "readme_signals": evidence,
+        })
+        assert result["selection_status"] == "include", (metadata["name"], result)
+        assert result["selection_reason"] == "readme-supported-paper-method-implementation"
+
+
+def test_metadata_readme_synergy_rejects_generic_apps_and_unrelated_mentions() -> None:
+    rows = (
+        {
+            "name": "lab/official-llm-cli",
+            "description": "Official implementation of a command line application for LLM users.",
+            "readme_signals": ["paper-reference", "ml-method-context"],
+        },
+        {
+            "name": "lab/gpt-dashboard",
+            "description": "A dashboard with a citation to a transformer paper.",
+            "topics": ["transformer"],
+            "readme_signals": ["paper-reference", "ml-method-context"],
+        },
+    )
+    for row in rows:
+        result = assess_repository({**row, "readme_status": "ok"})
+        assert result["selection_status"] == "review", (row["name"], result)
+
+
+def test_official_codebase_with_readme_paper_code_relation_promotes_without_novelty_wording() -> None:
+    pinned = {
+        "name": "facebookresearch/ijepa",
+        "description": (
+            "Official codebase for I-JEPA, the Image-based Joint-Embedding Predictive Architecture. "
+            'First outlined in the CVPR paper, "Self-supervised learning from images with a '
+            'joint-embedding predictive architecture."'
+        ),
+        "topics": [],
+        "fork": False,
+    }
+    signals = ["paper-reference", "ml-method-context", "paper-code-relationship"]
+    assert assess_repository(pinned)["selection_status"] == "review"
+    result = assess_repository({
+        **pinned, "readme_status": "ok", "readme_signals": signals,
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "readme-supported-paper-method-implementation"
+
+
+def test_official_applied_codebase_without_local_readme_paper_relation_stays_review() -> None:
+    result = assess_repository({
+        "name": "lab/official-dashboard",
+        "description": "Official PyTorch codebase for an operations dashboard, with a transformer paper citation (CVPR 2024).",
+        "topics": ["transformer", "dashboard"],
+        "readme_status": "ok",
+        "readme_signals": ["paper-reference", "ml-method-context"],
+    })
+    assert result["selection_status"] == "review"

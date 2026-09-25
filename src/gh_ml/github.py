@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 import os
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -17,6 +20,8 @@ _API_ROOT = "https://api.github.com"
 _MAX_ATTEMPTS = 4
 _MAX_RETRY_SLEEP = 30.0
 _SEARCH_INTERVAL = 2.0  # Authenticated Search API allows 30 requests per minute.
+_MAX_README_BYTES = 1_000_000
+_MAX_README_RESPONSE_BYTES = 1_500_000
 
 
 class GitHubAPIError(RuntimeError):
@@ -50,6 +55,15 @@ class RepositoryBatchResult:
 
     repositories: tuple[dict[str, Any] | None, ...]
     errors: tuple[str | None, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GitHubReadmeResult:
+    status: int
+    etag: str | None
+    blob_sha: str | None
+    text: str | None
+    rate_remaining: int | None = None
 
 
 class GitHubClient:
@@ -87,6 +101,24 @@ class GitHubClient:
     ) -> None:
         """Set an optional callback for completed Search API responses."""
         self._progress_callback = callback
+
+    def graphql(
+        self, query: str, variables: Mapping[str, Any] | None = None
+    ) -> tuple[Any, Any]:
+        """Send a GraphQL query with optional JSON variables.
+
+        Returns the decoded response payload and response headers.
+        """
+        if not isinstance(query, str) or not query.strip():
+            raise ValueError("query must be a nonempty string")
+        if variables is not None and not isinstance(variables, Mapping):
+            raise TypeError("variables must be a mapping or None")
+        if variables is not None:
+            try:
+                json.dumps(variables)
+            except (TypeError, ValueError):
+                raise ValueError("variables must contain JSON-serializable values") from None
+        return self._graphql_request(query, variables)
 
     def search_repositories(
         self, query: str, page: int = 1, per_page: int = 100
@@ -132,6 +164,90 @@ class GitHubClient:
         if not isinstance(payload.get("full_name"), str) or not payload["full_name"]:
             raise GitHubAPIError(None, "invalid repository response: full_name is missing")
         return payload
+
+    def get_readme(self, full_name: str, etag: str | None = None) -> GitHubReadmeResult:
+        """Fetch and decode a repository README using exactly one HTTP attempt."""
+        parts = full_name.split("/") if isinstance(full_name, str) else []
+        if len(parts) != 2 or any(
+            not part or part in {".", ".."}
+            or any(not (char.isalnum() or char in "-_.") for char in part)
+            for part in parts
+        ):
+            raise ValueError("full_name must have the form owner/name")
+        if etag is not None and (not isinstance(etag, str) or "\r" in etag or "\n" in etag):
+            raise ValueError("etag must be a single-line string")
+        path = "/repos/" + "/".join(quote(part, safe="-_.") for part in parts) + "/readme"
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": self.user_agent,
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        if etag is not None:
+            headers["If-None-Match"] = etag
+        request = Request(_API_ROOT + path, headers=headers, method="GET")
+
+        def result(status: int, response_headers: Any, text: str | None = None,
+                   blob_sha: str | None = None) -> GitHubReadmeResult:
+            try:
+                raw_remaining = response_headers.get("X-RateLimit-Remaining")
+                remaining = int(raw_remaining) if raw_remaining is not None else None
+                if remaining is not None and remaining < 0:
+                    remaining = None
+            except (AttributeError, TypeError, ValueError):
+                remaining = None
+            response_etag = response_headers.get("ETag") if hasattr(response_headers, "get") else None
+            return GitHubReadmeResult(status, response_etag, blob_sha, text, remaining)
+
+        try:
+            with self._opener(request, timeout=self.timeout) as response:
+                status = getattr(response, "status", 200)
+                response_headers = getattr(response, "headers", {})
+                body = response.read(_MAX_README_RESPONSE_BYTES + 1)
+        except HTTPError as exc:
+            response_headers = exc.headers or {}
+            if exc.code in (304, 404):
+                return result(exc.code, response_headers)
+            if exc.code in (403, 429):
+                raise GitHubAPIError(exc.code, "rate limited or access denied") from None
+            raise GitHubAPIError(exc.code, "unexpected HTTP status") from None
+        except (TimeoutError, URLError, OSError) as exc:
+            raise GitHubAPIError(None, type(exc).__name__) from None
+
+        if status in (304, 404):
+            return result(status, response_headers)
+        if status in (403, 429):
+            raise GitHubAPIError(status, "rate limited or access denied")
+        if status != 200:
+            raise GitHubAPIError(status if isinstance(status, int) else None, "unexpected HTTP status")
+        if len(body) > _MAX_README_RESPONSE_BYTES:
+            raise GitHubAPIError(None, "README response exceeds size limit")
+        try:
+            payload = json.loads(body.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise GitHubAPIError(None, "README response was not valid JSON") from None
+        if not isinstance(payload, dict) or payload.get("type") != "file":
+            raise GitHubAPIError(None, "invalid README response")
+        size = payload.get("size")
+        encoded = payload.get("content")
+        sha = payload.get("sha")
+        if isinstance(size, bool) or not isinstance(size, int) or not 0 <= size <= _MAX_README_BYTES:
+            raise GitHubAPIError(None, "invalid README size")
+        if payload.get("encoding") != "base64" or not isinstance(encoded, str):
+            raise GitHubAPIError(None, "invalid README encoding")
+        if not isinstance(sha, str) or not sha or len(sha) > 128:
+            raise GitHubAPIError(None, "invalid README blob SHA")
+        try:
+            # GitHub may wrap the base64 representation in line breaks.
+            compact_encoded = encoded.replace("\r", "").replace("\n", "")
+            raw = base64.b64decode(compact_encoded, validate=True)
+            if len(raw) != size:
+                raise ValueError
+            text = raw.decode("utf-8")
+        except (binascii.Error, UnicodeDecodeError, ValueError):
+            raise GitHubAPIError(None, "invalid README content") from None
+        return result(200, response_headers, text, sha)
 
     def get_repositories_batch(self, full_names: list[str] | tuple[str, ...]) -> RepositoryBatchResult:
         """Look up at most 50 repositories through GraphQL aliases.
@@ -201,10 +317,15 @@ class GitHubClient:
                 item_errors[index] = "invalid GraphQL repository data"
         return RepositoryBatchResult(tuple(repositories), tuple(item_errors))
 
-    def _graphql_request(self, query: str) -> tuple[Any, Any]:
+    def _graphql_request(
+        self, query: str, variables: Mapping[str, Any] | None = None
+    ) -> tuple[Any, Any]:
+        payload = {"query": query}
+        if variables is not None:
+            payload["variables"] = variables
         request = Request(
             _API_ROOT + "/graphql",
-            data=json.dumps({"query": query}, separators=(",", ":")).encode("utf-8"),
+            data=json.dumps(payload, separators=(",", ":")).encode("utf-8"),
             headers={
                 "Accept": "application/vnd.github+json",
                 "Content-Type": "application/json",
@@ -415,6 +536,11 @@ def _repository_from_graphql(node: Any) -> dict[str, Any]:
         "archived": node.get("isArchived"),
         "fork": node.get("isFork"),
     }
+
+
+def repository_from_graphql(node: Any) -> dict[str, Any]:
+    """Normalize a GraphQL repository node to the client's REST-shaped form."""
+    return _repository_from_graphql(node)
 
 
 def _retry_delay(headers: Any, attempt: int) -> float:

@@ -125,7 +125,9 @@ def test_cli_dry_run_writes_candidate_without_publishing(tmp_path: Path, monkeyp
         coverage=[{"query_id": spec.id, "success": True}],
     )
     monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
-    monkeypatch.setattr(cli, "discover", lambda *args, **kwargs: outcome)
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_recent", SimpleNamespace(
+        discover_fair_recent=lambda *args, **kwargs: outcome
+    ))
     monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
     monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not load remote checkpoint")))
 
@@ -147,6 +149,65 @@ def test_cli_dry_run_writes_candidate_without_publishing(tmp_path: Path, monkeyp
     assert row["candidate_status"] == "candidate"
     assert manifest["published"] is False
     assert json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))["cursor"] is None
+
+
+def test_daily_cli_resumes_fair_cursor_with_frozen_bounds(tmp_path: Path, monkeypatch) -> None:
+    cursor = {
+        "version": 1, "field": "pushed", "since": "2026-09-20", "until": "2026-09-22",
+        "per_page": 100, "lanes": {"q": {"query": "protein model", "cursor": None, "complete": False}},
+        "next_index": 0,
+    }
+    (tmp_path / "state.json").write_text(json.dumps({
+        "since": "2026-09-20", "until": "2026-09-22", "cursor": cursor,
+        "search_policy_version": cli.SEARCH_POLICY_VERSION,
+    }), encoding="utf-8")
+    next_cursor = {**cursor, "next_index": 0}
+    outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor=next_cursor,
+                              requests_used=1, coverage=[{"query_id": "q", "success": True}])
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_queries", lambda _: [QuerySpec(id="q", q="protein model", domains=(), methods=())])
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_recent", SimpleNamespace(
+        discover_fair_recent=lambda *args, **kwargs: calls.append(kwargs) or outcome
+    ))
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    assert cli.main(["run", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+    assert calls[0]["cursor"] == cursor
+    assert (calls[0]["since"], calls[0]["until"]) == ("2026-09-20", "2026-09-22")
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["since"] == "2026-09-20" and saved["until"] == "2026-09-22"
+    assert saved["cursor"] == next_cursor
+
+
+def test_daily_cli_resets_legacy_cursor_but_keeps_its_window(tmp_path: Path, monkeypatch) -> None:
+    legacy = {"query_index": 3, "page": 7}
+    (tmp_path / "state.json").write_text(json.dumps({
+        "since": "2026-09-20", "until": "2026-09-22", "cursor": legacy,
+        "search_policy_version": cli.SEARCH_POLICY_VERSION,
+    }), encoding="utf-8")
+    outcome = SimpleNamespace(repositories={}, matched_query_ids={}, next_cursor=None,
+                              requests_used=1, coverage=[{"query_id": "q", "success": True}])
+    calls: list[dict] = []
+    monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
+    monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
+    monkeypatch.setattr(cli, "load_queries", lambda _: [QuerySpec(id="q", q="protein model", domains=(), methods=())])
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_recent", SimpleNamespace(
+        discover_fair_recent=lambda *args, **kwargs: calls.append(kwargs) or outcome
+    ))
+    monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not publish")))
+
+    assert cli.main(["run", "--no-publish", "--output-dir", str(tmp_path)]) == 0
+    assert calls[0]["cursor"] is None
+    assert (calls[0]["since"], calls[0]["until"]) == ("2026-09-20", "2026-09-22")
+    saved = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+    assert saved["since"] == "2026-09-22" and saved["cursor"] is None
+
+
+def test_daily_parser_defaults_to_600_requests() -> None:
+    args = cli._parser().parse_args(["run", "--no-publish"])
+    assert args.max_requests == 600
 
 
 def test_sample_cli_writes_created_coverage_and_separate_local_state(tmp_path: Path, monkeypatch) -> None:
@@ -400,7 +461,9 @@ def test_cli_publishes_empty_sweep_checkpoint_for_ephemeral_runners(
     monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
     monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
     monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli, "discover", lambda *args, **kwargs: outcome)
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_recent", SimpleNamespace(
+        discover_fair_recent=lambda *args, **kwargs: outcome
+    ))
 
     def publish(*args, **kwargs):
         saved.append(kwargs["checkpoint"])
@@ -440,12 +503,12 @@ def test_oidc_token_is_reacquired_before_publish(tmp_path: Path, monkeypatch) ->
     monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
     checkpoint_tokens: list[str] = []
     monkeypatch.setattr(cli, "load_checkpoint", lambda _repo, token, **_: checkpoint_tokens.append(token))
-    monkeypatch.setattr(
-        cli,
-        "discover",
-        lambda *args, **kwargs: SimpleNamespace(
+    monkeypatch.setitem(
+        sys.modules,
+        "gh_ml.fair_recent",
+        SimpleNamespace(discover_fair_recent=lambda *args, **kwargs: SimpleNamespace(
             repositories={}, matched_query_ids={}, next_cursor=None, requests_used=1, coverage=[]
-        ),
+        )),
     )
     publish_tokens: list[str] = []
 
@@ -550,7 +613,16 @@ def test_cli_restarts_same_window_after_query_catalog_change(
 
     monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
     if command == "run":
-        monkeypatch.setattr(cli, "discover", changed_catalog)
+        # Daily fair discovery accepts its own lane cursor; use that cursor to
+        # exercise the legacy restart-on-catalog-mismatch fallback path.
+        state["cursor"] = {
+            "version": 1, "field": "pushed", "since": bounds["since"], "until": bounds["until"],
+            "per_page": 100, "lanes": {}, "next_index": 0,
+        }
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        monkeypatch.setitem(sys.modules, "gh_ml.fair_recent", SimpleNamespace(
+            discover_fair_recent=changed_catalog
+        ))
     else:
         monkeypatch.setattr(discovery, "discover_backfill", changed_catalog)
 
@@ -586,7 +658,9 @@ def test_empty_successful_published_run_reports_publication(tmp_path: Path, monk
     monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
     monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
     monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli, "discover", lambda *args, **kwargs: outcome)
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_recent", SimpleNamespace(
+        discover_fair_recent=lambda *args, **kwargs: outcome
+    ))
     monkeypatch.setattr(cli, "publish_run", lambda *args, **kwargs: "https://example.test/run")
 
     assert cli.main(
@@ -615,7 +689,9 @@ def test_cli_failed_publish_does_not_advance_local_checkpoint(tmp_path: Path, mo
     monkeypatch.setattr(cli, "_utc_now", lambda: cli.datetime(2026, 9, 24, tzinfo=cli.UTC))
     monkeypatch.setattr(cli, "GitHubClient", lambda token=None: object())
     monkeypatch.setattr(cli, "load_checkpoint", lambda *args, **kwargs: None)
-    monkeypatch.setattr(cli, "discover", lambda *args, **kwargs: outcome)
+    monkeypatch.setitem(sys.modules, "gh_ml.fair_recent", SimpleNamespace(
+        discover_fair_recent=lambda *args, **kwargs: outcome
+    ))
     monkeypatch.setattr(
         cli,
         "publish_run",

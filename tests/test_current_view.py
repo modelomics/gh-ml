@@ -43,11 +43,12 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
     assert _read(output) == [
         {**_row(5, "2026-09-24T12:00:00+00:00", stars=3),
          "observation_count": 2, "first_observed_at": "2025-01-01T00:00:00Z",
-         "all_query_ids": [], "all_domains": [], "all_methods": [], "all_novelty_signals": [],
+         "all_query_ids": [], "all_domains": [], "all_methods": [], "all_novelty_signals": [], "paper_ids": [],
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
-         "evidence_signals": [], "selection_version": "ml-contribution-v1",
+             "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": []},
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v3",
+         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
         {**_row(20, "2026-09-24T12:00:00Z", stars=50, extra={"kept": True},
                 query_ids=["new.query"], domains=["Vision"], methods=["K means"],
                 novelty_signals=["new-signal"]),
@@ -55,16 +56,157 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "all_query_ids": ["new.query", "old.query"], "all_domains": ["Vision", "health"],
          "all_methods": ["k-means", "transformer"],
          "all_novelty_signals": ["new-signal", "paper-reference"],
+         "paper_ids": [],
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
-         "evidence_signals": [], "selection_version": "ml-contribution-v1",
+             "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": []},
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v3",
+         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
     ]
     assert report["observation_count"] == 4
     assert report["current_view_count"] == 2
-    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 3
-    assert json.loads((tmp_path / "view.jsonl.manifest.json").read_text())["input_files"][1]["observations"] == 2
+    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 7
+    manifest = json.loads((tmp_path / "view.jsonl.manifest.json").read_text())
+    assert manifest["candidate_rule_version"] == "ml-candidate-v3"
+    assert "queryless absent or false" in manifest["selection"]
+    assert manifest["input_files"][1]["observations"] == 2
     assert repeat.read_bytes() == output.read_bytes()
+
+
+def test_search_observation_wins_over_newer_census_and_retains_all_aggregates(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(101, "2020-01-01T00:00:00Z", queryless=False, name="search-row",
+             query_ids=["search.query"], domains=["search-domain"]),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(101, "2026-01-01T00:00:00Z", queryless=True, name="census-row",
+             query_ids=["census.query"], domains=["census-domain"]),
+    ])
+    output = tmp_path / "view.jsonl"
+
+    report = materialize_current_view([census, search], output)
+
+    row = _read(output)[0]
+    assert row["name"] == "search-row"
+    assert row["queryless"] is False
+    assert row["observed_at"] == "2020-01-01T00:00:00Z"
+    assert row["observation_count"] == report["observation_count"] == 2
+    assert row["first_observed_at"] == "2020-01-01T00:00:00Z"
+    assert row["all_query_ids"] == ["census.query", "search.query"]
+    assert row["all_domains"] == ["census-domain", "search-domain"]
+
+
+def test_search_winner_keeps_paper_ids_from_queryless_hf_observation(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(109, "2026-01-01T00:00:00Z", name="search-row", queryless=False),
+    ])
+    hf_daily = _write(tmp_path / "hf.jsonl", [
+        _row(109, "2025-01-01T00:00:00Z", name="hf-row", queryless=True,
+             paper_ids=["2501.00002", "2501.00001", "2501.00002"]),
+    ])
+    output = tmp_path / "view.jsonl"
+
+    materialize_current_view([search, hf_daily], output)
+
+    row = _read(output)[0]
+    assert row["name"] == "search-row"
+    assert row["paper_ids"] == ["2501.00001", "2501.00002"]
+    assert row["selection_status"] == "review"
+    assert row["candidate_eligible"] is False
+
+
+@pytest.mark.parametrize("paper_ids", [None, "2501.00001", [None], [" "]])
+def test_invalid_paper_ids_fail_closed(tmp_path, paper_ids):
+    source = _write(tmp_path / "bad.jsonl", [
+        _row(110, "2026-01-01T00:00:00Z", paper_ids=paper_ids),
+    ])
+
+    with pytest.raises(ValueError, match="paper_ids"):
+        materialize_current_view([source], tmp_path / "view.jsonl")
+
+
+@pytest.mark.parametrize("search_queryless", [None, False])
+def test_search_wins_when_newer_and_missing_queryless_is_search(tmp_path, search_queryless):
+    search_fields = {} if search_queryless is None else {"queryless": search_queryless}
+    search = _write(tmp_path / "search.jsonl", [
+        _row(102, "2026-01-01T00:00:00Z", name="search-row", **search_fields),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(102, "2020-01-01T00:00:00Z", queryless=True, name="census-row"),
+    ])
+
+    materialize_current_view([census, search], tmp_path / "view.jsonl")
+
+    assert _read(tmp_path / "view.jsonl")[0]["name"] == "search-row"
+
+
+def test_census_only_observations_are_retained(tmp_path):
+    census = _write(tmp_path / "census.jsonl", [
+        _row(103, "2026-01-01T00:00:00Z", queryless=True, name="census-row"),
+    ])
+
+    materialize_current_view([census], tmp_path / "view.jsonl")
+
+    assert _read(tmp_path / "view.jsonl")[0]["name"] == "census-row"
+
+
+def test_search_beats_topic_and_census_and_topic_only_projects_with_extras(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(107, "2020-01-01T00:00:00Z", name="search-row", queryless=False),
+    ])
+    topic = _write(tmp_path / "topic.jsonl", [
+        _row(107, "2027-01-01T00:00:00Z", name="topic-row", queryless=True,
+             discovery_source="topic", topic_names=["diffusion-models"]),
+        _row(108, "2027-01-01T00:00:00Z", name="topic-only", queryless=True,
+             discovery_source="topic", topic_names=["protein-design"]),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(107, "2028-01-01T00:00:00Z", name="census-row", queryless=True),
+    ])
+    output = tmp_path / "view.jsonl"
+
+    materialize_current_view([topic, census, search], output)
+
+    rows = _read(output)
+    assert [row["name"] for row in rows] == ["search-row", "topic-only"]
+    assert rows[1]["discovery_source"] == "topic"
+    assert rows[1]["topic_names"] == ["protein-design"]
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError:
+        return
+    projected = tmp_path / "view.parquet"
+    current_view.export_current_view_parquet(output, projected)
+    table = parquet.read_table(projected).to_pylist()
+    assert json.loads(table[1]["extra_json"]) == {
+        "discovery_source": "topic", "queryless": True,
+        "topic_names": ["protein-design"],
+    }
+
+
+@pytest.mark.parametrize("queryless", [0, 1, "false", "true"])
+def test_invalid_queryless_is_rejected(tmp_path, queryless):
+    source = _write(tmp_path / "bad.jsonl", [
+        _row(104, "2026-01-01T00:00:00Z", queryless=queryless),
+    ])
+
+    with pytest.raises(ValueError, match="queryless must be a boolean"):
+        materialize_current_view([source], tmp_path / "view.jsonl")
+
+
+def test_source_precedence_is_strictly_limited_to_same_github_id(tmp_path):
+    search = _write(tmp_path / "search.jsonl", [
+        _row(105, "2020-01-01T00:00:00Z", name="search-row"),
+    ])
+    census = _write(tmp_path / "census.jsonl", [
+        _row(106, "2026-01-01T00:00:00Z", queryless=True, name="census-row"),
+    ])
+
+    materialize_current_view([search, census], tmp_path / "view.jsonl")
+
+    assert [(row["github_id"], row["name"]) for row in _read(tmp_path / "view.jsonl")] == [
+        (105, "search-row"), (106, "census-row"),
+    ]
 
 
 def test_equal_timestamp_tie_break_does_not_depend_on_input_order(tmp_path):
@@ -145,6 +287,7 @@ def test_parquet_export_preserves_numeric_ids_nested_lists_nulls_and_late_extra_
     assert result == {"row_count": 3, "size_bytes": output.stat().st_size, "compression": "zstd"}
     assert pa.types.is_int64(table.schema.field("github_id").type)
     assert pa.types.is_list(table.schema.field("topics").type)
+    assert pa.types.is_list(table.schema.field("paper_ids").type)
     assert pa.types.is_string(table.schema.field("observed_at").type)
     assert pa.types.is_string(table.schema.field("extra_json").type)
     assert table.to_pylist()[0]["github_id"] == 1
@@ -245,7 +388,8 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
     ])
     newer = _write(tmp_path / "newer.jsonl", [
         _row(7, "2026-01-01T00:00:00Z", query_ids=["new"], domains=["ml"],
-             methods=["Transformer"], novelty_signals=["topics"], candidate_evidence=[{"source": "census"}]),
+             methods=["Transformer"], novelty_signals=["topics"], paper_ids=["P2", "P1"],
+             candidate_evidence=[{"source": "census"}]),
     ])
     view = tmp_path / "view.jsonl"
     parquet = tmp_path / "view.parquet"
@@ -258,9 +402,11 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
     assert row["all_domains"] == ["bio", "ml"]
     assert row["all_methods"] == ["k-means", "transformer"]
     assert row["all_novelty_signals"] == ["paper", "topics"]
+    assert row["paper_ids"] == ["P1", "P2"]
     assert row["observation_count"] == 2
     assert row["first_observed_at"] == "2024-01-01T00:00:00Z"
     assert extra["candidate_evidence"] == [{"source": "census"}]
+    assert "paper_ids" not in extra
 
 
 def test_current_view_adds_evidence_only_from_latest_repository_text(tmp_path):
@@ -292,6 +438,7 @@ def test_parquet_exposes_evidence_and_accumulated_fields_as_typed_columns(tmp_pa
         "observed_at": "2026-01-01T00:00:00Z", "first_observed_at": "2025-01-01T00:00:00Z",
         "observation_count": 2, "all_query_ids": ["one"], "all_domains": ["vision"],
         "all_methods": ["transformer"], "all_novelty_signals": [],
+        "paper_ids": ["2501.00001"],
         "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "direct_ml_text",
         "evidence_signals": ["machine-learning", "transformer"],
     }])
@@ -305,6 +452,7 @@ def test_parquet_exposes_evidence_and_accumulated_fields_as_typed_columns(tmp_pa
     assert pa.types.is_list(table.schema.field("evidence_signals").type)
     assert pa.types.is_int64(table.schema.field("observation_count").type)
     assert row["all_methods"] == ["transformer"]
+    assert row["paper_ids"] == ["2501.00001"]
     assert row["evidence_tier"] == "direct_ml_text"
     assert row["evidence_signals"] == ["machine-learning", "transformer"]
     assert row["extra_json"] is None
@@ -329,3 +477,137 @@ def test_parquet_selection_columns_are_typed_and_optional_filter_preserves_local
     assert pa.types.is_string(table.schema.field("selection_reason").type)
     assert pa.types.is_list(table.schema.field("selection_signals").type)
     assert table.to_pylist()[0]["github_id"] == 1
+
+
+def test_candidate_assessment_is_applied_to_latest_deduped_observation(tmp_path):
+    eligible_old_and_latest = _write(tmp_path / "eligible.jsonl", [
+        _row(41, "2025-01-01T00:00:00Z", name="transformer-project",
+             description="Awesome list of transformer projects"),
+        _row(41, "2026-01-01T00:00:00Z", name="transformer-project",
+             description="Transformer model implementation; paper and code are available for this machine learning project."),
+    ])
+    hard_negative = _write(tmp_path / "negative.jsonl", [
+        _row(42, "2026-01-01T00:00:00Z", name="awesome-transformers",
+             description="Awesome list of transformer projects"),
+    ])
+    output = tmp_path / "current.jsonl"
+
+    materialize_current_view([eligible_old_and_latest, hard_negative], output)
+    rows = _read(output)
+
+    assert rows[0]["github_id"] == 41
+    assert rows[0]["observation_count"] == 2
+    assert rows[0]["candidate_eligible"] is True
+    assert rows[0]["candidate_reason"] == "review-with-repository-evidence"
+    assert rows[1]["github_id"] == 42
+    assert rows[1]["selection_status"] == "exclude"
+    assert rows[1]["candidate_eligible"] is False
+    assert rows[1]["candidate_reason"] == "not-selected-or-reviewable"
+
+
+def test_candidate_parquet_columns_are_typed_and_filter_is_independent_of_selection(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    source = _write(tmp_path / "view.jsonl", [
+        {"github_id": 1, "observed_at": "2026-01-01T00:00:00Z", "selection_status": "review",
+         "candidate_rule_version": "ml-candidate-v2", "candidate_eligible": True,
+         "candidate_reason": "review-with-repository-evidence"},
+        {"github_id": 2, "observed_at": "2026-01-02T00:00:00Z", "selection_status": "review",
+         "candidate_rule_version": "ml-candidate-v2", "candidate_eligible": False,
+         "candidate_reason": "insufficient-repository-evidence"},
+        {"github_id": 3, "observed_at": "2026-01-03T00:00:00Z", "selection_status": "include",
+         "candidate_rule_version": "ml-candidate-v2", "candidate_eligible": True,
+         "candidate_reason": "selected-by-current-rule"},
+    ])
+    output = tmp_path / "eligible.parquet"
+
+    result = export_current_view_parquet(source, output, candidate_eligible=True,
+                                         selection_status="review")
+    table = pq.read_table(output)
+
+    assert result["row_count"] == 1
+    assert [row["github_id"] for row in table.to_pylist()] == [1]
+    assert pa.types.is_string(table.schema.field("candidate_rule_version").type)
+    assert pa.types.is_boolean(table.schema.field("candidate_eligible").type)
+    assert pa.types.is_string(table.schema.field("candidate_reason").type)
+
+
+def test_readme_evidence_latest_per_id_and_typed_parquet_columns(tmp_path):
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    obs = _write(tmp_path / "obs.jsonl", [_row(9, "2026-01-01T00:00:00Z", name="new/name")])
+
+    def ev(name, when, status, signal):
+        return {"github_id": 9, "repository_name_at_fetch": name, "observed_at": when,
+                "readme_status": status, "readme_etag": None, "readme_blob_sha": None,
+                "readme_evidence_version": "gh-ml-readme-evidence-v1", "readme_signals": signal,
+                "readme_sections": ["installation"] if signal else [], "readme_checked_at": when}
+
+    old = _write(tmp_path / "old.jsonl", [ev("old/name", "2026-01-02T00:00:00Z", "ok", ["ml-method-context"])])
+    new = _write(tmp_path / "new.jsonl", [ev("new/name", "2026-01-03T00:00:00Z", "unchanged", ["paper-reference"])])
+    output = tmp_path / "view.jsonl"
+    report = materialize_current_view([obs], output, readme_evidence_paths=[old, new])
+    row = _read(output)[0]
+    assert row["name"] == "new/name"
+    assert row["readme_repository_name_at_fetch"] == "new/name"
+    assert row["readme_status"] == "unchanged" and row["readme_signals"] == ["paper-reference"]
+    assert report["readme_evidence_count"] == 2
+    parquet_path = tmp_path / "view.parquet"
+    export_current_view_parquet(output, parquet_path)
+    table = pq.read_table(parquet_path)
+    assert pa.types.is_list(table.schema.field("readme_signals").type)
+    assert pa.types.is_list(table.schema.field("readme_sections").type)
+    assert pa.types.is_string(table.schema.field("readme_status").type)
+    assert table.to_pylist()[0]["readme_signals"] == ["paper-reference"]
+
+
+@pytest.mark.parametrize("evidence", [
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
+     "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "v1",
+     "readme_signals": [], "readme_sections": [], "readme_checked_at": None, "readme_text": "private body"},
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
+     "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v1",
+     "readme_signals": ["some freeform project text"], "readme_sections": [], "readme_checked_at": None},
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
+     "readme_status": "missing", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v1",
+     "readme_signals": ["ml-method-context"], "readme_sections": [], "readme_checked_at": None},
+    {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "bad", "readme_status": "ok",
+     "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "v1",
+     "readme_signals": [], "readme_sections": [], "readme_checked_at": None},
+])
+def test_readme_evidence_rejects_raw_payload_or_bad_timestamp(tmp_path, evidence):
+    obs = _write(tmp_path / "obs.jsonl", [_row(1, "2026-01-01T00:00:00Z")])
+    source = _write(tmp_path / "readme.jsonl", [evidence])
+    with pytest.raises(ValueError):
+        materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[source])
+
+
+def test_missing_readme_status_cannot_promote_repository(tmp_path):
+    obs = _write(tmp_path / "obs.jsonl", [_row(1, "2026-01-01T00:00:00Z", name="small-project")])
+    missing = _write(tmp_path / "readme.jsonl", [{
+        "github_id": 1, "repository_name_at_fetch": "small-project", "observed_at": "2026-01-02T00:00:00Z",
+        "readme_status": "missing", "readme_etag": None, "readme_blob_sha": None,
+        "readme_evidence_version": "gh-ml-readme-evidence-v1", "readme_signals": [], "readme_sections": [],
+        "readme_checked_at": None,
+    }])
+    materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[missing])
+    row = _read(tmp_path / "view.jsonl")[0]
+    assert row["selection_status"] == "review"
+    assert row["selection_reason"] == "insufficient-repository-evidence"
+
+
+def test_rename_makes_previous_readme_evidence_inactive_by_name(tmp_path):
+    obs = _write(tmp_path / "obs.jsonl", [_row(22, "2026-01-01T00:00:00Z", name="owner/new-name")])
+    previous_name = _write(tmp_path / "readme.jsonl", [{
+        "github_id": 22, "repository_name_at_fetch": "Owner/old-name", "observed_at": "2026-01-02T00:00:00Z",
+        "readme_status": "ok", "readme_etag": "etag", "readme_blob_sha": "blob",
+        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_signals": ["ml-method-context", "method-contribution", "paper-code-relationship"],
+        "readme_sections": ["method"], "readme_checked_at": "2026-01-02T00:00:00Z",
+    }])
+    materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[previous_name])
+    row = _read(tmp_path / "view.jsonl")[0]
+    assert row["readme_repository_name_at_fetch"] == "Owner/old-name"
+    assert row["readme_signals"] == ["ml-method-context", "method-contribution", "paper-code-relationship"]
+    assert row["readme_status"] == "stale_name"
+    assert row["selection_status"] != "include"

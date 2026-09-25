@@ -1,0 +1,50 @@
+# Focused retrieval aliases supported by the 2026 PWC absence audit.
+# These queries retain broad method-family provenance and do not name projects.
+
+[[queries]]
+id = "recall26.long-tailed-recognition"
+q = "\"long-tailed recognition\" in:description,readme"
+domains = ["computer-vision", "imbalanced-learning", "machine-learning"]
+methods = ["long-tailed-learning", "classification", "recognition"]
+
+[[queries]]
+id = "recall26.class-imbalance"
+q = "\"class imbalance\" \"machine learning\" in:description,readme"
+domains = ["imbalanced-learning", "machine-learning", "data-science"]
+methods = ["class-imbalance", "classification", "sampling"]
+
+[[queries]]
+id = "recall26.image-denoising"
+q = "\"image denoising\" in:description,readme"
+domains = ["computer-vision", "image-processing", "low-level-vision"]
+methods = ["image-denoising", "image-restoration", "self-supervised-learning"]
+
+[[queries]]
+id = "recall26.image-dehazing"
+q = "\"image dehazing\" in:description,readme"
+domains = ["computer-vision", "image-processing", "low-level-vision"]
+methods = ["image-dehazing", "image-restoration", "image-enhancement"]
+
+[[queries]]
+id = "recall26.low-light-enhancement"
+q = "\"low-light image enhancement\" in:description,readme"
+domains = ["computer-vision", "image-processing", "low-level-vision"]
+methods = ["low-light-enhancement", "image-restoration", "image-enhancement"]
+
+[[queries]]
+id = "recall26.visual-grounding"
+q = "\"visual grounding\" in:description,readme"
+domains = ["computer-vision", "multimodal-learning", "natural-language-processing"]
+methods = ["visual-grounding", "vision-language-learning", "referring-expression-comprehension"]
+
+[[queries]]
+id = "recall26.sign-language"
+q = "\"sign language\" in:description,readme"
+domains = ["accessibility", "computer-vision", "speech-and-language"]
+methods = ["sign-language-recognition", "sign-language-translation", "sequence-modeling"]
+
+[[queries]]
+id = "recall26.audio-language-model"
+q = "\"audio language model\" in:description,readme"
+domains = ["audio", "multimodal-learning", "speech-and-language"]
+methods = ["audio-language-modeling", "audio-understanding", "representation-learning"]
