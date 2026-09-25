@@ -270,6 +270,14 @@ def _current_view(args: argparse.Namespace) -> int:
     return 0
 
 
+def _read_jsonl(path: Path) -> Any:
+    """Yield JSONL rows without treating Unicode line separators as newlines."""
+    with path.open(encoding="utf-8") as stream:
+        for line in stream:
+            if line.strip():
+                yield json.loads(line)
+
+
 def _census(args: argparse.Namespace) -> int:
     if args.max_pages < 1:
         raise ValueError("--max-pages must be at least 1")
@@ -371,10 +379,7 @@ def _census_daily(args: argparse.Namespace, *, api: Any = None, downloader: Any 
     for candidate_page in delta_page_paths:
         if not candidate_page.exists():
             continue
-        for line in candidate_page.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
+        for row in _read_jsonl(candidate_page):
             repo_id = row.get("github_id")
             if isinstance(repo_id, int) and not isinstance(repo_id, bool):
                 observations[repo_id] = row
@@ -497,10 +502,7 @@ def _topic_breadth_daily(args: argparse.Namespace, *, api: Any = None, downloade
     coverage_paths = [Path(path) for path in result.get("coverage_paths", [])]
     observations: dict[int, dict[str, Any]] = {}
     for path in observation_paths:
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            row = json.loads(line)
+        for row in _read_jsonl(path):
             repo_id = row.get("github_id")
             if isinstance(repo_id, int) and not isinstance(repo_id, bool):
                 previous = observations.get(repo_id)
@@ -757,7 +759,8 @@ def _readme_enrich(args: argparse.Namespace, *, api: Any = None, downloader: Any
         downloaded.append(target)
     current_path = args.work_dir / "current-view.jsonl"
     materialize_current_view(downloaded, current_path, manifest_path=args.work_dir / "current-view.manifest.json")
-    rows = [json.loads(line) for line in current_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    with current_path.open(encoding="utf-8") as stream:
+        rows = [json.loads(line) for line in stream if line.strip()]
 
     stored = None
     if "state/readme-evidence.json" in paths:

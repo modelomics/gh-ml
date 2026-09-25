@@ -179,6 +179,18 @@ def test_papers_without_github_url_are_not_written_as_links(tmp_path):
     assert result["links_invalid"] == 0
 
 
+def test_resume_preserves_literal_unicode_separators_in_existing_sidecar(tmp_path):
+    sidecar = tmp_path / "paper-links.jsonl"
+    row = {"paper_id": "paper\u2028id\u2029tail", "normalized_repo": "a/b",
+           "link_status": "unresolved", "github_id": None}
+    sidecar.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    collect_paper_run(tmp_path, paper_api=PaperAPI({}), github=GitHub(), today_utc="2026-09-24",
+                      page_budget=0, recent_days=0)
+
+    assert lines(sidecar) == [row]
+
+
 def test_zero_budget_preserves_checkpoint_timestamp(tmp_path):
     from gh_ml.hf_papers_state import load_paper_checkpoint, write_paper_checkpoint
 

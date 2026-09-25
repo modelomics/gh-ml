@@ -30,7 +30,9 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
     result = []
-    for line in path.read_text(encoding="utf-8").splitlines():
+    # JSONL records are separated by LF. Unicode line/paragraph separators
+    # are valid characters inside JSON strings and must not split a record.
+    for line in path.read_text(encoding="utf-8").split("\n"):
         if line.strip():
             try:
                 value = json.loads(line)

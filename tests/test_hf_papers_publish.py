@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from gh_ml.hf_papers_publish import publish_paper_run
+from gh_ml.hf_papers_publish import _jsonl, publish_paper_run
 
 
 class FakeHub:
@@ -116,6 +116,12 @@ def test_zero_link_page_publishes_empty_links_coverage_and_state(tmp_path):
     assert not any(path.startswith("data/observations/") for path in files)
 
 
+def test_empty_jsonl_is_allowed_only_for_links():
+    _jsonl(b"", "paper_links", links=True)
+    with pytest.raises(ValueError, match="must not be empty"):
+        _jsonl(b"", "observations")
+
+
 def test_marker_on_pinned_base_is_a_conflict(tmp_path):
     hub, args = _inputs(tmp_path)
     hub.history["base"]["runs/hf-daily-papers-r1.manifest.json"] = b"{}"
@@ -183,3 +189,11 @@ def test_rejects_duplicate_link_keys(tmp_path):
     with pytest.raises(ValueError, match="valid JSON"):
         publish_paper_run(**args)
     assert not hub.commits
+
+
+def test_publishes_link_metadata_with_literal_unicode_separators(tmp_path):
+    row = {**_LINK, "paper_id": "paper\u2028id\u2029tail"}
+    payload = (json.dumps(row, ensure_ascii=False) + "\n").encode("utf-8")
+    hub, args = _inputs(tmp_path, links_bytes=payload)
+
+    assert publish_paper_run(**args) == "https://hf.test/commit"

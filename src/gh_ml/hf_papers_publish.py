@@ -50,7 +50,10 @@ def _jsonl(raw: bytes, label: str, *, links: bool = False) -> None:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"{label} must be UTF-8 JSONL") from exc
-    lines = text.splitlines()
+    # JSONL records are separated by LF. Keep U+2028/U+2029 inside JSON text.
+    lines = [] if not text else text.split("\n")
+    if lines and lines[-1] == "" and text.endswith("\n"):
+        lines.pop()
     if (not lines and links):
         return
     if not lines or any(not line.strip() for line in lines):

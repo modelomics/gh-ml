@@ -181,6 +181,17 @@ def test_topics_are_joined_as_text_and_unenriched_rows_cannot_be_candidates():
     assert projected["candidate_status"] == "unknown"
 
 
+def test_read_jsonl_preserves_unicode_line_separator_characters_in_descriptions(tmp_path):
+    descriptions = ["machine learning\u2028research", "machine learning\u2029research"]
+    path = tmp_path / "page.jsonl"
+    path.write_text("".join(json.dumps(rest_row(index, text=description), ensure_ascii=False) + "\n"
+                             for index, description in enumerate(descriptions, start=1)), encoding="utf-8")
+
+    rows = census._read_jsonl(path)
+
+    assert [row["description"] for row in rows] == descriptions
+
+
 def test_core_id_is_canonical_stable_numeric_id():
     row = census.project_census_row(rest_row(8731), None, observed_at="now", enrichment_status="unresolved")
     assert row["github_id"] == 8731
