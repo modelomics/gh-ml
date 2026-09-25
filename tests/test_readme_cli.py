@@ -105,6 +105,7 @@ def test_readme_cli_zero_records_skips_remote_write(tmp_path, monkeypatch):
     hub = FakeHub(["data/observations/a.jsonl"])
     source = tmp_path / "obs.jsonl"
     source.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(cli, "_hf_token", lambda _: "initial-token")
     monkeypatch.setattr(cli, "materialize_current_view", lambda _paths, output, **_: Path(output).write_text("{}\n"))
     monkeypatch.setattr(cli, "enrich_readmes", lambda *a, **kw: ([], {}, {"attempted": 0, "rate_limited": 0}))
     monkeypatch.setattr(cli, "publish_readme_run", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must skip empty publication")))
