@@ -10,7 +10,8 @@ import re
 import textwrap
 
 
-README_EVIDENCE_VERSION = "gh-ml-readme-evidence-v1"
+README_EVIDENCE_VERSION = "gh-ml-readme-evidence-v2"
+SUPPORTED_README_EVIDENCE_VERSIONS = frozenset({"gh-ml-readme-evidence-v1", README_EVIDENCE_VERSION})
 _MAX_INPUT_CHARS = 200_000
 
 # All labels in the returned schema are fixed enums. Keep patterns broad enough
@@ -57,7 +58,15 @@ _CONTRIBUTION = re.compile(
     r"module\b.{0,80}\bthat (?:turns|transforms|converts|enables|allows)\b)",
     re.I,
 )
-_COURSE = re.compile(r"\b(?:course|class|lecture|tutorial|homework|assignment|curriculum|bootcamp)\b", re.I)
+_COURSE = re.compile(
+    r"(?<!of )\bcourses?\b|\bcoursework\b|\b(?:class|course) projects?\b|"
+    r"\b(?:homework|assignments?|"
+    r"curricul(?:um|a)|bootcamps?)\b|"
+    r"\b(?:acknowledg(?:e?ments?|ed)|thanks?)\b.{0,120}\bengineering studies\b|"
+    r"\bengineering studies\b.{0,120}\b(?:acknowledg(?:e?ments?|ed)|thanks?)\b|"
+    r"\bconducted as part of engineering studies\b",
+    re.I,
+)
 _REPRODUCTION = re.compile(
     r"\b(?:faithful )?(?:re-?implementation|reproduction|replication)\b|"
     r"\b(?:reproduce|reproducing|replicate|replicating) (?:the |this )?(?:paper|work|results)\b",

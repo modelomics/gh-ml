@@ -573,7 +573,7 @@ def test_readme_evidence_latest_per_id_and_typed_parquet_columns(tmp_path):
     def ev(name, when, status, signal):
         return {"github_id": 9, "repository_name_at_fetch": name, "observed_at": when,
                 "readme_status": status, "readme_etag": None, "readme_blob_sha": None,
-                "readme_evidence_version": "gh-ml-readme-evidence-v1", "readme_signals": signal,
+                "readme_evidence_version": "gh-ml-readme-evidence-v2", "readme_signals": signal,
                 "readme_sections": ["installation"] if signal else [], "readme_checked_at": when}
 
     old = _write(tmp_path / "old.jsonl", [ev("old/name", "2026-01-02T00:00:00Z", "ok", ["ml-method-context"])])
@@ -594,15 +594,52 @@ def test_readme_evidence_latest_per_id_and_typed_parquet_columns(tmp_path):
     assert table.to_pylist()[0]["readme_signals"] == ["paper-reference"]
 
 
+def test_readme_evidence_projection_accepts_mixed_legacy_and_current_versions(tmp_path):
+    observations = _write(tmp_path / "obs.jsonl", [
+        _row(9, "2026-01-01T00:00:00Z", name="legacy/repo"),
+        _row(10, "2026-01-01T00:00:00Z", name="current/repo"),
+    ])
+    evidence = _write(tmp_path / "readme.jsonl", [
+        {"github_id": 9, "repository_name_at_fetch": "legacy/repo", "observed_at": "2026-01-02T00:00:00Z",
+         "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None,
+         "readme_evidence_version": "gh-ml-readme-evidence-v1", "readme_signals": ["ml-method-context"],
+         "readme_sections": ["method"], "readme_checked_at": None},
+        {"github_id": 10, "repository_name_at_fetch": "current/repo", "observed_at": "2026-01-02T00:00:00Z",
+         "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None,
+         "readme_evidence_version": "gh-ml-readme-evidence-v2", "readme_signals": ["paper-reference"],
+         "readme_sections": ["references"], "readme_checked_at": None},
+    ])
+    output = tmp_path / "view.jsonl"
+    report = materialize_current_view([observations], output, readme_evidence_paths=[evidence])
+    rows = _read(output)
+    assert [(row["github_id"], row["readme_evidence_version"], row["readme_signals"]) for row in rows] == [
+        (9, "gh-ml-readme-evidence-v1", ["ml-method-context"]),
+        (10, "gh-ml-readme-evidence-v2", ["paper-reference"]),
+    ]
+    assert report["readme_evidence_count"] == 2
+
+
+def test_readme_evidence_rejects_unknown_version(tmp_path):
+    obs = _write(tmp_path / "obs.jsonl", [_row(1, "2026-01-01T00:00:00Z")])
+    evidence = _write(tmp_path / "readme.jsonl", [{
+        "github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-02T00:00:00Z",
+        "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None,
+        "readme_evidence_version": "gh-ml-readme-evidence-v3", "readme_signals": [],
+        "readme_sections": [], "readme_checked_at": None,
+    }])
+    with pytest.raises(ValueError, match="unsupported readme_evidence_version"):
+        materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[evidence])
+
+
 @pytest.mark.parametrize("evidence", [
     {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
      "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "v1",
      "readme_signals": [], "readme_sections": [], "readme_checked_at": None, "readme_text": "private body"},
     {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
-     "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v1",
+     "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v2",
      "readme_signals": ["some freeform project text"], "readme_sections": [], "readme_checked_at": None},
     {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-01T00:00:00Z",
-     "readme_status": "missing", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v1",
+     "readme_status": "missing", "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "gh-ml-readme-evidence-v2",
      "readme_signals": ["ml-method-context"], "readme_sections": [], "readme_checked_at": None},
     {"github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "bad", "readme_status": "ok",
      "readme_etag": None, "readme_blob_sha": None, "readme_evidence_version": "v1",
@@ -620,7 +657,7 @@ def test_missing_readme_status_cannot_promote_repository(tmp_path):
     missing = _write(tmp_path / "readme.jsonl", [{
         "github_id": 1, "repository_name_at_fetch": "small-project", "observed_at": "2026-01-02T00:00:00Z",
         "readme_status": "missing", "readme_etag": None, "readme_blob_sha": None,
-        "readme_evidence_version": "gh-ml-readme-evidence-v1", "readme_signals": [], "readme_sections": [],
+        "readme_evidence_version": "gh-ml-readme-evidence-v2", "readme_signals": [], "readme_sections": [],
         "readme_checked_at": None,
     }])
     materialize_current_view([obs], tmp_path / "view.jsonl", readme_evidence_paths=[missing])
@@ -634,7 +671,7 @@ def test_rename_makes_previous_readme_evidence_inactive_by_name(tmp_path):
     previous_name = _write(tmp_path / "readme.jsonl", [{
         "github_id": 22, "repository_name_at_fetch": "Owner/old-name", "observed_at": "2026-01-02T00:00:00Z",
         "readme_status": "ok", "readme_etag": "etag", "readme_blob_sha": "blob",
-        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_evidence_version": "gh-ml-readme-evidence-v2",
         "readme_signals": ["ml-method-context", "method-contribution", "paper-code-relationship"],
         "readme_sections": ["method"], "readme_checked_at": "2026-01-02T00:00:00Z",
     }])
