@@ -22,7 +22,7 @@ Each invocation writes its own run directory below `--work-dir`. `--no-publish` 
 
 ## Projection and candidate eligibility
 
-The current-view projection aggregates a sorted union of `paper_ids` across raw observations for each GitHub repository ID. This association is provenance only: it is not an official implementation assertion, evidence of authorship, or novelty proof. The strict `ml-contribution-v4` selector governs inclusion in `current`; an unverified Daily Papers link alone cannot make a repository an included row.
+The current-view projection aggregates a sorted union of `paper_ids` across raw observations for each GitHub repository ID. This association is provenance only: it is not an official implementation assertion, evidence of authorship, or novelty proof. The strict `ml-contribution-v5` selector governs inclusion in `current`; an unverified Daily Papers link alone cannot make a repository an included row.
 
 Under candidate rule `ml-candidate-v3`, a linked paper ID can satisfy the paper association part of eligibility for a `review` row only when repository-owned method and description/evidence requirements are also met. This can retain a qualified row in `candidates` for human review. Hard-negative screens and the other candidate requirements still apply. Neither candidate eligibility nor the associated paper ID verifies the repository's claims.
 
