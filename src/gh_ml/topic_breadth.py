@@ -17,9 +17,9 @@ from .github import repository_from_graphql
 from .schema import observation_from_repository
 from .topic_breadth_state import reconcile_topic_checkpoint
 
-_HEAD_QUERY = """query($name:String!, $after:String) {
+_HEAD_QUERY = """query($name:String!, $after:String, $first:Int!) {
   topic(name:$name) {
-    repositories(first:100,after:$after,orderBy:{field:UPDATED_AT,direction:DESC}) {
+    repositories(first:$first,after:$after,orderBy:{field:UPDATED_AT,direction:DESC}) {
       edges { cursor node { databaseId nameWithOwner url description homepageUrl
         primaryLanguage { name } licenseInfo { spdxId key name }
         stargazerCount forkCount createdAt pushedAt updatedAt isArchived isFork } }
@@ -29,9 +29,9 @@ _HEAD_QUERY = """query($name:String!, $after:String) {
   rateLimit { cost remaining resetAt }
 }"""
 
-_QUERY = """query($name:String!, $after:String) {
+_QUERY = """query($name:String!, $after:String, $first:Int!) {
   topic(name:$name) {
-    repositories(first:100,after:$after) {
+    repositories(first:$first,after:$after) {
       edges { cursor node { databaseId nameWithOwner url description homepageUrl
         primaryLanguage { name } licenseInfo { spdxId key name }
         repositoryTopics(first:20) { nodes { topic { name } } }
@@ -52,6 +52,7 @@ _GRAPHQL_NONTRANSIENT_TYPES = {
 _GRAPHQL_NONTRANSIENT_PATH_ROOTS = {"__schema", "__type", "rateLimit", "viewer"}
 _GRAPHQL_PAYLOAD_ATTEMPTS = 3
 _GRAPHQL_PAYLOAD_RETRY_DELAYS = (0.25, 0.5)
+_GRAPHQL_PAGE_SIZES = (100, 50, 25, 10)
 
 
 def _graphql_error_summary(errors: Any) -> str:
@@ -228,15 +229,28 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
         nonlocal rate_remaining, pages_fetched, observations_written
         query = _HEAD_QUERY if head_only else _QUERY
         payload = None
-        for attempt in range(_GRAPHQL_PAYLOAD_ATTEMPTS):
-            payload, _headers = client.graphql(query, {"name": slug, "after": after})
-            if not isinstance(payload, dict):
+        requested_page_size = _GRAPHQL_PAGE_SIZES[0]
+        page_size_fallback = False
+        for page_size_index, page_size in enumerate(_GRAPHQL_PAGE_SIZES):
+            requested_page_size = page_size
+            for attempt in range(_GRAPHQL_PAYLOAD_ATTEMPTS):
+                payload, _headers = client.graphql(
+                    query, {"name": slug, "after": after, "first": page_size})
+                if not isinstance(payload, dict):
+                    break
+                errors = payload.get("errors")
+                if not errors or not _retryable_topic_payload_errors(errors):
+                    break
+                if attempt + 1 < _GRAPHQL_PAYLOAD_ATTEMPTS:
+                    retry_sleeper(_GRAPHQL_PAYLOAD_RETRY_DELAYS[attempt])
+            if (isinstance(payload, dict) and not payload.get("errors")) or (
+                    not isinstance(payload, dict)):
                 break
-            errors = payload.get("errors")
-            if not errors or not _retryable_topic_payload_errors(errors):
+            if not _retryable_topic_payload_errors(payload.get("errors")):
                 break
-            if attempt + 1 < _GRAPHQL_PAYLOAD_ATTEMPTS:
-                retry_sleeper(_GRAPHQL_PAYLOAD_RETRY_DELAYS[attempt])
+            if page_size_index + 1 == len(_GRAPHQL_PAGE_SIZES):
+                break
+            page_size_fallback = True
         if not isinstance(payload, dict):
             raise ValueError("invalid GraphQL response")
         if payload.get("errors"):
@@ -296,6 +310,8 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
         coverage_path = root / "coverage" / f"{stem}.json"
         coverage = {"topic": slug, "sweep": state["sweep"], "page_index": state["page_index"],
                     "observed_at": stamp, "head_only": head_only,
+                    "requested_page_size": requested_page_size,
+                    "page_size_fallback": page_size_fallback,
                     "repositories_seen": len(edges), "unique_repositories": len(seen_ids),
                     "forks_omitted": forks, "observations_written": len(page_rows),
                     "has_next_page": has_next, "end_cursor": end_cursor,

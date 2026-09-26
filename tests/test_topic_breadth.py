@@ -60,7 +60,8 @@ def test_round_robin_emits_queryless_rows_and_omits_forks(tmp_path):
     assert [variables["name"] for _, variables in client.calls] == ["a", "b"]
     assert [variables["after"] for _, variables in client.calls] == [None, None]
     query = client.calls[0][0]
-    assert "repositories(first:100,after:$after)" in query
+    assert "repositories(first:$first,after:$after)" in query
+    assert client.calls[0][1]["first"] == 100
     assert "orderBy:" not in query
     assert "repositoryTopics(first:20)" in query
     assert "stargazerCount forkCount createdAt pushedAt updatedAt isArchived isFork" in query
@@ -157,7 +158,7 @@ def test_graphql_error_reports_safe_context_without_advancing_state(tmp_path):
         "type": "FORBIDDEN", "path": ["topic", "repositories", "edges", 0, "node"],
         "message": "private server response containing unsafe details",
     }]}
-    client = FakeClient([failed, failed, failed])
+    client = FakeClient([failed] * 12)
     with pytest.raises(ValueError, match=r"topic a \(sweep page 0\): FORBIDDEN at topic.repositories.edges.0.node") as error:
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-24T00:00:00Z")
@@ -204,14 +205,13 @@ def test_transient_deep_edge_payload_error_retries_then_advances_cursor(tmp_path
     assert result["pages_fetched"] == 1
     assert len(client.calls) == 4
     assert sleeps == [0.25]
-    assert client.calls[2][1] == client.calls[3][1] == {"name": "a", "after": "cursor-1"}
+    assert client.calls[2][1] == client.calls[3][1] == {"name": "a", "after": "cursor-1", "first": 100}
     assert state["after"] == "cursor-2"
     assert state["page_index"] == 2
 
 
 def test_persistent_edge_payload_error_preserves_checkpoint_and_artifacts(tmp_path):
-    client = FakeClient([response("a", ids=[1], has_next=True), edge_payload_error(),
-                         edge_payload_error(), edge_payload_error()])
+    client = FakeClient([response("a", ids=[1], has_next=True), *([edge_payload_error()] * 12)])
     collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                           observed_at="2026-09-24T23:00:00Z")
     checkpoint_before = (tmp_path / "checkpoint.json").read_text()
@@ -221,8 +221,8 @@ def test_persistent_edge_payload_error_preserves_checkpoint_and_artifacts(tmp_pa
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
     assert "private server response" not in str(error.value)
-    assert len(client.calls) == 4
-    assert sleeps == [0.25, 0.5]
+    assert len(client.calls) == 13
+    assert sleeps == [0.25, 0.5] * 4
     assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
     assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
 
@@ -248,7 +248,7 @@ def test_unknown_head_payload_error_retries_then_succeeds(tmp_path):
 
 def test_persistent_unknown_head_payload_error_preserves_checkpoint_and_artifacts(tmp_path):
     unknown = {"errors": [{"message": "private server response containing unsafe details"}]}
-    client = FakeClient([response("a", ids=[1], has_next=True), unknown, unknown, unknown])
+    client = FakeClient([response("a", ids=[1], has_next=True), *([unknown] * 12)])
     collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                           observed_at="2026-09-24T23:00:00Z")
     checkpoint_before = (tmp_path / "checkpoint.json").read_text()
@@ -258,10 +258,76 @@ def test_persistent_unknown_head_payload_error_preserves_checkpoint_and_artifact
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
     assert "private server response" not in str(error.value)
-    assert len(client.calls) == 4
-    assert sleeps == [0.25, 0.5]
+    assert len(client.calls) == 13
+    assert sleeps == [0.25, 0.5] * 4
     assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
     assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
+
+
+@pytest.mark.parametrize("failure", [
+    {"errors": [{"message": "sanitized unknown"}]},
+    edge_payload_error(edge_index=53),
+])
+def test_retryable_payload_error_falls_back_to_smaller_page_size(tmp_path, failure):
+    # First page advances the scan. The next request fails at size 100, then
+    # succeeds at size 50 on the exact same cursor.
+    client = FakeClient([
+        response("a", ids=[1], has_next=True),
+        failure, failure, failure,
+        response("a", ids=[2], has_next=True),
+    ])
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-24T00:00:00Z")
+    sleeps = []
+    result = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                                   observed_at="2026-09-24T01:00:00Z", retry_sleeper=sleeps.append)
+    assert result["pages_fetched"] == 1
+    deep_calls = client.calls[1:]
+    assert [call[1]["first"] for call in deep_calls] == [100, 100, 100, 50]
+    assert all(call[1]["after"] == "cursor-1" for call in deep_calls)
+    assert sleeps == [0.25, 0.5]
+    coverage = json.loads(result["coverage_paths"][0].read_text())
+    assert coverage["requested_page_size"] == 50
+    assert coverage["page_size_fallback"] is True
+    state = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"]
+    assert state["after"] == "cursor-2"
+    assert state["page_index"] == 2
+
+
+def test_first_page_unknown_error_falls_back_and_records_actual_page_size(tmp_path):
+    unknown = {"errors": [{"message": "sanitized unknown"}]}
+    client = FakeClient([unknown, unknown, unknown, response("a", ids=[7])])
+    result = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                                   observed_at="2026-09-24T00:00:00Z")
+    assert [call[1]["first"] for call in client.calls] == [100, 100, 100, 50]
+    coverage = json.loads(result["coverage_paths"][0].read_text())
+    assert coverage["requested_page_size"] == 50
+    assert coverage["page_size_fallback"] is True
+    assert coverage["repositories_seen"] == 1
+
+
+def test_all_page_size_fallbacks_fail_without_writing_or_advancing(tmp_path):
+    unknown = {"errors": [{"message": "sanitized unknown"}]}
+    client = FakeClient([response("a", ids=[1], has_next=True), *([unknown] * 12)])
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-24T23:00:00Z")
+    checkpoint_before = (tmp_path / "checkpoint.json").read_text()
+    artifacts_before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
+    with pytest.raises(ValueError, match=r"topic a \(sweep page 1\): unknown"):
+        collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                              observed_at="2026-09-24T01:00:00Z")
+    assert [call[1]["first"] for call in client.calls[1:]] == [100] * 3 + [50] * 3 + [25] * 3 + [10] * 3
+    assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
+
+
+def test_hard_error_does_not_try_smaller_page_sizes(tmp_path):
+    client = FakeClient([{"errors": [{"type": "FORBIDDEN"}]}])
+    with pytest.raises(ValueError):
+        collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                              observed_at="2026-09-24T00:00:00Z")
+    assert len(client.calls) == 1
+    assert client.calls[0][1]["first"] == 100
 
 
 @pytest.mark.parametrize("error", [
@@ -321,9 +387,9 @@ def test_daily_head_finds_new_repo_during_month_cooldown_and_preserves_deep_curs
     before = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"].copy()
     second = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                                    observed_at="2026-09-25T00:00:00Z")
-    assert client.calls[1][1] == {"name": "a", "after": None}
+    assert client.calls[1][1] == {"name": "a", "after": None, "first": 100}
     head_query = client.calls[1][0]
-    assert "repositories(first:100,after:$after,orderBy:{field:UPDATED_AT,direction:DESC})" in head_query
+    assert "repositories(first:$first,after:$after,orderBy:{field:UPDATED_AT,direction:DESC})" in head_query
     assert "repositoryTopics" not in head_query
     assert second["observation_paths"][0].name == "a-head-2026-09-25.jsonl"
     row = json.loads(second["observation_paths"][0].read_text().splitlines()[0])
