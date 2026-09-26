@@ -257,8 +257,105 @@ def test_method_and_substantive_contribution_are_required_for_include() -> None:
         "stargazers_count": 0,
     })
     assert result["selection_status"] == "include"
-    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v4"
+    assert result["selection_version"] == SELECTION_VERSION == "ml-contribution-v5"
     assert result["selection_signals"] == sorted(result["selection_signals"])
+
+
+def test_exploring_named_existing_time_series_models_stays_review() -> None:
+    result = assess_repository({
+        "github_id": 744886027,
+        "name": "MicahSee/Novel-Time-Series-Models",
+        "description": (
+            "Exploring various novel model architectures (such as TimesNet, "
+            "N-BEATS, and N-HiTS) for time series forecasting of stock prices. "
+            "Tests the effect of various model architectures on stock prices."
+        ),
+    })
+    assert result["selection_status"] == "review"
+    assert result["selection_reason"] == "ml-relevance-without-clear-contribution"
+
+
+def test_separate_novel_method_proposal_survives_existing_model_comparison() -> None:
+    result = assess_repository({
+        "name": "lab/Novel-Time-Series-Models",
+        "description": (
+            "We compare existing models such as N-BEATS. "
+            "We propose a novel attention method for forecasting."
+        ),
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "specific-method-with-novelty-claim"
+
+
+def test_course_readme_novelty_claim_stays_review_without_paper_evidence() -> None:
+    result = assess_repository({
+        "github_id": 919381676,
+        "name": "Marysoulka/Graph-Neural-Network-Pooling-by-Edge-Cut",
+        "description": "Novel edge-based pooling technique for graph neural networks.",
+        "readme_status": "ok",
+        "readme_signals": ["course-cue", "method-contribution", "ml-method-context"],
+        "paper_ids": [],
+    })
+    assert result["selection_status"] == "review"
+    assert result["selection_reason"] == "course-readme-without-official-paper-evidence"
+
+
+def test_course_readme_with_official_paper_evidence_can_still_include() -> None:
+    result = assess_repository({
+        "name": "lab/official-new-method",
+        "description": "Official implementation of our novel graph neural network method (ICLR 2025).",
+        "readme_status": "ok",
+        "readme_signals": ["course-cue", "method-contribution", "ml-method-context"],
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "official-paper-method-implementation"
+
+
+def test_course_readme_paper_references_preserve_enhancer_bert() -> None:
+    result = assess_repository({
+        "github_id": 474354460,
+        "name": "lhy0322/iEnhancer-BERT",
+        "description": (
+            "iEnhancer-BERT: A novel transfer learning architecture based on "
+            "DNA-language model for identifying enhancers and their strength"
+        ),
+        "readme_status": "ok",
+        "readme_signals": ["course-cue", "paper-reference", "ml-method-context", "method-contribution"],
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "specific-method-with-novelty-claim"
+
+
+def test_course_readme_paper_code_relation_preserves_novel_method() -> None:
+    result = assess_repository({
+        "name": "lab/novel-method-paper",
+        "description": "We propose a novel attention method for sequence modeling.",
+        "readme_status": "ok",
+        "readme_signals": ["course-cue", "paper-code-relationship", "ml-method-context", "method-contribution"],
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "specific-method-with-novelty-claim"
+
+
+def test_course_readme_paper_references_preserve_overlap_mamba() -> None:
+    result = assess_repository({
+        "github_id": 795089156,
+        "name": "SCNU-RISLAB/OverlapMamba",
+        "description": "OverlapMamba: Novel Shift State Space Model for LiDAR-based Place Recognition",
+        "readme_status": "ok",
+        "readme_signals": ["course-cue", "paper-reference", "ml-method-context", "method-contribution"],
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "specific-method-with-novelty-claim"
+
+
+def test_non_course_novel_method_still_includes() -> None:
+    result = assess_repository({
+        "name": "lab/novel-edge-pooling",
+        "description": "We propose a novel edge-based pooling method for graph neural networks.",
+    })
+    assert result["selection_status"] == "include"
+    assert result["selection_reason"] == "specific-method-with-novelty-claim"
 
 
 def test_generic_ml_or_query_match_alone_never_includes() -> None:

@@ -11,13 +11,14 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 
-SELECTION_VERSION = "ml-contribution-v4"
+SELECTION_VERSION = "ml-contribution-v5"
 
 _METHOD_PATTERNS = (
     r"\btransformers?\b", r"\bdiffusion(?: models?)?\b", r"\bflow matching\b",
     r"\bmixture of experts\b", r"\bstate.space models?\b", r"\bmamba\b",
     r"\bretrieval.augmented generation\b", r"\brag\b",
     r"\bcontrastive learning\b", r"\bself.supervised learning\b",
+    r"\battention (?:mechanisms?|methods?|architectures?)\b",
     r"\bgraph neural networks?\b", r"\bneural operators?\b",
     r"\breinforcement learning\b", r"\bfederated learning\b",
     r"\bdistillation\b", r"\bpruning\b", r"\btest.time adaptation\b",
@@ -53,6 +54,13 @@ _NOVEL_METHOD_PHRASE = re.compile(
     r"\b(?:new|novel)(?:[\s,/-]+[a-z0-9]+){0,3}[\s,/-]+"
     r"(?:architectures?|methods?|models?|techniques?|algorithms?|polic(?:y|ies)|"
     r"networks?|operators?|optimizers?)\b", re.I,
+)
+_EXISTING_MODEL_EXPLORATION = re.compile(
+    r"\b(?:explor(?:e|es|ed|ing)|compar(?:e|es|ed|ing|ison)|"
+    r"benchmark(?:s|ed|ing)?|evaluat(?:e|es|ed|ing))\b.{0,100}"
+    r"\b(?:such as|including|e\.g\.)\b.{0,100}"
+    r"\b(?:timesnet|n[\s-]?beats|n[\s-]?hits)\b",
+    re.I,
 )
 _CONTRIBUTION = re.compile(
     r"\b(?:implement(?:s|ed|ing|ation)?|train(?:s|ed|ing)?|fine.?tun(?:e|es|ed|ing)|"
@@ -128,6 +136,10 @@ def _strings(value: Any) -> list[str]:
 
 def _has_method_specific_novelty(sentence: str) -> bool:
     """Require new/novel to modify a method noun near an ML method cue."""
+    # Naming established architectures as examples in an exploration or
+    # comparison does not make the study's subject a proposed novel method.
+    if _EXISTING_MODEL_EXPLORATION.search(sentence):
+        return False
     claim = _NOVEL_METHOD_PHRASE.search(sentence)
     if claim is None:
         return False
@@ -202,10 +214,36 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
     substantive = bool(_CONTRIBUTION.search(text))
     # Require the novelty claim and method cue in the same field and sentence;
     # a method topic cannot combine with an unrelated description such as CLI.
-    method_novelty = any(
+    name_novelty_fields = [
+        " ".join(_strings(row.get(key)))
+        for key in ("name", "full_name")
+        if _strings(row.get(key))
+    ]
+    description_novelty_fields = [" ".join(_strings(row.get("description")))]
+    name_novelty = any(
         _has_method_specific_novelty(sentence)
-        for field in novelty_fields
+        for field in name_novelty_fields
         for sentence in re.split(r"[.!?;\n]+", field.casefold().replace("-", " ").replace("_", " "))
+    )
+    description_novelty_sentences = [
+        sentence
+        for field in description_novelty_fields
+        for sentence in re.split(r"[.!?;\n]+", field.casefold().replace("-", " ").replace("_", " "))
+    ]
+    description_novelty = any(
+        _has_method_specific_novelty(sentence)
+        for sentence in description_novelty_sentences
+    )
+    description_explores_existing_models = any(
+        _EXISTING_MODEL_EXPLORATION.search(sentence)
+        for sentence in description_novelty_sentences
+    )
+    # A repository title's novelty wording is insufficient when its only
+    # description describes exploring established models. A separate
+    # method-specific proposal sentence in the description remains qualifying.
+    method_novelty = description_novelty or (
+        name_novelty
+        and not description_explores_existing_models
     )
     description = " ".join(_strings(row.get("description"))).strip()
     description_sentences = re.split(
@@ -303,6 +341,14 @@ def assess_repository(row: Mapping[str, Any]) -> dict[str, Any]:
         return result("exclude", "course-or-utility-repository")
     if (course_cue or utility_cue) and method_novelty:
         return result("review", "course-or-utility-with-novel-method-cue")
+    if (
+        method_novelty
+        and readme_active
+        and "course-cue" in readme_signals
+        and not official_paper_code
+        and not ({"paper-reference", "paper-code-relationship", "official-implementation-claim"} & readme_signals)
+    ):
+        return result("review", "course-readme-without-official-paper-evidence")
     if review_only_cue:
         return result("review", "overview-reproduction-or-dataset")
     if strong_contribution:
