@@ -32,6 +32,12 @@ def response(topic: str | None, *, ids=(), has_next=False, cursor=None, remainin
     return {"data": {"topic": node, "rateLimit": {"remaining": remaining, "cost": cost}}}
 
 
+def edge_payload_error(error_type="FORBIDDEN", edge_index=53):
+    return {"errors": [{"type": error_type,
+                        "path": ["topic", "repositories", "edges", edge_index, "node"],
+                        "message": "private server response containing unsafe details"}]}
+
+
 class FakeClient:
     def __init__(self, scripted):
         self.scripted = list(scripted)
@@ -151,7 +157,7 @@ def test_graphql_error_reports_safe_context_without_advancing_state(tmp_path):
         "type": "FORBIDDEN", "path": ["topic", "repositories", "edges", 0, "node"],
         "message": "private server response containing unsafe details",
     }]}
-    client = FakeClient([failed])
+    client = FakeClient([failed, failed, failed])
     with pytest.raises(ValueError, match=r"topic a \(sweep page 0\): FORBIDDEN at topic.repositories.edges.0.node") as error:
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-24T00:00:00Z")
@@ -159,6 +165,119 @@ def test_graphql_error_reports_safe_context_without_advancing_state(tmp_path):
     checkpoint = json.loads((tmp_path / "checkpoint.json").read_text())
     assert checkpoint["topics"]["a"]["after"] is None
     assert checkpoint["topics"]["a"]["page_index"] == 0
+    assert not (tmp_path / "pages").exists()
+
+
+def test_transient_head_edge_payload_error_retries_then_succeeds_without_changing_deep_cursor(tmp_path):
+    head = response("a", ids=[9])
+    del head["data"]["topic"]["repositories"]["edges"][0]["node"]["repositoryTopics"]
+    client = FakeClient([response("a", ids=[1], has_next=True), edge_payload_error(), head])
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-24T23:00:00Z")
+    before = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"].copy()
+    sleeps = []
+    result = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                                   observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
+    after = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"]
+    assert result["pages_fetched"] == 1
+    assert len(client.calls) == 3
+    assert sleeps == [0.25]
+    assert before["after"] == after["after"] == "cursor-1"
+    assert before["page_index"] == after["page_index"] == 1
+    assert after["head_checked_at"] == "2026-09-25T00:00:00Z"
+
+
+def test_transient_deep_edge_payload_error_retries_then_advances_cursor(tmp_path):
+    client = FakeClient([
+        response("a", ids=[1], has_next=True),  # initial page
+        response("a", ids=[9]),               # next day head refresh
+        edge_payload_error(edge_index=0), response("a", ids=[2], has_next=True),
+    ])
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-24T23:00:00Z")
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-25T00:00:00Z")
+    sleeps = []
+    result = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                                   observed_at="2026-09-25T01:00:00Z", retry_sleeper=sleeps.append)
+    state = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"]
+    assert result["pages_fetched"] == 1
+    assert len(client.calls) == 4
+    assert sleeps == [0.25]
+    assert client.calls[2][1] == client.calls[3][1] == {"name": "a", "after": "cursor-1"}
+    assert state["after"] == "cursor-2"
+    assert state["page_index"] == 2
+
+
+def test_persistent_edge_payload_error_preserves_checkpoint_and_artifacts(tmp_path):
+    client = FakeClient([response("a", ids=[1], has_next=True), edge_payload_error(),
+                         edge_payload_error(), edge_payload_error()])
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-24T23:00:00Z")
+    checkpoint_before = (tmp_path / "checkpoint.json").read_text()
+    artifacts_before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
+    sleeps = []
+    with pytest.raises(ValueError, match=r"FORBIDDEN at topic.repositories.edges.53.node") as error:
+        collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                              observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
+    assert "private server response" not in str(error.value)
+    assert len(client.calls) == 4
+    assert sleeps == [0.25, 0.5]
+    assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
+
+
+def test_unknown_head_payload_error_retries_then_succeeds(tmp_path):
+    head = response("a", ids=[9])
+    del head["data"]["topic"]["repositories"]["edges"][0]["node"]["repositoryTopics"]
+    unknown = {"errors": [{"message": "private server response containing unsafe details"}]}
+    client = FakeClient([response("a", ids=[1], has_next=True), unknown, head])
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-24T23:00:00Z")
+    sleeps = []
+    result = collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                                   observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
+    state = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"]
+    assert result["pages_fetched"] == 1
+    assert len(client.calls) == 3
+    assert sleeps == [0.25]
+    assert state["after"] == "cursor-1"
+    assert state["page_index"] == 1
+    assert state["head_checked_at"] == "2026-09-25T00:00:00Z"
+
+
+def test_persistent_unknown_head_payload_error_preserves_checkpoint_and_artifacts(tmp_path):
+    unknown = {"errors": [{"message": "private server response containing unsafe details"}]}
+    client = FakeClient([response("a", ids=[1], has_next=True), unknown, unknown, unknown])
+    collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                          observed_at="2026-09-24T23:00:00Z")
+    checkpoint_before = (tmp_path / "checkpoint.json").read_text()
+    artifacts_before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
+    sleeps = []
+    with pytest.raises(ValueError, match=r"topic a \(head refresh\): unknown") as error:
+        collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                              observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
+    assert "private server response" not in str(error.value)
+    assert len(client.calls) == 4
+    assert sleeps == [0.25, 0.5]
+    assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
+    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
+
+
+@pytest.mark.parametrize("error", [
+    {"type": "UNAUTHORIZED", "path": ["topic", "repositories", "edges", 0, "node"]},
+    {"type": "RATE_LIMITED", "path": ["topic", "repositories", "edges", 0, "node"]},
+    {"type": "GRAPHQL_VALIDATION_FAILED", "path": ["topic", "repositories", "edges", 0, "node"]},
+    {"type": "BAD_CREDENTIALS"},
+    {"type": "FORBIDDEN"},
+    {"type": "UNKNOWN", "path": ["rateLimit", "remaining"]},
+])
+def test_request_wide_auth_rate_and_schema_errors_are_not_retried(tmp_path, error):
+    client = FakeClient([{"errors": [error]}])
+    with pytest.raises(ValueError):
+        collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
+                              observed_at="2026-09-24T00:00:00Z")
+    assert len(client.calls) == 1
     assert not (tmp_path / "pages").exists()
 
 
