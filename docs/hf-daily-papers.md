@@ -6,7 +6,9 @@ The `hf-papers-daily` collector uses Hugging Face Daily Papers as a bounded sour
 
 The default page budget is 20 Daily Papers pages per run, with a page size of 100 papers. The budget can be configured from 1 to 100. By default, the collector replays the most recent three days, taking at most five pages per day, then spends remaining capacity on its historical cursor beginning at 2023-01-01. When historical work is due, one page is reserved for it before recent replay. The cursor advances through pages and dates as pages are read; coverage reports recent and historical pages, truncation, and whether historical collection reached the current date. A bounded run is not a completeness guarantee: caps, pending-link capacity, API errors, and the configured budget can leave work for later runs or exclude papers outside the configured historical range.
 
-Resolved repository metadata is looked up through GitHub GraphQL batches of up to 50 repositories. The default is at most four batches (200 repository lookup attempts) per run; the command permits 1 to 40 batches. Unresolved assertions remain pending for future resolution attempts. Daily Papers pages and GitHub GraphQL lookups have separate budgets.
+The Daily Papers list endpoint does not provide the `githubRepo` field, so the collector uses a separate bounded queue of individual paper detail requests to hydrate that field. The default detail-request budget is 400 per run; `--paper-detail-budget` accepts 0 to 1000, with zero disabling hydration for that run. Detail work has its own durable queue and checkpoint, so queued papers can be retried or continued by later runs. Coverage records detail attempts, successful hydrations, papers with and without links, and remaining queue size. Daily Papers page requests, individual paper detail requests, and GitHub GraphQL repository lookup batches have separate budgets; increasing one does not increase the others.
+
+Resolved repository metadata is looked up through GitHub GraphQL batches of up to 50 repositories. The default is at most four batches (200 repository lookup attempts) per run; the command permits 1 to 40 batches. Unresolved assertions remain pending for future resolution attempts. The run coverage reports page, detail, and GitHub lookup budgets and their respective counts. Every submitted paper-to-repository association remains unverified, including associations found through detail hydration; it is not evidence of an official implementation, authorship, or novelty.
 
 The collector's durable checkpoint is `state/hf-daily-papers.json`. Published paper-link assertions are stored separately as dated JSONL files under `data/paper-links/YYYY/MM/DD/`; source coverage is stored under `coverage/`. Linked repository observations are appended under `data/observations/` when collection produces them. This separation preserves the source assertion and its provenance independently from derived repository views. The scheduled workflow configuration and local command do not imply that a remote run has executed or published.
 
@@ -16,7 +18,7 @@ For a local run without Hugging Face publication, use:
 uv run gh-ml hf-papers-daily --work-dir /tmp/gh-ml-hf-papers --no-publish
 ```
 
-Each invocation writes its own run directory below `--work-dir`. `--no-publish` starts without downloading the Hub checkpoint, so it is useful for a bounded local collection but does not resume from remote state. To adjust the paper-page budget, pass `--max-pages N`; to adjust GitHub lookup capacity, pass `--github-batches N`.
+Each invocation writes its own run directory below `--work-dir`. `--no-publish` starts without downloading the Hub checkpoint, so it is useful for a bounded local collection but does not resume from remote state. Adjust paper-page capacity with `--max-pages N`, detail hydration with `--paper-detail-budget N`, and GitHub lookup capacity with `--github-batches N`.
 
 ## Projection and candidate eligibility
 
