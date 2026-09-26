@@ -11,13 +11,22 @@ def paper(pid, url):
 
 
 class PaperAPI:
-    def __init__(self, pages):
+    def __init__(self, pages, details=None, detail_errors=None):
         self.pages = pages
         self.calls = []
+        self.details = details or {}
+        self.detail_errors = set(detail_errors or ())
+        self.detail_calls = []
 
     def list_daily_papers(self, *, date, p, limit, token):
         self.calls.append((date, p, limit, token))
         return self.pages.get((date, p), [])
+
+    def paper_info(self, paper_id):
+        self.detail_calls.append(paper_id)
+        if paper_id in self.detail_errors:
+            raise TimeoutError("temporary detail failure")
+        return self.details.get(paper_id, SimpleNamespace(id=paper_id, github_repo=None))
 
 
 class GitHub:
@@ -95,6 +104,7 @@ def test_invalid_and_unresolved_links_stay_distinct_and_retry(tmp_path):
     assert rows[0]["paper_id"] == "null"
     assert first["links_invalid"] == 1
     assert first["pending"] == 1
+    assert api.detail_calls == ["bad"]
     gh.entries["x/y"] = repo(3, "x/y")
     second = collect_paper_run(tmp_path, paper_api=PaperAPI({}), github=gh, today_utc=d,
                                page_budget=0, paper_page_size=10, recent_days=0,
@@ -219,3 +229,124 @@ def test_historical_page_replays_when_pending_capacity_is_full(tmp_path):
     assert api.calls == [("2023-01-01", 0, 2, False)]
     saved = json.loads((tmp_path / "checkpoint.json").read_text())
     assert saved["historical"] == {"start_date": "2023-01-01", "date": "2023-01-01", "page": 0}
+
+
+def test_detail_hydration_resolves_missing_list_url_in_same_run(tmp_path):
+    d = "2026-09-24"
+    api = PaperAPI({(d, 0): [SimpleNamespace(id="paper-detail", title="SECRET")]},
+                   {"paper-detail": SimpleNamespace(github_repo="https://github.com/acme/model")})
+    gh = GitHub({"acme/model": repo(71, "acme/model")})
+    result = collect_paper_run(tmp_path, paper_api=api, github=gh, today_utc=d,
+                               page_budget=1, paper_detail_budget=1, recent_days=1,
+                               historical_start="2026-09-25")
+
+    assert api.detail_calls == ["paper-detail"]
+    assert gh.calls == [["acme/model"]]
+    assert result["papers_returned"] == 1
+    assert result["paper_details_attempted"] == 1
+    assert result["paper_details_with_url"] == 1
+    assert result["detail_pending"] == 0
+    observation = lines(tmp_path / "observations.jsonl")[0]
+    assert observation["github_id"] == 71
+    assert observation["paper_evidence"] == "unverified"
+    assert "SECRET" not in json.dumps(observation)
+
+
+def test_detail_budget_resumes_without_losing_or_duplicate_work(tmp_path):
+    d = "2026-09-24"
+    pages = {(d, 0): [SimpleNamespace(id=f"p{i}") for i in range(3)]}
+    details = {f"p{i}": SimpleNamespace(github_repo=f"https://github.com/o/r{i}") for i in range(3)}
+    api = PaperAPI(pages, details)
+    first = collect_paper_run(tmp_path, paper_api=api, github=GitHub(), today_utc=d,
+                              page_budget=1, paper_detail_budget=1, github_batch_budget=0,
+                              recent_days=1, historical_start="2026-09-25")
+    saved = json.loads((tmp_path / "checkpoint.json").read_text())
+    assert first["paper_details_attempted"] == 1
+    assert first["detail_pending"] == 2
+    assert saved["detail_after"] == {"paper_date": d, "paper_id": "p0"}
+    assert [item["paper_id"] for item in saved["detail_pending"]] == ["p1", "p2"]
+
+    second = collect_paper_run(tmp_path, paper_api=PaperAPI({}, details), github=GitHub(), today_utc=d,
+                               page_budget=0, paper_detail_budget=1, github_batch_budget=0,
+                               recent_days=0, historical_start="2026-09-25")
+    third = collect_paper_run(tmp_path, paper_api=PaperAPI({}, details), github=GitHub(), today_utc=d,
+                              page_budget=0, paper_detail_budget=5, github_batch_budget=0,
+                              recent_days=0, historical_start="2026-09-25")
+    assert second["paper_details_attempted"] == 1
+    assert third["paper_details_attempted"] == 1
+    assert third["detail_pending"] == 0
+    saved = json.loads((tmp_path / "checkpoint.json").read_text())
+    assert saved["pending"] and {item["paper_id"] for item in saved["pending"]} == {"p0", "p1", "p2"}
+    assert len({(item["paper_id"], item["normalized_repo"]) for item in saved["pending"]}) == 3
+
+
+def test_historical_cursor_does_not_advance_if_detail_ids_do_not_fit(tmp_path):
+    from gh_ml.hf_papers_state import load_paper_checkpoint, write_paper_checkpoint
+
+    state = load_paper_checkpoint(tmp_path, historical_start="2023-01-01")
+    state["detail_pending"] = [{"paper_id": f"p{i:04}", "paper_date": "2023-01-01", "attempts": 0}
+                               for i in range(4999)]
+    write_paper_checkpoint(tmp_path, state)
+    api = PaperAPI({("2023-01-01", 0): [SimpleNamespace(id="detail-a"), SimpleNamespace(id="detail-b")]})
+    result = collect_paper_run(tmp_path, paper_api=api, github=GitHub(), today_utc="2026-09-24",
+                               page_budget=1, paper_page_size=2, github_batch_budget=0, paper_detail_budget=0, recent_days=0,
+                               historical_start="2023-01-01")
+    saved = json.loads((tmp_path / "checkpoint.json").read_text())
+    assert result["historical_pages"] == 0
+    assert saved["historical"] == {"start_date": "2023-01-01", "date": "2023-01-01", "page": 0}
+    assert len(saved["detail_pending"]) == 4999
+    assert api.detail_calls == []
+
+
+def test_detail_api_errors_remain_queued_and_retry(tmp_path):
+    d = "2026-09-24"
+    list_api = PaperAPI({(d, 0): [SimpleNamespace(id="retry-me")]}, detail_errors={"retry-me"})
+    first = collect_paper_run(tmp_path, paper_api=list_api, github=GitHub(), today_utc=d,
+                              page_budget=1, paper_detail_budget=1, recent_days=1,
+                              historical_start="2026-09-25")
+    assert first["paper_details_errors"] == 1
+    assert first["detail_pending"] == 1
+    saved = json.loads((tmp_path / "checkpoint.json").read_text())
+    assert saved["detail_pending"][0]["attempts"] == 1
+
+    retry_api = PaperAPI({}, {"retry-me": SimpleNamespace(github_repo="https://github.com/o/retry")})
+    second = collect_paper_run(tmp_path, paper_api=retry_api, github=GitHub(), today_utc=d,
+                               page_budget=0, paper_detail_budget=1, github_batch_budget=0,
+                               recent_days=0, historical_start="2026-09-25")
+    assert retry_api.detail_calls == ["retry-me"]
+    assert second["detail_pending"] == 0
+    assert json.loads((tmp_path / "checkpoint.json").read_text())["pending"][0]["paper_id"] == "retry-me"
+
+
+def test_empty_detail_result_checked_once_per_day_then_rechecked(tmp_path):
+    d = "2026-09-24"
+    first_api = PaperAPI({(d, 0): [SimpleNamespace(id="no-link")]})
+    first = collect_paper_run(tmp_path, paper_api=first_api, github=GitHub(), today_utc=d,
+                              page_budget=1, paper_detail_budget=1, recent_days=1,
+                              historical_start="2026-09-25")
+    same_day_api = PaperAPI({(d, 0): [SimpleNamespace(id="no-link")]})
+    same_day = collect_paper_run(tmp_path, paper_api=same_day_api, github=GitHub(), today_utc=d,
+                                 page_budget=1, paper_detail_budget=1, recent_days=1,
+                                 historical_start="2026-09-25")
+    assert first_api.detail_calls == ["no-link"]
+    assert same_day_api.detail_calls == []
+    assert first["paper_details_without_url"] == 1
+    assert same_day["detail_pending"] == 0
+
+    next_day = "2026-09-25"
+    later_api = PaperAPI({(next_day, 0): [SimpleNamespace(id="no-link")]})
+    collect_paper_run(tmp_path, paper_api=later_api, github=GitHub(), today_utc=next_day,
+                      page_budget=1, paper_detail_budget=1, recent_days=1,
+                      historical_start="2026-09-25")
+    assert later_api.detail_calls == ["no-link"]
+
+
+def test_direct_list_link_skips_detail_lookup(tmp_path):
+    d = "2026-09-24"
+    api = PaperAPI({(d, 0): [paper("direct", "https://github.com/o/r")]})
+    result = collect_paper_run(tmp_path, paper_api=api, github=GitHub(), today_utc=d,
+                               page_budget=1, paper_detail_budget=5, github_batch_budget=0,
+                               recent_days=1, historical_start="2026-09-25")
+    assert api.detail_calls == []
+    assert result["paper_details_attempted"] == 0
+    assert result["pending"] == 1

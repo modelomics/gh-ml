@@ -13,7 +13,7 @@ from gh_ml import cli
 def _args(tmp_path: Path, **overrides):
     values = dict(
         repo="modelomics/gh-ml", work_dir=tmp_path / "work", max_pages=20,
-        github_batches=4, paper_page_size=100, recent_days=3, recent_page_cap=5,
+        github_batches=4, paper_detail_budget=400, paper_page_size=100, recent_days=3, recent_page_cap=5,
         historical_start="2023-01-01", github_token_env="GH", hf_token_env="HF",
         no_publish=False,
     )
@@ -84,7 +84,8 @@ def test_hf_papers_daily_pins_state_and_publishes_with_fresh_token(tmp_path, mon
     assert calls["collector"] == {
         "paper_api": "paper-api", "github": {"token": "github-token"},
         "today_utc": cli._utc_now().date().isoformat(), "page_budget": 20,
-        "github_batch_budget": 4, "paper_page_size": 100, "recent_days": 3,
+        "github_batch_budget": 4, "paper_detail_budget": 400,
+        "paper_page_size": 100, "recent_days": 3,
         "recent_page_cap": 5, "historical_start": "2023-01-01",
     }
     repo, token, publish_kwargs = calls["publish"]
@@ -112,10 +113,12 @@ def test_hf_papers_daily_no_publish_is_local_and_uses_bounded_settings(tmp_path,
     ) == 0
     assert captured["root"] == tmp_path / "work" / "local-run"
     assert captured["kwargs"]["page_budget"] == 20
+    assert captured["kwargs"]["paper_detail_budget"] == 400
 
 
 @pytest.mark.parametrize("field,value", [
     ("max_pages", 0), ("github_batches", 41), ("paper_page_size", 101),
+    ("paper_detail_budget", -1), ("paper_detail_budget", 1001),
     ("recent_days", 8), ("recent_page_cap", 0),
 ])
 def test_hf_papers_daily_rejects_out_of_range_budgets(tmp_path, monkeypatch, field, value):
@@ -129,7 +132,7 @@ def test_hf_papers_daily_rejects_out_of_range_budgets(tmp_path, monkeypatch, fie
 def test_hf_papers_daily_parser_defaults(tmp_path):
     args = cli._parser().parse_args(["hf-papers-daily", "--work-dir", str(tmp_path)])
     assert args.repo == "modelomics/gh-ml"
-    assert (args.max_pages, args.github_batches, args.paper_page_size) == (20, 4, 100)
+    assert (args.max_pages, args.github_batches, args.paper_detail_budget, args.paper_page_size) == (20, 4, 400, 100)
     assert (args.recent_days, args.recent_page_cap, args.historical_start) == (3, 5, "2023-01-01")
     assert not args.no_publish
 
@@ -149,6 +152,30 @@ def test_hf_papers_daily_fails_closed_on_paper_source_errors(tmp_path, monkeypat
             _args(tmp_path, no_publish=True), paper_api=object(),
             client_factory=lambda **kw: kw, collector=collect,
         )
+
+
+def test_hf_papers_daily_returns_error_when_all_detail_requests_fail(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_github_token", lambda _env: None)
+    monkeypatch.setattr(cli, "_run_id", lambda _now: "detail-errors")
+    _state_module(monkeypatch, serialize=lambda _root: b"changed")
+
+    def collect(root, **_kwargs):
+        _write_outputs(root, pages=1)
+        (root / "coverage.json").write_text(json.dumps({
+            "pages": 1, "api_errors": [], "paper_details_attempted": 2,
+            "paper_details_with_url": 0, "paper_details_errors": 2,
+            "detail_pending": 2,
+        }))
+        return {"pages": 1, "papers_seen": 0}
+
+    status = cli._hf_papers_daily(
+        _args(tmp_path, no_publish=True), paper_api=object(),
+        client_factory=lambda **kw: kw, collector=collect,
+    )
+
+    assert status == 2
+    assert "errors 2" in capsys.readouterr().out
+    assert (tmp_path / "work" / "detail-errors" / "coverage.json").is_file()
 
 
 def test_hf_papers_daily_publishes_no_link_historical_page(tmp_path, monkeypatch):

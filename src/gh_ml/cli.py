@@ -223,6 +223,7 @@ def _parser() -> argparse.ArgumentParser:
     papers_daily.add_argument("--work-dir", type=Path, required=True, help="directory for isolated papers run files")
     papers_daily.add_argument("--max-pages", type=int, default=20, help="maximum paper pages to collect (1..100)")
     papers_daily.add_argument("--github-batches", type=int, default=4, help="maximum GitHub lookup batches (1..40)")
+    papers_daily.add_argument("--paper-detail-budget", type=int, default=400, help="maximum individual paper detail requests (0..1000)")
     papers_daily.add_argument("--paper-page-size", type=int, default=100, help="papers per API page (1..100)")
     papers_daily.add_argument("--recent-days", type=int, default=3, help="recent papers lookback in days (1..7)")
     papers_daily.add_argument("--recent-page-cap", type=int, default=5, help="maximum pages per recent day (1..20)")
@@ -562,6 +563,7 @@ def _hf_papers_daily(args: argparse.Namespace, *, api: Any = None, downloader: A
                      publisher: Any = None) -> int:
     """Collect a bounded Hugging Face Daily Papers run and optionally publish it."""
     bounds = (("max_pages", 1, 100), ("github_batches", 1, 40),
+              ("paper_detail_budget", 0, 1000),
               ("paper_page_size", 1, 100), ("recent_days", 1, 7),
               ("recent_page_cap", 1, 20))
     for name, low, high in bounds:
@@ -633,6 +635,7 @@ def _hf_papers_daily(args: argparse.Namespace, *, api: Any = None, downloader: A
         run_dir, paper_api=paper_api, github=github,
         today_utc=_utc_now().date().isoformat(), page_budget=args.max_pages,
         github_batch_budget=args.github_batches, paper_page_size=args.paper_page_size,
+        paper_detail_budget=args.paper_detail_budget,
         recent_days=args.recent_days, recent_page_cap=args.recent_page_cap,
         historical_start=args.historical_start,
     )
@@ -674,8 +677,19 @@ def _hf_papers_daily(args: argparse.Namespace, *, api: Any = None, downloader: A
         print(f"Published Hugging Face Daily Papers run to {url}")
     elif not args.no_publish:
         print("No paper pages or state changes; skipping Hub publication.")
-    print(f"Hugging Face Daily Papers {run_id}: {result.get('papers_collected', 0) if isinstance(result, dict) else 0} papers across {pages} pages")
+    papers_seen = result.get("papers_collected", coverage.get("papers_seen", 0)) if isinstance(result, dict) else 0
+    print(
+        f"Hugging Face Daily Papers {run_id}: {papers_seen} papers across {pages} pages; "
+        f"detail requests {coverage.get('paper_details_attempted', 0)}/"
+        f"{args.paper_detail_budget}, with URL {coverage.get('paper_details_with_url', 0)}, "
+        f"queued {coverage.get('detail_pending', 0)}, "
+        f"errors {coverage.get('paper_details_errors', 0)}"
+    )
     print(f"Coverage: {coverage_path}")
+    detail_attempts = coverage.get("paper_details_attempted", 0)
+    detail_errors = coverage.get("paper_details_errors", 0)
+    if detail_attempts > 0 and detail_errors == detail_attempts:
+        return 2
     return 0
 
 

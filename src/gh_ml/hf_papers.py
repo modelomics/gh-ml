@@ -43,6 +43,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     return result
 
 
+def _field(value: Any, name: str, default: Any = None) -> Any:
+    return value.get(name, default) if isinstance(value, dict) else getattr(value, name, default)
+
+
 def _write_sidecar(path: Path, rows: list[dict[str, Any]], resolved: dict[tuple[str, str], int]) -> None:
     identity = lambda row: (str(row.get("paper_id")), str(row.get("normalized_repo")))
     indexed = {identity(row): row for row in _read_jsonl(path)}
@@ -60,12 +64,13 @@ def collect_paper_run(
     page_budget: int = 20, paper_page_size: int = 100,
     github_batch_budget: int = 4, recent_days: int = 3,
     recent_page_cap: int = 5, historical_start: str = "2023-01-01",
+    paper_detail_budget: int = 400,
 ) -> dict[str, Any]:
     """Scan a bounded set of daily paper pages and resolve their GitHub links.
 
     Only paper IDs and the GitHub repository field are read from source objects.
     """
-    if page_budget < 0 or paper_page_size < 1 or github_batch_budget < 0 or recent_days < 0 or recent_page_cap < 0:
+    if page_budget < 0 or paper_page_size < 1 or github_batch_budget < 0 or recent_days < 0 or recent_page_cap < 0 or paper_detail_budget < 0:
         raise ValueError("budgets and day counts must be non-negative; paper_page_size must be positive")
     root = Path(root)
     root.mkdir(parents=True, exist_ok=True)
@@ -73,10 +78,21 @@ def collect_paper_run(
     checkpoint = load_paper_checkpoint(root, historical_start=historical_start)
     hist = dict(checkpoint["historical"])
     pending: list[dict[str, Any]] = list(checkpoint["pending"])
+    detail_pending: list[dict[str, Any]] = list(checkpoint["detail_pending"])
+    detail_checked_recent: dict[str, str] = dict(checkpoint["detail_checked_recent"])
+    def mark_detail_checked(paper_id: str) -> None:
+        detail_checked_recent[paper_id] = today.isoformat()
+        if len(detail_checked_recent) > MAX_PENDING:
+            oldest = sorted(detail_checked_recent, key=lambda key: (detail_checked_recent[key], key))
+            for expired in oldest[:len(detail_checked_recent) - MAX_PENDING]:
+                del detail_checked_recent[expired]
     paper_links: list[dict[str, Any]] = []
     by_paper: dict[str, dict[str, Any]] = {}
     api_errors: list[str] = []
     papers_without_links = 0
+    papers_returned = paper_details_attempted = paper_details_with_url = 0
+    paper_details_without_url = paper_details_errors = 0
+    detail_changed = False
     invalid_links = 0
     page_count = recent_pages = historical_pages = 0
     recent_truncated = historical_truncated = False
@@ -100,30 +116,43 @@ def collect_paper_run(
                 raise RuntimeError("Hugging Face Daily Papers request failed") from None
             if len(papers) > paper_page_size:
                 raise ValueError("Daily Papers page exceeded requested limit")
+            papers_returned += len(papers)
             candidates = set()
+            detail_candidates = set()
             for paper in papers:
-                raw_id = getattr(paper, "id", None)
+                raw_id = _field(paper, "id")
                 if not isinstance(raw_id, (str, int)) or isinstance(raw_id, bool) or not str(raw_id).strip():
                     raise ValueError("Daily Papers item has invalid id")
-                raw_url = getattr(paper, "github_repo", None)
+                raw_url = _field(paper, "github_repo")
                 normalized = normalize_github_url(raw_url)
                 if normalized:
                     candidates.add((str(raw_id), normalized))
+                elif str(raw_id) not in detail_checked_recent or detail_checked_recent[str(raw_id)] < today.isoformat():
+                    detail_candidates.add((str(raw_id), paper_day.isoformat()))
             queued = {(p["paper_id"], p["normalized_repo"]) for p in pending}
-            if len(candidates - queued) > MAX_PENDING - len(pending):
+            detail_ids = {p["paper_id"] for p in detail_pending}
+            new_detail_ids = {pid for pid, _ in detail_candidates if pid not in detail_ids}
+            if len(candidates - queued) > MAX_PENDING - len(pending) or len(new_detail_ids) > MAX_PENDING - len(detail_pending):
                 recent_truncated = True
                 break
             page_count += 1; recent_pages += 1; used_for_day += 1
             for paper in papers:
-                raw_id = paper.id
+                raw_id = _field(paper, "id")
                 if not isinstance(raw_id, (str, int)) or isinstance(raw_id, bool) or not str(raw_id).strip():
                     raise ValueError("Daily Papers item has invalid id")
                 paper_id = str(raw_id)
-                raw_url = paper.github_repo
+                raw_url = _field(paper, "github_repo")
+                normalized = normalize_github_url(raw_url)
                 if not isinstance(raw_url, str) or not raw_url.strip():
                     papers_without_links += 1
+                if not normalized:
+                    if paper_id not in detail_ids and (paper_id not in detail_checked_recent or detail_checked_recent[paper_id] < today.isoformat()):
+                        detail_pending.append({"paper_id": paper_id, "paper_date": paper_day.isoformat(), "attempts": 0})
+                        detail_ids.add(paper_id)
+                        detail_changed = True
+                    if isinstance(raw_url, str) and raw_url.strip():
+                        invalid_links += 1
                     continue
-                normalized = normalize_github_url(raw_url)
                 item = {"paper_id": paper_id, "paper_date": paper_day.isoformat(),
                         "github_url": raw_url,
                         "normalized_repo": normalized}
@@ -162,33 +191,47 @@ def collect_paper_run(
                 raise RuntimeError("Hugging Face Daily Papers request failed") from None
             if len(papers) > paper_page_size:
                 raise ValueError("Daily Papers page exceeded requested limit")
+            papers_returned += len(papers)
             # Do not partially enqueue a page: the historical cursor must be
             # replayed unless every valid assertion fits the pending envelope.
             valid_for_page = []
+            detail_for_page = []
             for paper in papers:
-                raw_url = getattr(paper, "github_repo", None)
+                raw_url = _field(paper, "github_repo")
+                raw_id = _field(paper, "id")
+                if not isinstance(raw_id, (str, int)) or isinstance(raw_id, bool) or not str(raw_id).strip():
+                    raise ValueError("Daily Papers item has invalid id")
+                paper_id = str(raw_id)
                 if isinstance(raw_url, str) and raw_url.strip() and normalize_github_url(raw_url):
-                    raw_id = getattr(paper, "id", None)
-                    if not isinstance(raw_id, (str, int)) or isinstance(raw_id, bool) or not str(raw_id).strip():
-                        raise ValueError("Daily Papers item has invalid id")
-                    valid_for_page.append((str(raw_id), normalize_github_url(raw_url)))
+                    valid_for_page.append((paper_id, normalize_github_url(raw_url)))
+                elif paper_id not in detail_checked_recent or detail_checked_recent[paper_id] < today.isoformat():
+                    detail_for_page.append((paper_id, cursor_day.isoformat()))
             available = MAX_PENDING - len(pending)
             additions = {(pid, name) for pid, name in valid_for_page
                          if not any(q["paper_id"] == pid and q["normalized_repo"] == name for q in pending)}
-            if len(additions) > available:
+            existing_detail_ids = {item["paper_id"] for item in detail_pending}
+            detail_additions = {pid for pid, _ in detail_for_page if pid not in existing_detail_ids}
+            if len(additions) > available or len(detail_additions) > MAX_PENDING - len(detail_pending):
                 historical_truncated = True
                 break
             page_count += 1; historical_pages += 1
             for paper in papers:
-                raw_id = paper.id
+                raw_id = _field(paper, "id")
                 if not isinstance(raw_id, (str, int)) or isinstance(raw_id, bool) or not str(raw_id).strip():
                     raise ValueError("Daily Papers item has invalid id")
                 paper_id = str(raw_id)
-                raw_url = paper.github_repo
+                raw_url = _field(paper, "github_repo")
+                normalized = normalize_github_url(raw_url)
                 if not isinstance(raw_url, str) or not raw_url.strip():
                     papers_without_links += 1
+                if not normalized:
+                    if paper_id not in existing_detail_ids and (paper_id not in detail_checked_recent or detail_checked_recent[paper_id] < today.isoformat()):
+                        detail_pending.append({"paper_id": paper_id, "paper_date": cursor_day.isoformat(), "attempts": 0})
+                        existing_detail_ids.add(paper_id)
+                        detail_changed = True
+                    if isinstance(raw_url, str) and raw_url.strip():
+                        invalid_links += 1
                     continue
-                normalized = normalize_github_url(raw_url)
                 link = {"paper_id": paper_id, "paper_date": cursor_day.isoformat(),
                         "github_url": raw_url,
                         "normalized_repo": normalized}
@@ -197,8 +240,7 @@ def collect_paper_run(
                     paper_links.append({**link, "github_id": None, "link_status": "unresolved", "source_officiality": "unverified"})
                     if not any(q["paper_id"] == paper_id and q["normalized_repo"] == normalized for q in pending):
                         pending.append({**link, "first_seen_at": _utc_timestamp(), "attempts": 0})
-                else:
-                    invalid_links += 1
+            # The page can be committed only after every missing link ID is safely queued.
             if len(papers) == paper_page_size:
                 hist["page"] = p + 1
             else:
@@ -209,6 +251,49 @@ def collect_paper_run(
                     break
         if page_count >= page_budget and not historical_complete:
             historical_truncated = True
+
+    # Hydrate a bounded, resumable round-robin slice of missing paper links.
+    detail_pending.sort(key=lambda item: (item["paper_date"], item["paper_id"]))
+    detail_cursor = checkpoint.get("detail_after")
+    detail_cursor_key = None if detail_cursor is None else (detail_cursor["paper_date"], detail_cursor["paper_id"])
+    detail_start = 0
+    if detail_cursor_key is not None:
+        detail_start = next((i for i, item in enumerate(detail_pending)
+                             if (item["paper_date"], item["paper_id"]) > detail_cursor_key), 0)
+    detail_rotated = detail_pending[detail_start:] + detail_pending[:detail_start]
+    detail_order = detail_rotated[:paper_detail_budget]
+    detail_last_key = detail_cursor_key
+    for item in detail_order:
+        paper_details_attempted += 1
+        detail_last_key = (item["paper_date"], item["paper_id"])
+        item["attempts"] += 1
+        detail_changed = True
+        try:
+            detail = paper_api.paper_info(item["paper_id"])
+        except Exception:
+            paper_details_errors += 1
+            continue
+        raw_url = _field(detail, "github_repo")
+        normalized = normalize_github_url(raw_url)
+        if not normalized:
+            paper_details_without_url += 1
+            mark_detail_checked(item["paper_id"])
+            detail_pending.remove(item)
+            continue
+        pair = (item["paper_id"], normalized)
+        paper_details_with_url += 1
+        if not any(row["paper_id"] == pair[0] and row["normalized_repo"] == pair[1] for row in pending) and len(pending) >= MAX_PENDING:
+            # Keep this detail queued until GitHub lookup work has room.
+            continue
+        raw_url_text = raw_url if isinstance(raw_url, str) else str(raw_url)
+        link = {"paper_id": item["paper_id"], "paper_date": item["paper_date"],
+                "github_url": raw_url_text, "normalized_repo": normalized}
+        if not any(row["paper_id"] == pair[0] and row["normalized_repo"] == pair[1] for row in pending):
+            pending.append({**link, "first_seen_at": _utc_timestamp(), "attempts": 0})
+        by_paper.setdefault(item["paper_id"], link)
+        paper_links.append({**link, "github_id": None, "link_status": "unresolved", "source_officiality": "unverified"})
+        mark_detail_checked(item["paper_id"])
+        detail_pending.remove(item)
 
     # Resolve a bounded round-robin slice of schema-sorted pending work.
     observations: dict[int, dict[str, Any]] = {}
@@ -276,30 +361,41 @@ def collect_paper_run(
     _write_sidecar(root / "paper-links.jsonl", paper_links, resolved_ids)
     write_jsonl(list(observations.values()), root / "observations.jsonl")
     pending.sort(key=lambda x: (x["paper_date"], x["paper_id"], x["normalized_repo"]))
-    if page_count or attempted:
-        checkpoint.update({"historical": hist, "pending": pending, "updated_at": _utc_timestamp()})
+    if page_count or attempted or detail_changed:
+        checkpoint.update({"historical": hist, "pending": pending,
+                           "detail_pending": sorted(detail_pending, key=lambda item: (item["paper_date"], item["paper_id"])),
+                           "detail_checked_recent": detail_checked_recent, "updated_at": _utc_timestamp()})
     if attempted:
         checkpoint["resolution_after"] = {
             "paper_date": last_attempted_key[0], "paper_id": last_attempted_key[1],
             "normalized_repo": last_attempted_key[2],
         }
+    if detail_order:
+        checkpoint["detail_after"] = {"paper_date": detail_last_key[0], "paper_id": detail_last_key[1]}
     encoded = json.dumps(checkpoint, separators=(",", ":"), sort_keys=True).encode()
     if len(encoded) > MAX_STATE_BYTES:
         raise ValueError("paper checkpoint exceeds 1 MiB")
-    if page_count or attempted:
+    if page_count or attempted or detail_changed:
         write_paper_checkpoint(root, checkpoint)
     coverage = {
         "pages": page_count, "recent_pages": recent_pages, "historical_pages": historical_pages,
         "recent_truncated": recent_truncated, "historical_truncated": historical_truncated,
         "historical_complete": historical_complete, "historical_cursor": hist,
         "papers_seen": len(by_paper), "papers_without_github_url": papers_without_links,
+        "papers_returned": papers_returned,
+        "paper_details_attempted": paper_details_attempted,
+        "paper_details_with_url": paper_details_with_url,
+        "paper_details_without_url": paper_details_without_url,
+        "paper_details_errors": paper_details_errors,
+        "detail_pending": len(detail_pending),
         "links_valid": sum(x["normalized_repo"] is not None for x in paper_links),
         "links_invalid": invalid_links,
         "repositories_attempted": attempted, "github_batches": batches,
         "repositories_unresolved": unresolved_count, "pending": len(pending),
         "api_errors": api_errors + ([lookup_error] if lookup_error else []),
         "page_budget": page_budget, "paper_page_size": paper_page_size,
-        "github_batch_budget": github_batch_budget, "github_resolution_truncated": lookup_limit < len(pending) + len(resolved_ids),
+        "github_batch_budget": github_batch_budget, "paper_detail_budget": paper_detail_budget,
+        "github_resolution_truncated": lookup_limit < len(pending) + len(resolved_ids),
     }
     _atomic_json(root / "coverage.json", coverage)
     return coverage

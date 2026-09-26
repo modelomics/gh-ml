@@ -12,13 +12,19 @@ from gh_ml.hf_papers_state import hydrate_paper_state, serialize_paper_state
 
 
 class PaperAPI:
-    def __init__(self, pages):
+    def __init__(self, pages, details=None):
         self.pages = pages
         self.calls = []
+        self.details = details or {}
+        self.detail_calls = []
 
     def list_daily_papers(self, *, date, p, limit, token):
         self.calls.append((date, p))
         return self.pages.get((date, p), [])
+
+    def paper_info(self, paper_id):
+        self.detail_calls.append(paper_id)
+        return self.details.get(paper_id, SimpleNamespace(github_repo=None))
 
 
 class GitHub:
@@ -154,6 +160,31 @@ def test_empty_historical_paper_date_advances_cursor_and_publishes_state(tmp_pat
     assert files[links_path] == b""
     state = json.loads(files["state/hf-daily-papers.json"])["checkpoint"]
     assert state["historical"]["date"] == "2026-09-25"
+
+
+def test_hydrated_detail_and_checked_state_publish_as_one_run(tmp_path):
+    day = "2026-09-24"
+    work = tmp_path / "hydrated"
+    papers = PaperAPI({(day, 0): [SimpleNamespace(id="detail-paper", title="PRIVATE TITLE")]},
+                      {"detail-paper": SimpleNamespace(github_repo="https://github.com/acme/detail")})
+    github = GitHub({"acme/detail": _repo(88, "acme/detail")})
+    result = collect_paper_run(work, paper_api=papers, github=github, today_utc=day,
+                               page_budget=1, paper_detail_budget=1, recent_days=1,
+                               historical_start="2026-09-25")
+    assert result["paper_details_with_url"] == 1
+    assert papers.detail_calls == ["detail-paper"]
+
+    hub = FakeHfApi(tmp_path / "downloads")
+    _publish(work, hub, "hydrated-run")
+    published = hub.files[hub.revision]
+    state = json.loads(published["state/hf-daily-papers.json"])["checkpoint"]
+    assert state["detail_pending"] == []
+    assert state["detail_checked_recent"] == {"detail-paper": day}
+    obs_path = next(path for path in published if path.startswith("data/observations/"))
+    observation = _jsonl(published[obs_path])[0]
+    assert observation["github_id"] == 88
+    assert observation["paper_evidence"] == "unverified"
+    assert "PRIVATE TITLE" not in json.dumps(observation)
 
 
 def test_paper_observation_materializes_as_one_queryless_current_view_row(tmp_path):
