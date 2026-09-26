@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta, timezone
 
+import gh_ml.readme_enrichment as readme_enrichment
 from gh_ml.github import GitHubAPIError, GitHubReadmeResult
 from gh_ml.readme_enrichment import enrich_readmes, select_readme_targets
+from gh_ml.readme_signals import README_EVIDENCE_VERSION
 
 
 NOW = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
@@ -114,6 +116,71 @@ def test_rename_drops_etag_and_404_emits_empty_latest_evidence_with_cooldown():
     assert records[0]["readme_status"] == "missing" and records[0]["readme_signals"] == []
     assert cp["repositories"]["20"]["readme_signals"] == ["code-for-paper"]
     assert select_readme_targets([renamed], cp, now=NOW + timedelta(days=1), max_requests=1) == []
+
+
+def test_stale_evidence_reenriches_before_due_but_current_and_excluded_rows_do_not():
+    candidate = row(30, "lab/research", signals=["paper-and-code-cue"])
+    future = "2027-09-24T12:00:00Z"
+    checkpoint = {"repositories": {
+        "30": {
+            "repository_name_at_fetch": "lab/research", "readme_etag": '"old"',
+            "readme_evidence_version": "gh-ml-readme-evidence-v1",
+            "readme_signals": ["old-signal"], "due_at": future,
+        },
+        "31": {
+            "repository_name_at_fetch": "lab/current", "readme_etag": '"current"',
+            "readme_evidence_version": README_EVIDENCE_VERSION, "due_at": future,
+        },
+        "32": {
+            "repository_name_at_fetch": "school/course", "readme_etag": '"excluded"',
+            "readme_evidence_version": "gh-ml-readme-evidence-v1", "due_at": future,
+        },
+    }}
+    current = row(31, "lab/current", signals=["paper-and-code-cue"])
+    excluded = row(32, "school/course", signals=["paper-and-code-cue"], description="Course project.")
+    assert [item["github_id"] for item in select_readme_targets(
+        [candidate, current, excluded], checkpoint, now=NOW, max_requests=10,
+    )] == [30]
+
+    client = FakeClient([result(200, "# Method\nWe propose a transformer method.")])
+    records, updated, coverage = enrich_readmes(
+        [candidate, current, excluded], checkpoint, client, now=NOW, max_requests=1,
+    )
+    assert client.calls == [("lab/research", None)]
+    assert coverage["attempted"] == 1
+    assert records[0]["readme_evidence_version"] == README_EVIDENCE_VERSION
+    assert updated["repositories"]["30"]["readme_evidence_version"] == README_EVIDENCE_VERSION
+
+
+def test_stale_404_refresh_obeys_cooldown_and_retriggers_after_version_bump(monkeypatch):
+    candidate = row(40, "lab/missing", signals=["paper-and-code-cue"])
+    checkpoint = {"repositories": {"40": {
+        "repository_name_at_fetch": "lab/missing", "readme_etag": '"old"',
+        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_signals": ["old-signal"], "due_at": "2027-09-24T12:00:00Z",
+    }}}
+    client = FakeClient([result(404)])
+    _, refreshed, _ = enrich_readmes([candidate], checkpoint, client, now=NOW, max_requests=1)
+    prior = refreshed["repositories"]["40"]
+    assert prior["readme_refresh_attempted_version"] == README_EVIDENCE_VERSION
+    assert select_readme_targets([candidate], refreshed, now=NOW + timedelta(days=1), max_requests=1) == []
+
+    monkeypatch.setattr(readme_enrichment, "README_EVIDENCE_VERSION", "gh-ml-readme-evidence-v3")
+    assert select_readme_targets([candidate], refreshed, now=NOW + timedelta(days=1), max_requests=1) == [candidate]
+
+
+def test_stale_transient_error_refresh_obeys_error_cooldown():
+    candidate = row(41, "lab/timeout", signals=["paper-and-code-cue"])
+    checkpoint = {"repositories": {"41": {
+        "repository_name_at_fetch": "lab/timeout", "readme_etag": '"old"',
+        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_signals": ["old-signal"], "due_at": "2027-09-24T12:00:00Z",
+    }}}
+    client = FakeClient([GitHubAPIError(None, "timeout")])
+    _, refreshed, coverage = enrich_readmes([candidate], checkpoint, client, now=NOW, max_requests=1)
+    assert coverage["deferred"] == 1
+    assert refreshed["repositories"]["41"]["readme_refresh_attempted_version"] == README_EVIDENCE_VERSION
+    assert select_readme_targets([candidate], refreshed, now=NOW + timedelta(hours=12), max_requests=1) == []
 
 
 def test_request_budget_is_exact_and_rate_limit_stops_without_advancing_failing_id():

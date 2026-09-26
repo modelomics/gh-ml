@@ -121,6 +121,51 @@ def test_course_list_and_reproduction_cues_are_explicit():
     assert "reproduction-cue" in extract_readme_evidence("Faithful reproduction of results.")["readme_signals"]
 
 
+@pytest.mark.parametrize(
+    "readme",
+    [
+        "We study a class of neural networks for image recognition.",
+        "Published in Lecture Notes in Computer Science (LNCS).",
+        "Follow this training and test tutorial to run the model.",
+        "The tutorial explains how to train and test a transformer.",
+        "Of course, the model can be trained on other data.",
+    ],
+)
+def test_incidental_class_lecture_and_tutorial_language_is_not_course_evidence(readme):
+    assert "course-cue" not in extract_readme_evidence(readme)["readme_signals"]
+
+
+@pytest.mark.parametrize(
+    "readme",
+    [
+        "This coursework project implements a neural network.",
+        "A class project on deep learning.",
+        "Assignments and homework for a transformer course.",
+        "The curriculum and bootcamp introduce machine learning.",
+        "Acknowledgements: supported by the Engineering Studies program.",
+    ],
+)
+def test_explicit_coursework_and_engineering_studies_context_is_detected(readme):
+    assert "course-cue" in extract_readme_evidence(readme)["readme_signals"]
+
+
+def test_engineering_studies_coursework_survives_acknowledgments_heading_boundary():
+    result = extract_readme_evidence(
+        "## Acknowledgments\n\n"
+        "This project was conducted as part of engineering studies and reflects "
+        "a collaborative effort among the authors."
+    )
+    assert "course-cue" in result["readme_signals"]
+
+
+def test_course_cue_remains_paragraph_local():
+    result = extract_readme_evidence(
+        "Course project.\n\nWe propose a transformer model for image generation."
+    )
+    assert "course-cue" in result["readme_signals"]
+    assert "method-contribution" in result["readme_signals"]
+
+
 def test_dataset_only_readme_gets_negative_cue():
     result = extract_readme_evidence("# Dataset\nA benchmark dataset and corpus for evaluation.")
     assert "dataset-only-cue" in result["readme_signals"]

@@ -143,7 +143,9 @@ def _queue(rows: Sequence[Mapping[str, Any]], checkpoint: Mapping[str, Any], now
         if isinstance(prior, Mapping):
             current_name = row.get("full_name") or row.get("name")
             same_name = prior.get("repository_name_at_fetch") == current_name
-            if same_name and not _due(prior, now):
+            current_evidence = prior.get("readme_evidence_version") == README_EVIDENCE_VERSION
+            refresh_already_attempted = prior.get("readme_refresh_attempted_version") == README_EVIDENCE_VERSION
+            if same_name and (current_evidence or refresh_already_attempted) and not _due(prior, now):
                 continue
         candidates.append((tier, repo_id, row))
     # Round-robin over tiers, sorted numerically after each tier's persisted
@@ -219,7 +221,10 @@ def enrich_readmes(
                 rate_limited += 1
                 # No cursor update for the failing ID; stop immediately.
                 break
-            repositories[key] = {**prior, "repository_name_at_fetch": name, "due_at": _iso(now + _ERROR_COOLDOWN)}
+            repositories[key] = {
+                **prior, "repository_name_at_fetch": name, "due_at": _iso(now + _ERROR_COOLDOWN),
+                "readme_refresh_attempted_version": README_EVIDENCE_VERSION,
+            }
             deferred += 1
             cursors[str(tier)] = repo_id
             continue
@@ -259,9 +264,16 @@ def enrich_readmes(
         elif result.status == 404:
             record["readme_status"] = "missing"
             # Preserve older extracted evidence in the ledger on missing response.
-            repositories[key] = {**prior, "repository_name_at_fetch": name, "readme_checked_at": checked, "due_at": _iso(now + _MISSING_COOLDOWN), "last_readme_status": 404}
+            repositories[key] = {
+                **prior, "repository_name_at_fetch": name, "readme_checked_at": checked,
+                "due_at": _iso(now + _MISSING_COOLDOWN), "last_readme_status": 404,
+                "readme_refresh_attempted_version": README_EVIDENCE_VERSION,
+            }
         else:
-            repositories[key] = {**prior, "repository_name_at_fetch": name, "due_at": _iso(now + _ERROR_COOLDOWN)}
+            repositories[key] = {
+                **prior, "repository_name_at_fetch": name, "due_at": _iso(now + _ERROR_COOLDOWN),
+                "readme_refresh_attempted_version": README_EVIDENCE_VERSION,
+            }
             deferred += 1
             cursors[str(tier)] = repo_id
             continue

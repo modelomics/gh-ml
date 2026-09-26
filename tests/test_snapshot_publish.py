@@ -84,15 +84,15 @@ def _hub(tmp_path, observations=None):
     return hub, FakeDownloader(hub)
 
 
-def _readme_evidence(*, github_id=1, observed_at="2026-09-24T12:00:00Z", signal="paper-reference"):
+def _readme_evidence(*, github_id=1, repository_name="org/model", observed_at="2026-09-24T12:00:00Z", signal="paper-reference", version="gh-ml-readme-evidence-v2"):
     row = {
         "github_id": github_id,
-        "repository_name_at_fetch": "org/model",
+        "repository_name_at_fetch": repository_name,
         "observed_at": observed_at,
         "readme_status": "ok",
         "readme_etag": None,
         "readme_blob_sha": "blob-1",
-        "readme_evidence_version": "gh-ml-readme-evidence-v1",
+        "readme_evidence_version": version,
         "readme_signals": [signal],
         "readme_sections": ["references"],
         "readme_checked_at": observed_at,
@@ -357,6 +357,31 @@ def test_readme_evidence_is_overlayed_and_committed_only_as_projection(tmp_path)
     assert manifest["readme_evidence_files"] == [{"path": evidence_path, "sha256": publisher._sha256(_readme_evidence())}]
     assert all("readme-evidence" not in op.path_in_repo for op in hub.commits[0]["operations"])
     assert all(revision == "rev-1" for _, revision in downloader.calls)
+
+
+def test_snapshot_projects_mixed_legacy_and_current_readme_evidence(tmp_path):
+    evidence_path = "data/readme-evidence/2026/09/24/run.jsonl"
+    legacy = _readme_evidence(github_id=1, version="gh-ml-readme-evidence-v1")
+    current = _readme_evidence(
+        github_id=2, repository_name="org/second-model", signal="survey-cue",
+        version="gh-ml-readme-evidence-v2",
+    )
+    observations = (
+        b'{"github_id":1,"name":"org/model","description":"We propose a novel transformer architecture for efficient machine learning inference.","observed_at":"2026-09-24T12:00:00Z"}\n'
+        b'{"github_id":2,"name":"org/second-model","description":"We propose a novel transformer architecture for efficient machine learning inference.","observed_at":"2026-09-24T12:00:00Z"}\n'
+    )
+    hub, downloader = _hub(tmp_path, {
+        "data/observations/run.jsonl": observations,
+        evidence_path: legacy + current,
+    })
+
+    publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    projected = [json.loads(line) for line in hub.files["data/current/repositories.parquet"].split(b"\0", 1)[1].splitlines()]
+    assert [(row["github_id"], row["readme_evidence_version"], row["readme_signals"]) for row in projected] == [
+        (1, "gh-ml-readme-evidence-v1", ["paper-reference"]),
+        (2, "gh-ml-readme-evidence-v2", ["survey-cue"]),
+    ]
 
 
 def test_readme_evidence_snapshot_is_idempotent_and_changes_rebuild(tmp_path):

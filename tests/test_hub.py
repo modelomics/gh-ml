@@ -187,6 +187,7 @@ def test_readme_checkpoint_state_roundtrips_full_cursor() -> None:
                 "readme_sections": ["method"],
                 "readme_checked_at": "2026-09-24T10:00:00Z",
                 "due_at": "2026-09-25T10:00:00Z",
+                "readme_refresh_attempted_version": "gh-ml-readme-evidence-v2",
             }
         },
     }
@@ -220,7 +221,7 @@ def test_readme_empty_run_publishes_deterministic_empty_jsonl() -> None:
 
 def test_readme_checkpoint_rejects_raw_text_and_unknown_enums() -> None:
     row = _readme_record()
-    row["readme_evidence_version"] = "v1"
+    row["readme_evidence_version"] = "gh-ml-readme-evidence-v3"
     with pytest.raises(ValueError, match="unsupported"):
         publish_readme_run("org/data", "token", records=[row], coverage={}, checkpoint={}, api=ReadmeHub())
     with pytest.raises(ValueError, match="unsupported repository fields"):
@@ -234,6 +235,35 @@ def test_readme_checkpoint_rejects_raw_text_and_unknown_enums() -> None:
         publish_readme_run(
             "org/data", "token", records=[_readme_record()], coverage={},
             checkpoint={"repositories": {"3": {"readme_signals": ["raw prose"]}}}, api=ReadmeHub(),
+        )
+
+
+def test_readme_run_accepts_v2_records_and_checkpoint_versions() -> None:
+    api = ReadmeHub()
+    row = _readme_record()
+    row["readme_evidence_version"] = "gh-ml-readme-evidence-v2"
+    checkpoint = {
+        "repositories": {
+            "3": {
+                "readme_evidence_version": "gh-ml-readme-evidence-v2",
+                "readme_refresh_attempted_version": "gh-ml-readme-evidence-v2",
+            }
+        }
+    }
+
+    publish_readme_run("org/data", "token", records=[row], coverage={}, checkpoint=checkpoint, api=api)
+    state = load_checkpoint("org/data", "token", checkpoint_path="state/readme-evidence.json", api=api)
+
+    assert state is not None
+    assert state["checkpoint"] == checkpoint
+
+
+def test_readme_checkpoint_rejects_unknown_refresh_attempted_version() -> None:
+    with pytest.raises(ValueError, match="unsupported readme_refresh_attempted_version"):
+        publish_readme_run(
+            "org/data", "token", records=[_readme_record()], coverage={},
+            checkpoint={"repositories": {"3": {"readme_refresh_attempted_version": "v99"}}},
+            api=ReadmeHub(),
         )
 
 

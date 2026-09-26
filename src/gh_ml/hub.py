@@ -10,7 +10,7 @@ from pathlib import Path
 from pathlib import PurePosixPath
 from typing import Any
 
-from .readme_signals import README_EVIDENCE_VERSION
+from .readme_signals import SUPPORTED_README_EVIDENCE_VERSIONS
 
 _CHECKPOINT = "state/checkpoint.json"
 _README_CHECKPOINT = "state/readme-evidence.json"
@@ -345,7 +345,7 @@ def _validate_readme_records(records: Any) -> list[dict[str, Any]]:
         for key in ("repository_name_at_fetch", "readme_evidence_version"):
             if not isinstance(row[key], str) or not row[key].strip():
                 raise ValueError(f"{key} must be a non-empty string")
-            if key == "readme_evidence_version" and row[key] != README_EVIDENCE_VERSION:
+            if key == "readme_evidence_version" and row[key] not in SUPPORTED_README_EVIDENCE_VERSIONS:
                 raise ValueError("unsupported readme_evidence_version")
         if "/" not in row["repository_name_at_fetch"]:
             raise ValueError("repository_name_at_fetch must be an owner/repository name")
@@ -389,6 +389,7 @@ def _validate_readme_checkpoint(checkpoint: dict[str, Any]) -> None:
     repo_fields = {
         "repository_name_at_fetch", "readme_etag", "readme_blob_sha", "readme_evidence_version",
         "readme_signals", "readme_sections", "readme_checked_at", "due_at", "last_readme_status",
+        "readme_refresh_attempted_version",
     }
     for key, entry in repositories.items():
         if not isinstance(key, str) or not key.isdecimal() or int(key) <= 0 or not isinstance(entry, dict):
@@ -402,8 +403,14 @@ def _validate_readme_checkpoint(checkpoint: dict[str, Any]) -> None:
         for field in ("readme_etag", "readme_blob_sha", "readme_checked_at", "due_at"):
             if field in entry and entry[field] is not None and not isinstance(entry[field], str):
                 raise ValueError(f"{field} in README checkpoint must be a string or null")
-        if "readme_evidence_version" in entry and entry["readme_evidence_version"] != README_EVIDENCE_VERSION:
+        if ("readme_evidence_version" in entry and (
+                not isinstance(entry["readme_evidence_version"], str)
+                or entry["readme_evidence_version"] not in SUPPORTED_README_EVIDENCE_VERSIONS)):
             raise ValueError("unsupported readme_evidence_version in README checkpoint")
+        if ("readme_refresh_attempted_version" in entry and (
+                not isinstance(entry["readme_refresh_attempted_version"], str)
+                or entry["readme_refresh_attempted_version"] not in SUPPORTED_README_EVIDENCE_VERSIONS)):
+            raise ValueError("unsupported readme_refresh_attempted_version in README checkpoint")
         for field, allowed in (("readme_signals", _README_SIGNAL_ENUMS), ("readme_sections", _README_SECTION_ENUMS)):
             if field in entry:
                 values = entry[field]

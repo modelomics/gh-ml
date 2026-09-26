@@ -14,7 +14,7 @@ from .candidate import CANDIDATE_RULE_VERSION, assess_candidate
 from .evidence import classify_repository_text
 from .selection import SELECTION_VERSION, assess_repository
 from .schema import normalize_method_label
-from .readme_signals import README_EVIDENCE_VERSION
+from .readme_signals import SUPPORTED_README_EVIDENCE_VERSIONS
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -415,7 +415,7 @@ def materialize_current_view(
                                 raise ValueError(f"{source}:{line_number}: {field} must be a non-empty string")
                         if evidence["readme_status"] not in {"ok", "unchanged", "missing"}:
                             raise ValueError(f"{source}:{line_number}: invalid readme_status")
-                        if evidence["readme_evidence_version"] != README_EVIDENCE_VERSION:
+                        if evidence["readme_evidence_version"] not in SUPPORTED_README_EVIDENCE_VERSIONS:
                             raise ValueError(f"{source}:{line_number}: unsupported readme_evidence_version")
                         for field in ("readme_etag", "readme_blob_sha", "readme_checked_at"):
                             if evidence[field] is not None and not isinstance(evidence[field], str):
