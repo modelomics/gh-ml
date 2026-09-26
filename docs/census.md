@@ -18,11 +18,14 @@ Search and census observations share the stable numeric `github_id`. When the sa
 
 - `data/current` contains latest rows selected as `include`.
 - `data/candidates` contains those included rows and eligible `review` rows.
+- `data/repositories` contains one selected current-view row per numeric GitHub ID whose row has `fork: false` (Search takes precedence over topic and census; latest within the selected source); it does not apply the novelty selector or group full fork families.
 - The append-only observation history retains its source observations and provenance; neither a census candidate label nor a broad Search match forces inclusion.
 
 This distinction matters because census candidate detection is intentionally permissive. It uses repository metadata text and lightweight labels to find plausible ML/AI repositories, and can produce false positives. The strict selector screens repository-owned metadata and available README signals for contribution evidence and known hard negatives; its decisions still require human review for consequential uses and can also miss valid work.
 
-For example, the archived `quantopian/zipline` repository describes itself as a Pythonic algorithmic-trading library. Its ordinary metadata alone does not establish an ML contribution, so the strict selector excludes it as a non-ML utility. The `aichi/zipline` copy is a GitHub fork and is excluded as a fork. A queryless or broad-text census can encounter both the original and copies because it walks repositories rather than asking Search to omit forks. Repository names, descriptions, and shared history can therefore create apparent duplicates or tempting candidates. Numeric IDs preserve separate GitHub repositories; fork and contribution rules are handled later by selection.
+The cached raw snapshot dated 2026-09-24 contained 4,288 observations matching “Zipline” text across 4,272 numeric GitHub IDs. Of those IDs, 4,259 were distinct forks. A historical backfill run explicitly used the query qualifier `fork:true` and contributed 3,698 matches. Because raw observations are append-only, those historical rows remain available in the `observations` config; the repositories view filters its latest selected row to `fork: false`, without deleting history or attempting to reconstruct parent/source fork families. These counts describe that cached snapshot, not a live total.
+
+The repositories view can retain the original `quantopian/zipline` once, while the strict `current` view can independently exclude it under the novelty selector because its metadata describes a trading utility rather than an ML contribution. That strict exclusion is a selection decision, not a deduplication result. A copy such as `aichi/zipline` may be absent from the repositories view because its `fork` field is true. Numeric IDs distinguish GitHub repositories; the historical schema does not carry the parent/source IDs needed to group complete fork families.
 
 ## Coverage and limits
 
