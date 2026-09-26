@@ -149,8 +149,8 @@ def test_topic_collection_publication_and_current_view_are_offline_end_to_end(tm
     ) == 0
 
     assert graphql.calls == [
-        {"name": "machine-learning", "after": None},
-        {"name": "computer-vision", "after": None},
+        {"name": "machine-learning", "after": None, "first": 100},
+        {"name": "computer-vision", "after": None, "first": 100},
     ]
     assert len(hub.commits) == 1
     assert hub.commits[0]["parent_commit"] == "pinned-base"
