@@ -6,9 +6,10 @@ import json
 import os
 import re
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 from .census import CENSUS_RULE_VERSION, candidate_decision
 from .classification import classify_repository
@@ -43,6 +44,14 @@ _QUERY = """query($name:String!, $after:String) {
 
 _GRAPHQL_ERROR_TYPE = re.compile(r"[A-Z][A-Z0-9_]{0,63}\Z")
 _GRAPHQL_PATH_PART = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}\Z")
+_GRAPHQL_NONTRANSIENT_TYPES = {
+    "AUTHENTICATION_ERROR", "BAD_CREDENTIALS", "BAD_USER_INPUT",
+    "GRAPHQL_PARSE_FAILED", "GRAPHQL_VALIDATION_FAILED", "RATE_LIMITED",
+    "UNAUTHORIZED",
+}
+_GRAPHQL_NONTRANSIENT_PATH_ROOTS = {"__schema", "__type", "rateLimit", "viewer"}
+_GRAPHQL_PAYLOAD_ATTEMPTS = 3
+_GRAPHQL_PAYLOAD_RETRY_DELAYS = (0.25, 0.5)
 
 
 def _graphql_error_summary(errors: Any) -> str:
@@ -70,6 +79,37 @@ def _graphql_error_summary(errors: Any) -> str:
     if len(errors) > 5:
         summaries.append("additional errors omitted")
     return "; ".join(summaries)
+
+
+def _retryable_topic_payload_errors(errors: Any) -> bool:
+    """Retry ambiguous payload errors unless they identify a hard failure.
+
+    Edge-scoped errors can be transient even when typed FORBIDDEN. Pathless,
+    malformed, or otherwise unknown errors are also retried because GitHub
+    sometimes returns incomplete payloads. Explicit auth, rate, schema, and
+    request-wide FORBIDDEN failures are left to existing client handling.
+    """
+    if not isinstance(errors, list) or not errors:
+        return False
+    for error in errors:
+        if not isinstance(error, dict):
+            continue
+        error_type = error.get("type")
+        if isinstance(error_type, str) and error_type in _GRAPHQL_NONTRANSIENT_TYPES:
+            return False
+        path = error.get("path")
+        edge_scoped = (
+            isinstance(path, list) and len(path) >= 4
+            and path[:3] == ["topic", "repositories", "edges"]
+            and isinstance(path[3], int) and not isinstance(path[3], bool)
+            and path[3] >= 0
+        )
+        if error_type == "FORBIDDEN" and not edge_scoped:
+            return False
+        if (isinstance(path, list) and path and isinstance(path[0], str)
+                and path[0] in _GRAPHQL_NONTRANSIENT_PATH_ROOTS):
+            return False
+    return True
 
 
 def _atomic(path: Path, text: str) -> None:
@@ -147,7 +187,8 @@ def _repository_edges(connection: Any) -> tuple[list[dict], bool, str | None]:
 
 
 def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
-                          max_pages: int, observed_at: str | None = None) -> dict:
+                          max_pages: int, observed_at: str | None = None,
+                          retry_sleeper: Callable[[float], None] = time.sleep) -> dict:
     """Refresh topic heads daily and advance deeper topic scans fairly."""
     if isinstance(max_pages, bool) or not isinstance(max_pages, int) or not 1 <= max_pages <= 100:
         raise ValueError("max_pages must be an integer from 1 to 100")
@@ -186,7 +227,16 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
                         head_only: bool, state: dict) -> tuple[int, int | None, int | None, bool, str | None, bool]:
         nonlocal rate_remaining, pages_fetched, observations_written
         query = _HEAD_QUERY if head_only else _QUERY
-        payload, _headers = client.graphql(query, {"name": slug, "after": after})
+        payload = None
+        for attempt in range(_GRAPHQL_PAYLOAD_ATTEMPTS):
+            payload, _headers = client.graphql(query, {"name": slug, "after": after})
+            if not isinstance(payload, dict):
+                break
+            errors = payload.get("errors")
+            if not errors or not _retryable_topic_payload_errors(errors):
+                break
+            if attempt + 1 < _GRAPHQL_PAYLOAD_ATTEMPTS:
+                retry_sleeper(_GRAPHQL_PAYLOAD_RETRY_DELAYS[attempt])
         if not isinstance(payload, dict):
             raise ValueError("invalid GraphQL response")
         if payload.get("errors"):
