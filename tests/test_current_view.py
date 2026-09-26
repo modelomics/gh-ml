@@ -5,7 +5,12 @@ import json
 import pytest
 
 import gh_ml.current_view as current_view
-from gh_ml.current_view import export_current_view_parquet, export_observations_parquet, materialize_current_view
+from gh_ml.current_view import (
+    export_current_view_parquet,
+    export_nonfork_repositories_parquet,
+    export_observations_parquet,
+    materialize_current_view,
+)
 
 
 def _write(path, rows):
@@ -378,6 +383,34 @@ def test_raw_observation_parquet_empty_inputs_and_source_collision(tmp_path):
     assert pq.read_table(output).num_rows == 0
     with pytest.raises(ValueError, match="distinct"):
         export_observations_parquet([output], output)
+
+
+def test_nonfork_repository_parquet_uses_materialized_latest_rows_and_keeps_raw_history(tmp_path):
+    pq = pytest.importorskip("pyarrow.parquet")
+    raw = _write(tmp_path / "observations.jsonl", [
+        _row(101, "2026-01-01T00:00:00Z", name="owner/canonical", fork=False, stars=3),
+        _row(201, "2026-01-02T00:00:00Z", name="owner/canonical-fork-a", fork=True, stars=1),
+        _row(101, "2026-01-03T00:00:00Z", name="owner/canonical", fork=False, stars=8),
+        _row(202, "2026-01-04T00:00:00Z", name="owner/canonical-fork-b", fork=True, stars=2),
+    ])
+    view = tmp_path / "repositories.jsonl"
+    materialize_current_view([raw], view)
+    repository_output = tmp_path / "repositories.parquet"
+    raw_output = tmp_path / "raw.parquet"
+
+    export_nonfork_repositories_parquet(view, repository_output)
+    export_observations_parquet([raw], raw_output)
+
+    repositories = pq.read_table(repository_output).to_pylist()
+    observations = pq.read_table(raw_output).to_pylist()
+    assert len(repositories) == 1
+    assert repositories[0]["github_id"] == 101
+    assert repositories[0]["name"] == "owner/canonical"
+    assert repositories[0]["stars"] == 8
+    assert repositories[0]["fork"] is False
+    assert repositories[0]["observation_count"] == 2
+    assert repositories[0]["selection_status"] == _read(view)[0]["selection_status"]
+    assert [row["github_id"] for row in observations] == [101, 201, 101, 202]
 
 
 def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):

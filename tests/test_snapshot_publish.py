@@ -43,6 +43,7 @@ class FakeHub:
         assert [op.path_in_repo for op in operations] == [
             "data/current/repositories.parquet", "data/history/observations.parquet",
             "data/candidates/repositories.parquet",
+            "data/repositories/repositories.parquet",
             "data/current/manifest.json", "README.md"
         ]
         added = {op.path_in_repo: Path(op.path_or_fileobj).read_bytes() for op in operations}
@@ -111,6 +112,13 @@ def fake_parquet(monkeypatch):
         Path(destination).write_bytes(b"PARQUET\0" + encoded)
         return {"row_count": len(rows)}
     monkeypatch.setattr(publisher, "export_current_view_parquet", export)
+    def export_nonfork(jsonl, destination):
+        rows = [json.loads(line) for line in Path(jsonl).read_text().split("\n") if line]
+        rows = [row for row in rows if row.get("fork") is False]
+        encoded = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows).encode()
+        Path(destination).write_bytes(b"NONFORK-PARQUET\0" + encoded)
+        return {"row_count": len(rows)}
+    monkeypatch.setattr(publisher, "export_nonfork_repositories_parquet", export_nonfork)
     def export_observations(paths, destination, *, compression="zstd"):
         rows = []
         for path in paths:
@@ -135,7 +143,7 @@ def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
     assert len(hub.commits) == 1
     assert hub.commits[0]["parent_commit"] == "rev-1"
     manifest = json.loads(hub.files["data/current/manifest.json"])
-    assert manifest["version"] == 8
+    assert manifest["version"] == 9
     assert manifest["canonical_source_precedence"] == "search-over-queryless"
     assert manifest["readme_evidence_count"] == 0
     assert manifest["readme_evidence_files"] == []
@@ -151,6 +159,10 @@ def test_pins_inputs_and_commits_only_snapshot_files(tmp_path):
     assert manifest["observations_parquet_row_count"] == manifest["observation_count"] == 1
     assert manifest["observations_parquet_sha256"] == publisher._sha256(
         hub.files["data/history/observations.parquet"]
+    )
+    assert manifest["nonfork_repository_count"] == manifest["repositories_parquet_row_count"] == 0
+    assert manifest["repositories_parquet_sha256"] == publisher._sha256(
+        hub.files["data/repositories/repositories.parquet"]
     )
     assert hub.files["README.md"] == publisher._SOURCE_CARD.read_bytes()
     candidate_rows = hub.files["data/candidates/repositories.parquet"].split(b"\0", 1)[1]
@@ -198,6 +210,34 @@ def test_snapshot_filters_forks_profiles_and_query_only_rows(tmp_path):
     candidate_payload = hub.files["data/candidates/repositories.parquet"].split(b"\0", 1)[1]
     candidate_ids = [json.loads(line)["github_id"] for line in candidate_payload.decode().splitlines()]
     assert candidate_ids == [2, 6]
+
+
+def test_nonfork_config_has_one_latest_nonfork_zipline_and_keeps_raw_history(tmp_path):
+    records = [
+        {"github_id": 10, "name": "quantopian/zipline", "description": "A backtesting library.",
+         "fork": False, "observed_at": "2026-09-23T12:00:00Z"},
+        {"github_id": 10, "name": "quantopian/zipline", "description": "Updated backtesting library.",
+         "fork": False, "observed_at": "2026-09-24T12:00:00Z"},
+        *[{
+            "github_id": 100 + index, "name": f"user{index}/zipline", "description": "Fork of Zipline.",
+            "fork": True, "observed_at": "2026-09-24T12:00:00Z",
+        } for index in range(25)],
+    ]
+    payload = "".join(json.dumps(record, separators=(",", ":")) + "\n" for record in records).encode()
+    hub, downloader = _hub(tmp_path, {"data/observations/run.jsonl": payload})
+
+    publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    nonfork_data = hub.files["data/repositories/repositories.parquet"].split(b"\0", 1)[1]
+    repositories = [json.loads(line) for line in nonfork_data.decode().splitlines()]
+    assert [row["github_id"] for row in repositories] == [10]
+    assert repositories[0]["description"] == "Updated backtesting library."
+    assert repositories[0]["fork"] is False
+    raw_data = hub.files["data/history/observations.parquet"].split(b"\0", 1)[1]
+    assert len(raw_data.decode().splitlines()) == len(records)
+    manifest = json.loads(hub.files["data/current/manifest.json"])
+    assert manifest["observation_count"] == len(records)
+    assert manifest["nonfork_repository_count"] == 1
 
 
 def test_token_provider_refreshes_commit_credential_without_exposing_it(tmp_path):
@@ -420,7 +460,7 @@ def test_card_change_publishes_card_with_snapshot_in_one_commit(tmp_path):
     assert len(hub.commits) == 2
     assert [op.path_in_repo for op in hub.commits[-1]["operations"]] == [
         "data/current/repositories.parquet", "data/history/observations.parquet",
-        "data/candidates/repositories.parquet",
+        "data/candidates/repositories.parquet", "data/repositories/repositories.parquet",
         "data/current/manifest.json", "README.md"
     ]
     assert hub.files["README.md"] == source_card.read_bytes()
@@ -445,12 +485,12 @@ def test_same_inputs_with_old_projection_version_rebuilds(tmp_path):
     assert rebuilt["projection_version"] == publisher.CURRENT_VIEW_PROJECTION_VERSION
 
 
-def test_version_seven_manifest_rebuilds_source_ranked_snapshot(tmp_path):
+def test_version_eight_manifest_rebuilds_with_nonfork_config(tmp_path):
     hub, downloader = _hub(tmp_path)
     publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
     manifest_path = "data/current/manifest.json"
     old_manifest = json.loads(hub.files[manifest_path])
-    old_manifest["version"] = 7
+    old_manifest["version"] = 8
     hub.files[manifest_path] = json.dumps(old_manifest).encode()
     hub.history[hub.revision][manifest_path] = hub.files[manifest_path]
 
@@ -459,8 +499,27 @@ def test_version_seven_manifest_rebuilds_source_ranked_snapshot(tmp_path):
     assert result["already_current"] is False
     assert len(hub.commits) == 2
     rebuilt = json.loads(hub.files[manifest_path])
-    assert rebuilt["version"] == 8
+    assert rebuilt["version"] == 9
     assert rebuilt["canonical_source_precedence"] == "search-over-queryless"
+
+
+@pytest.mark.parametrize("corruption", ["missing", "corrupt"])
+def test_missing_or_corrupt_nonfork_config_rebuilds_snapshot(tmp_path, corruption):
+    hub, downloader = _hub(tmp_path)
+    publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+    path = "data/repositories/repositories.parquet"
+    if corruption == "missing":
+        del hub.history[hub.revision][path]
+        del hub.files[path]
+    else:
+        hub.history[hub.revision][path] = b"corrupted"
+        hub.files[path] = b"corrupted"
+
+    result = publish_current_view("org/data", None, work_dir=tmp_path / "work", api=hub, downloader=downloader)
+
+    assert result["already_current"] is False
+    assert len(hub.commits) == 2
+    assert hub.files[path].startswith(b"NONFORK-PARQUET\0")
 
 
 def test_same_inputs_with_old_selection_version_rebuilds(tmp_path):

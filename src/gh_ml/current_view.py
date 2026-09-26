@@ -69,6 +69,20 @@ def export_observations_parquet(
     return _export_observation_parquet(observation_paths, parquet_path, compression=compression)
 
 
+def export_nonfork_repositories_parquet(
+    jsonl_path: str | Path,
+    parquet_path: str | Path,
+) -> dict[str, int | str]:
+    """Export latest-per-ID repository rows whose ``fork`` field is false.
+
+    The JSONL input must already be materialized by :func:`materialize_current_view`.
+    Rows without a boolean ``fork`` value of exactly ``False`` are excluded.
+    Selection and candidate fields remain available in their typed columns.
+    """
+    return _export_observation_parquet([jsonl_path], parquet_path, compression="zstd",
+                                       fork_is_false=True)
+
+
 def _export_observation_parquet(
     observation_paths: Iterable[str | Path],
     parquet_path: str | Path,
@@ -76,6 +90,7 @@ def _export_observation_parquet(
     compression: str,
     selection_status: str | None = None,
     candidate_eligible: bool | None = None,
+    fork_is_false: bool = False,
 ) -> dict[str, int | str]:
     try:
         import pyarrow as pa
@@ -168,6 +183,8 @@ def _export_observation_parquet(
                         if selection_status is not None and row.get("selection_status") != selection_status:
                             continue
                         if candidate_eligible is not None and row.get("candidate_eligible") != candidate_eligible:
+                            continue
+                        if fork_is_false and row.get("fork") is not False:
                             continue
                         github_id = row.get("github_id")
                         if (isinstance(github_id, bool) or not isinstance(github_id, int)
