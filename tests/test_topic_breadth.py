@@ -159,7 +159,9 @@ def test_graphql_error_reports_safe_context_without_advancing_state(tmp_path):
         "message": "private server response containing unsafe details",
     }]}
     client = FakeClient([failed] * 12)
-    with pytest.raises(ValueError, match=r"topic a \(sweep page 0\): FORBIDDEN at topic.repositories.edges.0.node") as error:
+    # A lone topic exhausting retries/fallback is isolated as a coverage gap
+    # first; only the run-wide "every attempted page failed" error surfaces.
+    with pytest.raises(ValueError, match=r"every attempted topic page: a") as error:
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-24T00:00:00Z")
     assert "private server response" not in str(error.value)
@@ -167,6 +169,11 @@ def test_graphql_error_reports_safe_context_without_advancing_state(tmp_path):
     assert checkpoint["topics"]["a"]["after"] is None
     assert checkpoint["topics"]["a"]["page_index"] == 0
     assert not (tmp_path / "pages").exists()
+    error_coverage = json.loads((tmp_path / "coverage" / "a-s0001-p000000-error.json").read_text())
+    assert error_coverage["outcome"] == "error"
+    assert error_coverage["known_gap"] is True
+    assert "private server response" not in error_coverage["error"]
+    assert "FORBIDDEN at topic.repositories.edges.0.node" in error_coverage["error"]
 
 
 def test_transient_head_edge_payload_error_retries_then_succeeds_without_changing_deep_cursor(tmp_path):
@@ -217,14 +224,28 @@ def test_persistent_edge_payload_error_preserves_checkpoint_and_artifacts(tmp_pa
     checkpoint_before = (tmp_path / "checkpoint.json").read_text()
     artifacts_before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
     sleeps = []
-    with pytest.raises(ValueError, match=r"FORBIDDEN at topic.repositories.edges.53.node") as error:
+    # The next day's head refresh exhausts retries/fallback; a lone topic is
+    # still isolated as a coverage gap before the run-wide error surfaces.
+    with pytest.raises(ValueError, match=r"every attempted topic page: a") as error:
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
     assert "private server response" not in str(error.value)
     assert len(client.calls) == 13
     assert sleeps == [0.25, 0.5] * 4
+    # The checkpoint's per-topic state (after/page_index/sweep/completed_at/
+    # head_checked_at) is untouched so the failed topic retries next run;
+    # only the new error coverage record and rotation are new.
     assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
-    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
+    artifacts_after = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
+    new_files = sorted(set(artifacts_after) - set(artifacts_before))
+    assert len(new_files) == 1
+    assert new_files[0].startswith("coverage/") and new_files[0].endswith("-error.json")
+    error_coverage = json.loads((tmp_path / new_files[0]).read_text())
+    assert error_coverage["outcome"] == "error"
+    assert error_coverage["known_gap"] is True
+    assert error_coverage["head_only"] is True
+    assert "private server response" not in error_coverage["error"]
+    assert "FORBIDDEN at topic.repositories.edges.53.node" in error_coverage["error"]
 
 
 def test_unknown_head_payload_error_retries_then_succeeds(tmp_path):
@@ -254,14 +275,22 @@ def test_persistent_unknown_head_payload_error_preserves_checkpoint_and_artifact
     checkpoint_before = (tmp_path / "checkpoint.json").read_text()
     artifacts_before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
     sleeps = []
-    with pytest.raises(ValueError, match=r"topic a \(head refresh\): unknown") as error:
+    with pytest.raises(ValueError, match=r"every attempted topic page: a") as error:
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-25T00:00:00Z", retry_sleeper=sleeps.append)
     assert "private server response" not in str(error.value)
     assert len(client.calls) == 13
     assert sleeps == [0.25, 0.5] * 4
     assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
-    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
+    artifacts_after = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
+    new_files = sorted(set(artifacts_after) - set(artifacts_before))
+    assert len(new_files) == 1
+    assert new_files[0].startswith("coverage/") and new_files[0].endswith("-error.json")
+    error_coverage = json.loads((tmp_path / new_files[0]).read_text())
+    assert error_coverage["outcome"] == "error"
+    assert error_coverage["known_gap"] is True
+    assert error_coverage["head_only"] is True
+    assert "private server response" not in error_coverage["error"]
 
 
 @pytest.mark.parametrize("failure", [
@@ -313,12 +342,19 @@ def test_all_page_size_fallbacks_fail_without_writing_or_advancing(tmp_path):
                           observed_at="2026-09-24T23:00:00Z")
     checkpoint_before = (tmp_path / "checkpoint.json").read_text()
     artifacts_before = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
-    with pytest.raises(ValueError, match=r"topic a \(sweep page 1\): unknown"):
+    with pytest.raises(ValueError, match=r"every attempted topic page: a"):
         collect_topic_breadth(tmp_path, topics=["a"], client=client, max_pages=1,
                               observed_at="2026-09-24T01:00:00Z")
     assert [call[1]["first"] for call in client.calls[1:]] == [100] * 3 + [50] * 3 + [25] * 3 + [10] * 3
     assert (tmp_path / "checkpoint.json").read_text() == checkpoint_before
-    assert sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file()) == artifacts_before
+    artifacts_after = sorted(str(path.relative_to(tmp_path)) for path in tmp_path.rglob("*") if path.is_file())
+    new_files = sorted(set(artifacts_after) - set(artifacts_before))
+    assert len(new_files) == 1
+    assert new_files[0].startswith("coverage/") and new_files[0].endswith("-error.json")
+    error_coverage = json.loads((tmp_path / new_files[0]).read_text())
+    assert error_coverage["outcome"] == "error"
+    assert error_coverage["known_gap"] is True
+    assert error_coverage["head_only"] is False
 
 
 def test_hard_error_does_not_try_smaller_page_sizes(tmp_path):
@@ -456,3 +492,66 @@ def test_rate_budget_stops_when_remaining_is_less_than_last_cost(tmp_path):
     coverage = json.loads(result["coverage_paths"][0].read_text())
     assert coverage["rate_limit_cost"] == 5
     assert coverage["rate_limit_remaining"] == 3
+
+
+def test_one_topics_head_failure_is_isolated_as_coverage_gap_and_run_continues(tmp_path):
+    # Give both topics non-fresh progress so their heads are due the next day.
+    day_one = FakeClient([response("a", ids=[1], has_next=True), response("b", ids=[2])])
+    collect_topic_breadth(tmp_path, topics=["a", "b"], client=day_one, max_pages=2,
+                          observed_at="2026-09-24T00:00:00Z")
+    before_a = json.loads((tmp_path / "checkpoint.json").read_text())["topics"]["a"].copy()
+
+    head_b = response("b", ids=[3])
+    client = FakeClient([*([edge_payload_error()] * 12), head_b])
+    result = collect_topic_breadth(tmp_path, topics=["a", "b"], client=client, max_pages=3,
+                                   observed_at="2026-09-25T00:00:00Z", retry_sleeper=lambda *_: None)
+
+    # "a" exhausted retries/fallback exactly once and was never retried again
+    # within this run, while "b" was still collected normally.
+    a_calls = [call for call in client.calls if call[1]["name"] == "a"]
+    b_calls = [call for call in client.calls if call[1]["name"] == "b"]
+    assert len(a_calls) == 12
+    assert len(b_calls) == 1
+
+    assert result["pages_fetched"] == 1
+    assert result["pages_failed"] == 1
+    assert result["failed_topics"] == ["a"]
+
+    checkpoint = json.loads((tmp_path / "checkpoint.json").read_text())
+    assert checkpoint["topics"]["a"] == before_a  # untouched; retried next run
+    assert checkpoint["topics"]["b"]["head_checked_at"] == "2026-09-25T00:00:00Z"
+
+    error_path = tmp_path / "coverage" / "a-head-2026-09-25-error.json"
+    assert error_path in result["coverage_paths"]
+    error_coverage = json.loads(error_path.read_text())
+    assert error_coverage["outcome"] == "error"
+    assert error_coverage["known_gap"] is True
+    assert error_coverage["head_only"] is True
+    assert error_coverage["topic"] == "a"
+    assert error_coverage["repositories_seen"] == 0
+    assert error_coverage["observations_written"] == 0
+    assert "private server response" not in error_coverage["error"]
+    assert "FORBIDDEN at topic.repositories.edges.53.node" in error_coverage["error"]
+
+
+def test_every_topic_failing_raises_systemic_error(tmp_path):
+    unknown = {"errors": [{"message": "sanitized unknown"}]}
+    client = FakeClient([*([unknown] * 12), *([unknown] * 12)])
+    with pytest.raises(ValueError, match=r"every attempted topic page: a; b") as error:
+        collect_topic_breadth(tmp_path, topics=["a", "b"], client=client, max_pages=2,
+                              observed_at="2026-09-24T00:00:00Z", retry_sleeper=lambda *_: None)
+    assert "sanitized unknown" not in str(error.value)
+    assert len(client.calls) == 24
+
+
+def test_failed_attempts_consume_the_max_pages_budget(tmp_path):
+    unknown = {"errors": [{"message": "sanitized unknown"}]}
+    # Only enough scripted responses for two topics; if the collector spent
+    # budget on a third topic instead of stopping, the fake client would run
+    # out of scripted responses and raise IndexError instead of ValueError.
+    client = FakeClient([*([unknown] * 12), *([unknown] * 12)])
+    with pytest.raises(ValueError, match=r"every attempted topic page: a; b"):
+        collect_topic_breadth(tmp_path, topics=["a", "b", "c"], client=client, max_pages=2,
+                              observed_at="2026-09-24T00:00:00Z", retry_sleeper=lambda *_: None)
+    assert len(client.calls) == 24
+    assert all(variables["name"] != "c" for _, variables in client.calls)

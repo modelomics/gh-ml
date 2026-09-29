@@ -115,6 +115,69 @@ def test_topic_daily_no_pages_and_unchanged_state_skips_publication(tmp_path, mo
                                     client_factory=lambda **kw: kw) == 0
 
 
+def test_topic_daily_records_known_gaps_and_still_publishes(tmp_path, monkeypatch, capsys):
+    calls = {}
+    source = tmp_path / "remote-state.json"
+    source.write_bytes(b"pinned-state")
+
+    class API:
+        def repo_info(self, repo_id, *, repo_type, token):
+            return SimpleNamespace(sha="parent-sha")
+
+    def downloader(**kwargs):
+        return source
+
+    def hydrate(payload, root):
+        pass
+
+    def serialize(root):
+        return b"pinned-state"
+
+    def collect(root, *, topics, client, max_pages):
+        calls["collect"] = (topics, client, max_pages)
+        coverage = root / "machine-learning-head-2026-09-25-error.json"
+        coverage.write_text(json.dumps({
+            "topic": "machine-learning", "sweep": 1, "page_index": 0,
+            "observed_at": "2026-09-25T00:00:00Z", "head_only": True,
+            "outcome": "error", "error": "unknown",
+            "requested_page_size": 10, "page_size_fallback": True,
+            "repositories_seen": 0, "unique_repositories": 0, "forks_omitted": 0,
+            "observations_written": 0, "known_gap": True,
+        }))
+        return {"observation_paths": [], "coverage_paths": [coverage], "pages_fetched": 0,
+                "pages_failed": 1, "failed_topics": ["machine-learning"],
+                "observations_written": 0, "rate_limit_remaining": 4999}
+
+    publish_module = ModuleType("gh_ml.topic_publish")
+
+    def publish(repo_id, token, **kwargs):
+        calls["publish"] = (repo_id, token, kwargs)
+        calls["coverage"] = json.loads(kwargs["coverage_path"].read_text())
+        return "https://hub.example/run"
+    publish_module.publish_topic_run = publish
+    monkeypatch.setitem(sys.modules, "gh_ml.topic_publish", publish_module)
+    monkeypatch.setattr(cli, "_github_token", lambda _: "github-token")
+    monkeypatch.setattr(cli, "_hf_token", lambda _: "old-hf-token")
+    monkeypatch.setattr(cli, "_run_id", lambda _: "topic-run")
+    monkeypatch.setattr("gh_ml.topic_breadth_state.hydrate_topic_state", hydrate)
+    monkeypatch.setattr("gh_ml.topic_breadth_state.serialize_topic_state", serialize)
+
+    exit_code = cli._topic_breadth_daily(_args(tmp_path), api=API(), downloader=downloader,
+                                         token_provider=lambda: "fresh-hf-token", collector=collect,
+                                         client_factory=lambda **kwargs: kwargs)
+    assert exit_code == 0
+    assert "publish" in calls  # publication still happens on a gap-only run
+
+    assert calls["coverage"]["pages_failed"] == 1
+    assert calls["coverage"]["failed_topics"] == ["machine-learning"]
+    assert len(calls["coverage"]["known_gaps"]) == 1
+    assert calls["coverage"]["known_gaps"][0]["outcome"] == "error"
+    assert calls["coverage"]["known_gaps"][0]["topic"] == "machine-learning"
+
+    out = capsys.readouterr().out
+    assert "Topic breadth gaps: 1 topic page(s) failed (machine-learning)" in out
+
+
 def test_topic_daily_parser_defaults(tmp_path):
     args = cli._parser().parse_args(["topic-breadth-daily", "--work-dir", str(tmp_path)])
     assert args.repo == "modelomics/gh-ml"
