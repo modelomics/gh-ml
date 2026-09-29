@@ -519,21 +519,25 @@ def _topic_breadth_daily(args: argparse.Namespace, *, api: Any = None, downloade
         value = json.loads(path.read_text(encoding="utf-8"))
         coverage_rows.append(value)
     coverage_path = run_dir / "coverage.json"
+    known_gaps = [row for row in coverage_rows if row.get("outcome") == "error"]
     aggregate = {
         "run_id": run_id, "base_revision": base_revision,
         "pages_fetched": result.get("pages_fetched", 0),
+        "pages_failed": result.get("pages_failed", 0),
+        "failed_topics": result.get("failed_topics", []),
         "observations_written": len(observations),
         "rate_limit_remaining": result.get("rate_limit_remaining"),
         "rate_limit_remaining_by_page": [row.get("rate_limit_remaining") for row in coverage_rows],
         "coverage": coverage_rows,
         "coverage_paths": [str(path) for path in coverage_paths],
+        "known_gaps": known_gaps,
         "source_notes": ["GitHub GraphQL topic repository connections; pages correspond to the configured topic catalog.",
                          *[row["source_notes"] for row in coverage_rows if row.get("source_notes") is not None]],
     }
     _write_json(coverage_path, aggregate)
     state_bytes = serialize_topic_state(run_dir)
     has_pages = bool(result.get("pages_fetched", 0))
-    has_delta = has_pages or state_bytes != before_state_bytes
+    has_delta = has_pages or bool(known_gaps) or state_bytes != before_state_bytes
     if not args.no_publish and has_delta:
         fresh_token = (token_provider or (lambda: _hf_token(args.hf_token_env)))()
         if not fresh_token:
@@ -553,6 +557,9 @@ def _topic_breadth_daily(args: argparse.Namespace, *, api: Any = None, downloade
     elif not args.no_publish:
         print("No topic pages or state changes; skipping Hub publication.")
     print(f"Topic breadth {run_id}: {len(observations)} repositories across {result.get('pages_fetched', 0)} pages")
+    if result.get("pages_failed", 0):
+        failed_slugs = result.get("failed_topics", [])
+        print(f"Topic breadth gaps: {result['pages_failed']} topic page(s) failed ({', '.join(failed_slugs)})")
     print(f"Coverage: {coverage_path}")
     return 0
 

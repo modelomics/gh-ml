@@ -55,6 +55,25 @@ _GRAPHQL_PAYLOAD_RETRY_DELAYS = (0.25, 0.5)
 _GRAPHQL_PAGE_SIZES = (100, 50, 25, 10)
 
 
+class TopicPageError(ValueError):
+    """A single topic page failed after retries and page-size fallback.
+
+    Raised only for the GraphQL payload-error case that
+    ``collect_topic_breadth`` can isolate per topic; other structural
+    failures (invalid shapes, non-advancing cursors, and so on) stay plain
+    ``ValueError`` and abort the whole run, as before.
+    """
+
+    def __init__(self, slug: str, phase: str, summary: str, *,
+                 requested_page_size: int, page_size_fallback: bool) -> None:
+        super().__init__(f"GitHub GraphQL failed for topic {slug} ({phase}): {summary}")
+        self.slug = slug
+        self.phase = phase
+        self.summary = summary
+        self.requested_page_size = requested_page_size
+        self.page_size_fallback = page_size_fallback
+
+
 def _graphql_error_summary(errors: Any) -> str:
     """Return a bounded, schema-only summary without echoing server messages."""
     if not isinstance(errors, list) or not errors:
@@ -201,7 +220,8 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
     checkpoint = reconcile_topic_checkpoint(_read_checkpoint(checkpoint_path), topics, stamp)
     observation_paths: list[Path] = []
     coverage_paths: list[Path] = []
-    pages_fetched = observations_written = 0
+    pages_fetched = observations_written = pages_failed = 0
+    failed_topics: set[str] = set()
     rate_remaining: int | None = None
 
     def save_checkpoint() -> None:
@@ -210,7 +230,8 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
     save_checkpoint()
     if not topics:
         return {"observation_paths": [], "coverage_paths": [], "pages_fetched": 0,
-                "observations_written": 0, "rate_limit_remaining": None}
+                "observations_written": 0, "rate_limit_remaining": None,
+                "pages_failed": 0, "failed_topics": []}
 
     today = now.date()
 
@@ -256,7 +277,8 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
         if payload.get("errors"):
             phase = "head refresh" if head_only else f"sweep page {state['page_index']}"
             summary = _graphql_error_summary(payload["errors"])
-            raise ValueError(f"GitHub GraphQL failed for topic {slug} ({phase}): {summary}")
+            raise TopicPageError(slug, phase, summary, requested_page_size=requested_page_size,
+                                 page_size_fallback=page_size_fallback)
         data = payload.get("data")
         if not isinstance(data, dict) or "topic" not in data or "rateLimit" not in data:
             raise ValueError("invalid GraphQL topic response")
@@ -309,7 +331,7 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
         observations_path = root / "pages" / f"{stem}.jsonl"
         coverage_path = root / "coverage" / f"{stem}.json"
         coverage = {"topic": slug, "sweep": state["sweep"], "page_index": state["page_index"],
-                    "observed_at": stamp, "head_only": head_only,
+                    "observed_at": stamp, "head_only": head_only, "outcome": "ok",
                     "requested_page_size": requested_page_size,
                     "page_size_fallback": page_size_fallback,
                     "repositories_seen": len(edges), "unique_repositories": len(seen_ids),
@@ -333,13 +355,36 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
     def should_stop(remaining: int | None, cost: int | None) -> bool:
         return remaining == 0 or (remaining is not None and cost is not None and remaining < cost)
 
-    while pages_fetched < max_pages:
+    def record_failure(exc: TopicPageError, *, stem: str, index: int, sweep: int,
+                       page_index: int, head_only: bool) -> None:
+        # One topic's exhausted GraphQL failure becomes a known coverage gap
+        # instead of aborting the whole run. The topic's checkpoint state is
+        # left untouched (only rotation advances) so it is retried next run.
+        nonlocal pages_failed
+        coverage_path = root / "coverage" / f"{stem}-error.json"
+        coverage = {"topic": exc.slug, "sweep": sweep, "page_index": page_index,
+                    "observed_at": stamp, "head_only": head_only, "outcome": "error",
+                    "error": exc.summary, "requested_page_size": exc.requested_page_size,
+                    "page_size_fallback": exc.page_size_fallback,
+                    "repositories_seen": 0, "unique_repositories": 0, "forks_omitted": 0,
+                    "observations_written": 0, "known_gap": True}
+        _atomic(coverage_path, _json(coverage) + "\n")
+        coverage_paths.append(coverage_path)
+        failed_topics.add(exc.slug)
+        checkpoint["next_index"] = (index + 1) % len(topics)
+        save_checkpoint()
+        pages_failed += 1
+
+    while pages_fetched + pages_failed < max_pages:
         # Refresh stale heads before spending budget on deeper traversal. Fresh
         # topics use their normal first scan page as the daily head observation.
         head_index = None
         for offset in range(len(topics)):
             candidate_index = (checkpoint["next_index"] + offset) % len(topics)
-            state = checkpoint["topics"][topics[candidate_index]]
+            candidate_slug = topics[candidate_index]
+            if candidate_slug in failed_topics:
+                continue
+            state = checkpoint["topics"][candidate_slug]
             if head_is_due(state) and not fresh_progress(state):
                 head_index = candidate_index
                 break
@@ -348,8 +393,13 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
             state = checkpoint["topics"][slug]
             day = today.isoformat()
             stem = f"{slug}-head-{day}"
-            _written, remaining, cost, _missing, _cursor, _has_next = fetch_and_write(
-                slug, after=None, stem=stem, head_only=True, state=state)
+            try:
+                _written, remaining, cost, _missing, _cursor, _has_next = fetch_and_write(
+                    slug, after=None, stem=stem, head_only=True, state=state)
+            except TopicPageError as exc:
+                record_failure(exc, stem=stem, index=head_index, sweep=state["sweep"],
+                               page_index=state["page_index"], head_only=True)
+                continue
             state["head_checked_at"] = stamp
             checkpoint["next_index"] = (head_index + 1) % len(topics)
             save_checkpoint()
@@ -358,14 +408,19 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
             continue
 
         index = None
+        restart_snapshot: dict | None = None
         for offset in range(len(topics)):
             candidate_index = (checkpoint["next_index"] + offset) % len(topics)
-            state = checkpoint["topics"][topics[candidate_index]]
+            candidate_slug = topics[candidate_index]
+            if candidate_slug in failed_topics:
+                continue
+            state = checkpoint["topics"][candidate_slug]
             if state["completed_at"] is None:
                 index = candidate_index
                 break
             completed_dt = datetime.fromisoformat(state["completed_at"].replace("Z", "+00:00"))
             if now >= completed_dt + timedelta(days=30):
+                restart_snapshot = dict(state)
                 state["sweep"] += 1
                 state["page_index"] = 0
                 state["after"] = None
@@ -378,8 +433,16 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
         state = checkpoint["topics"][slug]
         previous_cursor = state["after"]
         path_stem = f"{slug}-s{state['sweep']:04d}-p{state['page_index']:06d}"
-        _written, remaining, cost, missing, end_cursor, has_next = fetch_and_write(
-            slug, after=previous_cursor, stem=path_stem, head_only=False, state=state)
+        try:
+            _written, remaining, cost, missing, end_cursor, has_next = fetch_and_write(
+                slug, after=previous_cursor, stem=path_stem, head_only=False, state=state)
+        except TopicPageError as exc:
+            attempt_sweep, attempt_page_index = state["sweep"], state["page_index"]
+            if restart_snapshot is not None:
+                checkpoint["topics"][slug] = restart_snapshot
+            record_failure(exc, stem=path_stem, index=index, sweep=attempt_sweep,
+                           page_index=attempt_page_index, head_only=False)
+            continue
         if missing or not has_next:
             state["after"] = None
             state["completed_at"] = stamp
@@ -391,6 +454,10 @@ def collect_topic_breadth(root: Path, *, topics: Sequence[str], client: Any,
         save_checkpoint()
         if should_stop(remaining, cost):
             break
+    if pages_fetched == 0 and pages_failed > 0:
+        raise ValueError("GitHub GraphQL failed for every attempted topic page: "
+                         + "; ".join(sorted(failed_topics)))
     return {"observation_paths": observation_paths, "coverage_paths": coverage_paths,
             "pages_fetched": pages_fetched, "observations_written": observations_written,
-            "rate_limit_remaining": rate_remaining}
+            "rate_limit_remaining": rate_remaining, "pages_failed": pages_failed,
+            "failed_topics": sorted(failed_topics)}
