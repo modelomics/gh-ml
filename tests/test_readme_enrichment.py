@@ -46,7 +46,7 @@ def test_selector_uses_generic_signals_and_rejects_applied_classes_profiles_and_
         row(7, "tools/tutorial", signals=["ml-method-cue"], description="Transformer tutorial."),
     ]
     chosen = select_readme_targets(rows, {}, now=NOW, max_requests=10)
-    assert [r["github_id"] for r in chosen] == [1, 2]
+    assert [r["github_id"] for r in chosen] == [1, 2, 3]
 
 
 def test_candidate_eligibility_is_not_required_for_known_research_metadata_patterns():
@@ -70,7 +70,65 @@ def test_low_priority_official_code_route_uses_generic_ml_context_or_method_labe
         row(205, "apps/applied", description="Official code for an applied customer classifier.", topics=["customer-support"]),
     ]
     # These are inspection targets in the lowest queue tier, not selector promotions.
-    assert [r["github_id"] for r in select_readme_targets(rows, {}, now=NOW, max_requests=10)] == [201, 202]
+    assert [r["github_id"] for r in select_readme_targets(rows, {}, now=NOW, max_requests=10)] == [201, 205, 202]
+
+
+def test_probable_content_queues_selector_exclusions_but_preserves_pure_negatives(monkeypatch):
+    monkeypatch.setattr(
+        readme_enrichment, "assess_probable_content",
+        lambda text: ["adaptation-or-fine-tuning"] if "substantive extension" in text else [],
+    )
+    course_extension = row(
+        210, "lab/course-extension", status="exclude", signals=["tutorial-repository"],
+        description="Course project with a substantive extension to transformer fine-tuning.",
+    )
+    course_extension["selection_reason"] = "explicit-noncontribution"
+    rows = [
+        course_extension,
+        row(211, "lab/course-only", status="exclude", signals=["tutorial-repository"],
+            description="Course project showing a transformer tutorial."),
+        row(212, "lab/fork-extension", status="exclude", description="A substantive extension."),
+        row(213, "lab/utility-extension", status="exclude", signals=["non-ml-utility"],
+            description="A command line utility."),
+    ]
+    rows[2]["fork"] = True
+    assert [r["github_id"] for r in select_readme_targets(rows, {}, now=NOW, max_requests=10)] == [210]
+
+
+def test_ml_contribution_can_route_non_ml_utility_but_plain_backtesting_stays_excluded():
+    ml_project = row(
+        214, "quant/crop-forest", status="exclude", signals=["non-ml-utility-cue"],
+        description="Trains a random forest to detect crop disease using locally collected measurements.",
+    )
+    ml_project["selection_reason"] = "non-ml-utility"
+    plain_utility = row(
+        215, "quant/backtester", status="exclude", signals=["backtesting-utility-cue"],
+        description="A backtesting toolkit for algorithmic trading and portfolio optimization.",
+    )
+    plain_utility["selection_reason"] = "backtesting-utility-cue"
+    assert [r["github_id"] for r in select_readme_targets(
+        [ml_project, plain_utility], {}, now=NOW, max_requests=2,
+    )] == [214]
+
+
+def test_current_readme_probable_signal_queues_selector_excluded_row(monkeypatch):
+    monkeypatch.setattr(readme_enrichment, "assess_probable_content", lambda _text: [])
+    candidate = row(220, "lab/applied", status="exclude", description="Transformer project.")
+    checkpoint = {"repositories": {"220": {
+        "repository_name_at_fetch": "lab/applied",
+        "readme_evidence_version": README_EVIDENCE_VERSION,
+        "readme_signals": ["substantive-application-or-experiments"],
+        "due_at": "2026-09-24T12:00:00Z",
+    }}}
+    assert select_readme_targets([candidate], checkpoint, now=NOW, max_requests=1) == [candidate]
+
+
+def test_plain_ml_context_is_a_lower_priority_inspection_route(monkeypatch):
+    monkeypatch.setattr(readme_enrichment, "assess_probable_content", lambda _text: [])
+    paperless = row(230, "lab/paperless", status="exclude", description="Transformer utility.")
+    assert [r["github_id"] for r in select_readme_targets(
+        [paperless], {}, now=NOW, max_requests=2,
+    )] == [230]
 
 
 def test_tiered_round_robin_and_checkpoint_cursor_fairness():
@@ -92,7 +150,7 @@ def test_200_persists_only_enums_and_304_reuses_compact_prior_evidence():
     assert "text" not in records[0] and "body" not in str(checkpoint)
     assert records[0]["readme_signals"] == [
         "method-contribution", "ml-method-context", "official-implementation-claim",
-        "paper-code-relationship", "paper-reference",
+        "original-implementation", "paper-code-relationship", "paper-reference",
     ]
     updated = NOW + timedelta(days=365)
     records2, checkpoint2, _ = enrich_readmes([candidate], checkpoint, client, now=updated, max_requests=1)
@@ -165,7 +223,7 @@ def test_stale_404_refresh_obeys_cooldown_and_retriggers_after_version_bump(monk
     assert prior["readme_refresh_attempted_version"] == README_EVIDENCE_VERSION
     assert select_readme_targets([candidate], refreshed, now=NOW + timedelta(days=1), max_requests=1) == []
 
-    monkeypatch.setattr(readme_enrichment, "README_EVIDENCE_VERSION", "gh-ml-readme-evidence-v3")
+    monkeypatch.setattr(readme_enrichment, "README_EVIDENCE_VERSION", "gh-ml-readme-evidence-v4")
     assert select_readme_targets([candidate], refreshed, now=NOW + timedelta(days=1), max_requests=1) == [candidate]
 
 

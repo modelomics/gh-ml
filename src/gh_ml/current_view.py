@@ -15,6 +15,7 @@ from .evidence import classify_repository_text
 from .selection import SELECTION_VERSION, assess_repository
 from .schema import normalize_method_label
 from .readme_signals import SUPPORTED_README_EVIDENCE_VERSIONS
+from .probable_content import PROBABLE_CONTENT_SIGNALS
 
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -23,13 +24,13 @@ _README_SIGNAL_ENUMS = {
     "paper-reference", "ml-method-context", "course-cue", "reproduction-cue", "survey-cue",
     "model-training-artifact", "paper-code-relationship", "method-contribution",
     "official-implementation-claim", "dataset-only-cue",
-}
+} | PROBABLE_CONTENT_SIGNALS
 _README_SECTION_ENUMS = {
     "abstract", "overview", "method", "results", "installation", "usage", "citation",
     "references", "course", "dataset", "other",
 }
 # Bump whenever current-view rows or their Parquet projection changes.
-CURRENT_VIEW_PROJECTION_VERSION = 7
+CURRENT_VIEW_PROJECTION_VERSION = 8
 
 
 def export_current_view_parquet(
@@ -116,6 +117,7 @@ def _export_observation_parquet(
         pa.field("candidate_rule_version", string),
         pa.field("candidate_eligible", pa.bool_()),
         pa.field("candidate_reason", string),
+        pa.field("candidate_evidence", strings),
         pa.field("created_at", string),
         pa.field("description", string),
         pa.field("domains", strings),

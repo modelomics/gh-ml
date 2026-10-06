@@ -1,0 +1,99 @@
+# Bounded recall lanes for repository work that may describe practical use,
+# evaluation, adaptation, classical ML, or scientific modeling rather than a
+# new neural architecture. These are retrieval signals, not novelty claims.
+
+[[queries]]
+id = "probable.classical-gradient-boosting-readme"
+q = '"gradient boosting" in:readme'
+domains = ["classical-ml", "tabular-ml"]
+methods = ["ensemble-learning", "gradient-boosting"]
+
+[[queries]]
+id = "probable.classical-xgboost-readme"
+q = "xgboost in:readme"
+domains = ["classical-ml", "tabular-ml"]
+methods = ["gradient-boosting", "ensemble-learning"]
+
+[[queries]]
+id = "probable.classical-lightgbm-readme"
+q = "lightgbm in:readme"
+domains = ["classical-ml", "tabular-ml"]
+methods = ["gradient-boosting", "ensemble-learning"]
+
+[[queries]]
+id = "probable.classical-catboost-readme"
+q = "catboost in:readme"
+domains = ["classical-ml", "tabular-ml"]
+methods = ["gradient-boosting", "ensemble-learning"]
+
+[[queries]]
+id = "probable.data-feature-selection"
+q = '"feature selection" "machine learning" in:description,readme'
+domains = ["data-centric-ai", "machine-learning"]
+methods = ["feature-selection", "machine-learning"]
+
+[[queries]]
+id = "probable.data-training-selection"
+q = '"data selection" "machine learning" in:description,readme'
+domains = ["data-centric-ai", "machine-learning"]
+methods = ["data-selection", "machine-learning"]
+
+[[queries]]
+id = "probable.data-dataset-curation"
+q = '"dataset curation" "machine learning" in:description,readme'
+domains = ["data-centric-ai", "machine-learning"]
+methods = ["data-curation", "machine-learning"]
+
+[[queries]]
+id = "probable.evaluation-ml-benchmark"
+q = '"machine learning benchmark" in:description,readme'
+domains = ["evaluation", "machine-learning"]
+methods = ["benchmarking", "evaluation"]
+
+[[queries]]
+id = "probable.evaluation-model-calibration-readme"
+q = '"model calibration" neural in:readme'
+domains = ["reliable-ml", "machine-learning"]
+methods = ["calibration", "uncertainty-estimation"]
+
+[[queries]]
+id = "probable.evaluation-ood-readme"
+q = '"out-of-distribution detection" in:readme'
+domains = ["reliable-ml", "machine-learning"]
+methods = ["out-of-distribution-detection", "uncertainty-estimation"]
+
+[[queries]]
+id = "probable.adaptation-domain-generalization-readme"
+q = '"domain generalization" in:readme'
+domains = ["machine-learning", "representation-learning"]
+methods = ["domain-generalization", "transfer-learning"]
+
+[[queries]]
+id = "probable.adaptation-finetuning-readme"
+q = '"fine-tuning" model in:readme'
+domains = ["machine-learning"]
+methods = ["fine-tuning", "model-adaptation"]
+
+[[queries]]
+id = "probable.scientific-system-identification"
+q = '"system identification" "machine learning" in:description,readme'
+domains = ["control-theory", "scientific-computing"]
+methods = ["system-identification", "scientific-machine-learning"]
+
+[[queries]]
+id = "probable.scientific-reduced-order-modeling"
+q = '"reduced-order modeling" "machine learning" in:description,readme'
+domains = ["engineering", "scientific-computing"]
+methods = ["reduced-order-modeling", "surrogate-modeling"]
+
+[[queries]]
+id = "probable.scientific-surrogate-modeling"
+q = '"surrogate modeling" "machine learning" in:description,readme'
+domains = ["scientific-computing"]
+methods = ["surrogate-modeling", "scientific-machine-learning"]
+
+[[queries]]
+id = "probable.scientific-data-assimilation"
+q = '"data assimilation" "machine learning" in:description,readme'
+domains = ["earth-science", "scientific-computing"]
+methods = ["data-assimilation", "scientific-machine-learning"]

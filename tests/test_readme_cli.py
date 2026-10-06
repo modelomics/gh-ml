@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from gh_ml import cli
+from gh_ml.readme_enrichment import DEFAULT_MAX_REQUESTS
 
 
 class FakeHub:
@@ -27,6 +28,11 @@ def _args(path: Path, *, no_publish=True):
     return SimpleNamespace(repo="org/data", max_requests=10, work_dir=path,
                            no_publish=no_publish, hf_token_env="HF_TOKEN",
                            github_token_env="GH_TOKEN")
+
+
+def test_readme_enrichment_default_budget_is_shared_with_cli():
+    assert DEFAULT_MAX_REQUESTS == 500
+    assert cli._parser().parse_args(["readme-enrich"]).max_requests == DEFAULT_MAX_REQUESTS
 
 
 def test_readme_cli_pins_all_history_and_uses_nested_checkpoint(tmp_path, monkeypatch, capsys):
