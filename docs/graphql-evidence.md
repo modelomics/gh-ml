@@ -1,0 +1,40 @@
+# Local GraphQL README evidence
+
+`gh-ml readme-graphql` fetches compact README evidence in bounded GraphQL batches and persists its queue and results in SQLite. The command is local-only: it does not write to the Hugging Face dataset or change the scheduled workflow. Its evidence can be reviewed and adapted for the existing compact README evidence pipeline after validation.
+
+## Inputs and resume
+
+The command requires `--state-db` and `--output-dir`; both paths must be outside the source repository so the database and generated run artifacts stay out of Git. Provide one or more `--input` paths to seed or refresh work. Inputs may be newline-delimited JSON or Parquet, and are streamed. Parquet requires the optional `parquet` dependency (`uv sync --extra parquet`). A later invocation may omit `--input` to resume queued repository work from the same database. To continue a partially scanned inventory, supply the same `--input` again; its ingestion cursor resumes from the saved row offset. The cursor identity includes file size and modification time, and `--input-revision` can pin an explicit inventory revision when those attributes are not sufficient.
+
+Prefer an explicit repository inventory or a daily delta feed with stable numeric `github_id` values, `full_name`, and `pushed_at`. The published `data/current/repositories.parquet` is a strict 2,500-row view, so it is a narrow sample. `data/repositories/repositories.parquet` is a broader non-fork view of roughly one million repositories, but excludes forks and does not represent all GitHub repositories. Neither file establishes complete GitHub coverage. JSONL inventories can include forks when the source supplies them. Do not describe any run as a full-universe bootstrap.
+
+Each run receipt records input paths and a hash of the row stream read during that invocation, row/repository counts, unfiltered input scope, elapsed time, batch metrics, and the stop reason. A partial scan remains marked incomplete and resumes only when that input is supplied again. Repeated runs with the same SQLite database resume repository work and avoid refetching unchanged completed items according to the evidence store's freshness policy. `source_complete` remains false: scanning an input inventory does not establish full GitHub coverage.
+
+## Budgets and freshness
+
+The defaults bound one invocation to 3,300 seconds, 10,000 repositories, and 1,000 batches; batch size is at most 50. `--max-seconds` accepts up to seven days for explicit bootstrap runs, but begin with a measured short run before setting a large budget. These are safety limits, not a promise that a full inventory can be processed in one run. Rate-limit responses leave unfinished work queued for a later invocation. The local database and output directory should live on persistent storage to preserve progress across daily runs.
+
+Changed repositories can be prioritized by their `pushed_at` value when that value is supplied. Daily freshness applies only to repositories included in the ingested delta; a current repository inventory alone is not a one-hour change feed. Without a daily or more frequent delta input, README freshness is limited by how often the inventory is rescanned. A systemd timer or other scheduler can invoke the command repeatedly with the same `--state-db`; configure it only after choosing a suitable inventory and persistent paths. No system service is installed by this command.
+
+The collector distinguishes missing README files from unsupported or unavailable GraphQL cases; unsupported outcomes remain unknown rather than being treated as evidence that a README is absent. Evidence is descriptive repository text, not proof of novelty or scientific validity.
+
+## Example
+
+```sh
+uv run --extra parquet gh-ml readme-graphql \
+  --input /mnt/archive/runs/gh-ml-inventory/repositories.parquet \
+  --state-db /mnt/archive/runs/gh-ml-graphql/state.sqlite \
+  --output-dir /mnt/archive/runs/gh-ml-graphql \
+  --max-seconds 3300
+```
+
+Continue later from the same database:
+
+```sh
+uv run gh-ml readme-graphql \
+  --state-db /mnt/archive/runs/gh-ml-graphql/state.sqlite \
+  --output-dir /mnt/archive/runs/gh-ml-graphql \
+  --max-seconds 3300
+```
+
+Keep each run's receipt and compact evidence files with the persistent run directory. Do not store model weights, full README bodies, or downloaded inventory copies in the repository.
