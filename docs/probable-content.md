@@ -1,0 +1,19 @@
+# Probable ML content
+
+The `candidates` view is a broad discovery view for public GitHub repositories that may contain original ML work. Its `ml-candidate-v4` rule retains rows included by strict `ml-contribution-v5`, existing qualified review cases, and rows with probable-content evidence in repository descriptions or available compact README signals. Candidate eligibility is independent of strict `selection_status`; a row can have `selection_status: exclude` and still be a candidate. The strict `current` view remains unchanged.
+
+README extraction stores compact evidence labels in the existing `readme_signals` field. The derived views expose candidate rationale in `candidate_evidence` with source prefixes such as `description:` and `readme:`; these labels identify content to inspect, not a paper-quality novelty assessment or proof that the described work is original. The fixed categories are:
+
+| Signal | Evidence sought | Does not mean |
+| --- | --- | --- |
+| `original-implementation` | An ML model or method implementation or training effort with a repository-specific contribution | That the model or method is scientifically new or validated |
+| `adaptation-or-fine-tuning` | Adaptation, fine-tuning, distillation, or pruning of an existing model for a concrete target or domain, with implementation or training/evaluation artifacts | That changing a prompt, config, or model name is a substantive adaptation |
+| `substantive-application-or-experiments` | A concrete ML task, application, or experiment with data, results, or an evaluation procedure | A generic AI application or API wrapper |
+| `original-dataset-or-benchmark` | Created, curated, or annotated data or a benchmark with a task and useful splits, metrics, or protocol | A repository that only hosts, links, or downloads existing data |
+| `original-tooling` | Substantial ML tooling, pipelines, or libraries that enable a new training, evaluation, or data workflow | A generic dashboard, CLI, or unrelated utility |
+
+For strict `review` rows, probable-content evidence from the description or an active README v3 can qualify the repository. For rows strict v5 excludes as coursework, a tutorial, or explicit non-contribution, only evidence in an active README v3 with a `method` or `results` section can qualify; this lets a separate extension qualify while course- or tutorial-only material stays out. A strict non-ML-utility exclusion can qualify only when its description signals a substantive ML application or experiment. Forks, profiles, surveys, paper lists, and resource lists remain excluded. Unextended reproductions and unrelated utilities have no qualifying evidence. Missing or stale README evidence from v1/v2 cannot establish a candidate through the README route. A negative cue elsewhere in a README does not automatically cancel an independently described contribution; the evidence extractor evaluates local contribution text.
+
+The candidate rule also preserves existing qualified review routes, including some paper/code cases. Paper links, query matches, stars, and repository labels remain discovery provenance; none alone is sufficient evidence of probable original content. A candidate is not a verified novel contribution, and the label does not guarantee correctness, reproducibility, or scientific value.
+
+Retrieval is incomplete. GitHub Search may miss repositories because of query vocabulary, indexing, request budgets, result caps, or private/deleted repositories. A pure copy with no evidence distinguishing it from its source may be missed; private work and work hosted elsewhere is outside this collection. The raw `observations` history preserves retrieved rows independently of candidate eligibility. See the [dataset card](../dataset/README.md) for the table layout and the [project README](../README.md) for collection and access details.

@@ -46,6 +46,11 @@ on:
         required: false
         type: number
         default: 20
+      readme_enrich_max_requests:
+        description: "Maximum GitHub README requests for evidence enrichment (1–1000; daily default 500)"
+        required: false
+        type: number
+        default: 500
 
 permissions:
   contents: read
@@ -66,6 +71,7 @@ jobs:
       CENSUS_MAX_PAGES: ${{ github.event_name == 'schedule' && 50 || inputs.census_max_pages }}
       TOPIC_MAX_PAGES: ${{ github.event_name == 'schedule' && 68 || inputs.topic_max_pages }}
       HF_PAPERS_MAX_PAGES: ${{ github.event_name == 'schedule' && 20 || inputs.hf_papers_max_pages }}
+      README_ENRICH_MAX_REQUESTS: ${{ github.event_name == 'schedule' && 500 || inputs.readme_enrich_max_requests }}
     permissions:
       contents: read
       id-token: write
@@ -87,6 +93,7 @@ jobs:
               "CENSUS_MAX_PAGES": (1, 100),
               "TOPIC_MAX_PAGES": (1, 100),
               "HF_PAPERS_MAX_PAGES": (1, 100),
+              "README_ENRICH_MAX_REQUESTS": (1, 1000),
           }
           for name, (minimum, maximum) in limits.items():
               value = os.environ.get(name, "")
@@ -170,7 +177,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_OIDC_RESOURCE: datasets/modelomics/gh-ml
-        run: uv run --frozen gh-ml readme-enrich --max-requests 150
+        run: uv run --frozen gh-ml readme-enrich --max-requests "$README_ENRICH_MAX_REQUESTS"
       - name: Collect Hugging Face Daily Papers links
         if: ${{ !inputs.snapshot_only }}
         id: hf_papers

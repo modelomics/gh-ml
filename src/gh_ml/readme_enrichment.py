@@ -11,9 +11,10 @@ import re
 from typing import Any, Mapping, Sequence
 
 from .github import GitHubAPIError
+from .probable_content import PROBABLE_CONTENT_SIGNALS, assess_probable_content
 from .readme_signals import README_EVIDENCE_VERSION, extract_readme_evidence
 
-DEFAULT_MAX_REQUESTS = 150
+DEFAULT_MAX_REQUESTS = 500
 _SUCCESS_RECHECK = timedelta(days=365)
 _MISSING_COOLDOWN = timedelta(days=30)
 _ERROR_COOLDOWN = timedelta(days=1)
@@ -57,13 +58,24 @@ def _signals(row: Mapping[str, Any]) -> set[str]:
     return set()
 
 
-def _target_tier(row: Mapping[str, Any]) -> int | None:
-    """Return a queue tier from selection signals, preserving hard negatives."""
+def _target_tier(row: Mapping[str, Any], prior: Mapping[str, Any] | None = None) -> int | None:
+    """Return a queue tier, including probable contribution evidence outside strict selection."""
     signals = _signals(row)
     reason = row.get("selection_reason")
     status = row.get("selection_status")
     name = row.get("full_name") or row.get("name")
     text = " ".join(str(row.get(k) or "") for k in ("name", "full_name", "description")).casefold()
+    description = row.get("description")
+    probable = set(assess_probable_content(description if isinstance(description, str) else ""))
+    repository_name = row.get("full_name") or row.get("name")
+    if (
+        isinstance(prior, Mapping)
+        and prior.get("repository_name_at_fetch") == repository_name
+        and prior.get("readme_evidence_version") == README_EVIDENCE_VERSION
+        and prior.get("last_readme_status") != 404
+    ):
+        probable.update(set(_sorted_enums(prior.get("readme_signals", []))) & PROBABLE_CONTENT_SIGNALS)
+    probable &= PROBABLE_CONTENT_SIGNALS
     profile = False
     if isinstance(name, str):
         parts = name.strip().split("/")
@@ -73,12 +85,14 @@ def _target_tier(row: Mapping[str, Any]) -> int | None:
         r"\b(?:tutorial|coursework|course|homework|assignment|awesome list|survey|reading list|portfolio)\b",
         text,
     )
-    if (
-        row.get("fork") is True or profile or signals & _HARD_NEGATIVE
-        or reason in _HARD_NEGATIVE or negative_text
-    ):
+    # Preserve decisive non-contribution evidence. Broad labels such as tutorial,
+    # course, or utility can coexist with an original extension, so the shared
+    # probable-content classifier may route those repositories for inspection.
+    decisive_negative = signals & {"fork", "owner-profile-repository"}
+    decisive_reason = reason in {"fork", "owner-profile-repository"}
+    if row.get("fork") is True or profile or decisive_negative or decisive_reason:
         return None
-    if status not in {"include", "review"}:
+    if (signals & _HARD_NEGATIVE or reason in _HARD_NEGATIVE or negative_text) and not probable:
         return None
     if signals & {"official-paper-implementation-cue", "paper-and-code-cue"}:
         return 0
@@ -86,6 +100,8 @@ def _target_tier(row: Mapping[str, Any]) -> int | None:
         return 1
     if signals & _TARGET_SIGNALS:
         return 2
+    if probable:
+        return 4
     # Low-priority inspection route: an explicit repository-owned official
     # code claim plus independent ML context or a research-method query label.
     # This does not make the repository selector-eligible.
@@ -101,6 +117,21 @@ def _target_tier(row: Mapping[str, Any]) -> int | None:
         )
         if has_ml_context or method_values:
             return 3
+    # Broad inspection route for paperless ML projects. Keep it below explicit
+    # contribution evidence and let the durable tier cursor spread coverage.
+    topics = row.get("topics", [])
+    topic_values = [item for item in topics if isinstance(item, str)] if isinstance(topics, Sequence) and not isinstance(topics, str) else []
+    method_values = row.get("methods", [])
+    method_values = [item for item in method_values if isinstance(item, str)] if isinstance(method_values, Sequence) and not isinstance(method_values, str) else []
+    has_ml_context = (
+        row.get("evidence_tier") in {"direct_ml_text", "ml_related_text"}
+        or bool(signals & {"ml-context-only", "ml-method-cue"})
+        or bool(_ML_TOPIC.search(text))
+        or any(_ML_TOPIC.search(topic.replace("_", "-")) for topic in topic_values)
+        or bool(method_values)
+    )
+    if has_ml_context:
+        return 5
     return None
 
 
@@ -136,7 +167,8 @@ def _queue(rows: Sequence[Mapping[str, Any]], checkpoint: Mapping[str, Any], now
     candidates: list[tuple[int, int, Mapping[str, Any]]] = []
     for row in rows:
         repo_id = _id(row)
-        tier = _target_tier(row)
+        prior = previous.get(str(repo_id), {}) if repo_id is not None else {}
+        tier = _target_tier(row, prior if isinstance(prior, Mapping) else None)
         if repo_id is None or tier is None:
             continue
         prior = previous.get(str(repo_id), {})
@@ -152,7 +184,7 @@ def _queue(rows: Sequence[Mapping[str, Any]], checkpoint: Mapping[str, Any], now
     # cursor. This prevents the larger review tier from starving stronger tiers.
     cursors = checkpoint.get("cursors", {})
     cursors = cursors if isinstance(cursors, Mapping) else {}
-    buckets: dict[int, list[tuple[int, Mapping[str, Any]]]] = {0: [], 1: [], 2: [], 3: []}
+    buckets: dict[int, list[tuple[int, Mapping[str, Any]]]] = {tier: [] for tier in range(6)}
     for tier, repo_id, row in candidates:
         buckets[tier].append((repo_id, row))
     for tier, bucket in buckets.items():
@@ -164,7 +196,7 @@ def _queue(rows: Sequence[Mapping[str, Any]], checkpoint: Mapping[str, Any], now
     positions = {tier: 0 for tier in buckets}
     while True:
         moved = False
-        for tier in (0, 1, 2, 3):
+        for tier in range(6):
             pos = positions[tier]
             if pos < len(buckets[tier]):
                 repo_id, row = buckets[tier][pos]
@@ -198,7 +230,7 @@ def enrich_readmes(
     old = checkpoint.get("repositories", {})
     repositories = {str(k): dict(v) for k, v in old.items() if isinstance(v, Mapping)} if isinstance(old, Mapping) else {}
     cursors_raw = checkpoint.get("cursors", {})
-    cursors = {str(k): v for k, v in cursors_raw.items() if str(k) in {"0", "1", "2", "3"} and isinstance(v, int)} if isinstance(cursors_raw, Mapping) else {}
+    cursors = {str(k): v for k, v in cursors_raw.items() if str(k) in {"0", "1", "2", "3", "4", "5"} and isinstance(v, int)} if isinstance(cursors_raw, Mapping) else {}
     records: list[dict[str, Any]] = []
     attempted = rate_limited = deferred = 0
     for tier, repo_id, row in _queue(rows, checkpoint, now)[:max_requests]:

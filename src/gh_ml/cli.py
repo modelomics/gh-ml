@@ -20,7 +20,7 @@ from .discovery import discover, discover_sample
 from .historical_ledger import discover_historical_ledger
 from .github import GitHubAPIError, GitHubClient, SearchProgress
 from .hub import load_checkpoint, publish_readme_run, publish_run
-from .readme_enrichment import enrich_readmes
+from .readme_enrichment import DEFAULT_MAX_REQUESTS as DEFAULT_README_MAX_REQUESTS, enrich_readmes
 from .query_catalog import load_queries
 from .schema import observation_from_repository, write_jsonl
 from .pwc import DEFAULT_DIR as DEFAULT_PWC_DIR, import_pwc
@@ -239,7 +239,7 @@ def _parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--work-dir", type=Path, required=True, help="temporary directory for downloaded history and generated snapshot")
     readme = subparsers.add_parser("readme-enrich", help="collect bounded compact README evidence for current repositories")
     readme.add_argument("--repo", default=DEFAULT_REPO, help=f"Hugging Face dataset repo (default: {DEFAULT_REPO})")
-    readme.add_argument("--max-requests", type=int, default=150, help="maximum GitHub README requests per invocation")
+    readme.add_argument("--max-requests", type=int, default=DEFAULT_README_MAX_REQUESTS, help="maximum GitHub README requests per invocation")
     readme.add_argument("--work-dir", type=Path, default=DEFAULT_OUTPUT / "readme-enrich", help="temporary download and local output directory")
     readme.add_argument("--no-publish", action="store_true", help="write local compact results without publishing to Hugging Face")
     readme.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")

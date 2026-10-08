@@ -19,9 +19,10 @@ def review_row(**updates: object) -> dict[str, object]:
 
 def test_method_paper_and_code_review_is_eligible() -> None:
     assert assess_candidate(review_row()) == {
-        "candidate_rule_version": "ml-candidate-v3",
+        "candidate_rule_version": "ml-candidate-v4",
         "candidate_eligible": True,
         "candidate_reason": "review-with-repository-evidence",
+        "candidate_evidence": ["selection:ml-method-cue", "selection:paper-and-code-cue"],
     }
 
 
@@ -114,6 +115,91 @@ def test_applied_standard_model_with_contribution_language_is_not_promoted() -> 
 @pytest.mark.parametrize("row", [None, {}, {"selection_status": "review"}, {"selection_status": []}])
 def test_malformed_input_returns_stable_ineligible_result(row: object) -> None:
     result = assess_candidate(row)  # type: ignore[arg-type]
-    assert result["candidate_rule_version"] == "ml-candidate-v3"
+    assert result["candidate_rule_version"] == "ml-candidate-v4"
     assert result["candidate_eligible"] is False
     assert isinstance(result["candidate_reason"], str)
+    assert result["candidate_evidence"] == []
+
+
+@pytest.mark.parametrize(
+    "description,signal",
+    [
+        ("Trains a random forest to detect crop disease using locally collected measurements.", "substantive-application-or-experiments"),
+        ("Fine-tuned a speech model for regional dialect recognition.", "adaptation-or-fine-tuning"),
+        ("Created and annotated a benchmark dataset with evaluation metrics for transformer models.", "original-dataset-or-benchmark"),
+        ("Built a PyTorch training pipeline for diffusion models.", "original-tooling"),
+        ("Implemented a graph neural network for molecular property prediction.", "original-implementation"),
+    ],
+)
+def test_probable_original_content_in_description_qualifies(description: str, signal: str) -> None:
+    row = review_row(description=description, selection_reason="insufficient-repository-evidence",
+                     selection_signals=[], evidence_tier="no_text_signal")
+    result = assess_candidate(row)
+    assert result["candidate_eligible"] is True
+    assert f"description:{signal}" in result["candidate_evidence"]
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "AI chatbot powered by an API.",
+        "Tutorial: we introduce a new transformer architecture.",
+        "This tutorial introduces a new transformer architecture.",
+        "A list of projects that introduce transformer models.",
+        "We will develop a new transformer architecture.",
+        "They propose a new transformer model in this project.",
+        "Applies a transformer model to classify product reviews.",
+        "Faithful reproduction of a transformer paper and its results.",
+    ],
+)
+def test_generic_future_tutorial_list_and_reproduction_text_is_not_original_content(description: str) -> None:
+    row = review_row(description=description, selection_reason="insufficient-repository-evidence",
+                     selection_signals=[], evidence_tier="no_text_signal")
+    assert assess_candidate(row)["candidate_eligible"] is False
+
+
+def test_active_readme_v3_content_can_rescue_sparse_metadata() -> None:
+    row = review_row(
+        description="A project.", selection_reason="insufficient-repository-evidence",
+        selection_signals=[], evidence_tier="no_text_signal",
+        readme_status="ok", readme_evidence_version="gh-ml-readme-evidence-v3",
+        readme_signals=["adaptation-or-fine-tuning"],
+    )
+    result = assess_candidate(row)
+    assert result["candidate_eligible"] is True
+    assert "readme:adaptation-or-fine-tuning" in result["candidate_evidence"]
+
+
+def test_course_exclusion_can_be_rescued_by_separate_active_readme_extension() -> None:
+    row = review_row(
+        selection_status="exclude", selection_reason="tutorial-repository",
+        description="Tutorial and walkthrough for transformer models.",
+        readme_status="ok", readme_evidence_version="gh-ml-readme-evidence-v3",
+        readme_signals=["original-implementation"], readme_sections=["overview", "method"],
+    )
+    result = assess_candidate(row)
+    assert result["candidate_eligible"] is True
+    assert "readme:original-implementation" in result["candidate_evidence"]
+
+
+def test_ml_backtesting_exclusion_needs_specific_ml_experiment_evidence() -> None:
+    positive = review_row(
+        selection_status="exclude", selection_reason="non-ml-utility",
+        description="Trains a random forest to predict portfolio risk using historical market data and evaluates return metrics.",
+    )
+    negative = review_row(
+        selection_status="exclude", selection_reason="non-ml-utility",
+        description="A Pythonic algorithmic trading and backtesting library.",
+    )
+    assert assess_candidate(positive)["candidate_eligible"] is True
+    assert assess_candidate(negative)["candidate_eligible"] is False
+
+
+@pytest.mark.parametrize("status,version", [("stale_name", "gh-ml-readme-evidence-v3"), ("ok", "gh-ml-readme-evidence-v2"), ("missing", "gh-ml-readme-evidence-v3")])
+def test_inactive_or_legacy_readme_probable_signals_do_not_qualify(status: str, version: str) -> None:
+    row = review_row(
+        description="A project.", selection_reason="insufficient-repository-evidence",
+        selection_signals=[], evidence_tier="no_text_signal", readme_status=status,
+        readme_evidence_version=version, readme_signals=["original-tooling"],
+    )
+    assert assess_candidate(row)["candidate_eligible"] is False

@@ -9,9 +9,10 @@ from __future__ import annotations
 import re
 import textwrap
 
+from .probable_content import assess_probable_content
 
-README_EVIDENCE_VERSION = "gh-ml-readme-evidence-v2"
-SUPPORTED_README_EVIDENCE_VERSIONS = frozenset({"gh-ml-readme-evidence-v1", README_EVIDENCE_VERSION})
+README_EVIDENCE_VERSION = "gh-ml-readme-evidence-v3"
+SUPPORTED_README_EVIDENCE_VERSIONS = frozenset({"gh-ml-readme-evidence-v1", "gh-ml-readme-evidence-v2", README_EVIDENCE_VERSION})
 _MAX_INPUT_CHARS = 200_000
 
 # All labels in the returned schema are fixed enums. Keep patterns broad enough
@@ -165,7 +166,7 @@ def extract_readme_evidence(text: str) -> dict[str, object]:
     signals: set[str] = set()
     dataset_only = bool(blocks) and all(_DATASET.search(p) for _, p in blocks)
 
-    for _, paragraph in blocks:
+    for section, paragraph in blocks:
         has_paper = bool(_PAPER.search(paragraph))
         has_code = bool(_CODE.search(paragraph))
         has_ml = bool(_ML_CONTEXT.search(paragraph) or _PYTORCH_METHOD_CONTEXT.search(paragraph))
@@ -185,6 +186,9 @@ def extract_readme_evidence(text: str) -> dict[str, object]:
             signals.add("survey-cue")
         if _ARTIFACT.search(paragraph) and has_ml:
             signals.add("model-training-artifact")
+
+        if section not in {"references", "citation"}:
+            signals.update(assess_probable_content(paragraph))
 
         if has_ml and not (has_course or has_reproduction or has_survey):
             if has_paper and has_code:

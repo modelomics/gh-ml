@@ -171,6 +171,14 @@ def test_dataset_only_readme_gets_negative_cue():
     assert "dataset-only-cue" in result["readme_signals"]
 
 
+def test_probable_content_in_reference_sections_does_not_promote_repository():
+    result = extract_readme_evidence(
+        "# Project\n\n## References\n"
+        "We propose a new transformer architecture and implement a model for image generation."
+    )
+    assert "original-implementation" not in result["readme_signals"]
+
+
 def test_sections_are_fixed_enums_and_no_readme_text_is_returned():
     readme = """# Strange private project name
     ## Method

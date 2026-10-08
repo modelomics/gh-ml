@@ -221,7 +221,7 @@ def test_readme_empty_run_publishes_deterministic_empty_jsonl() -> None:
 
 def test_readme_checkpoint_rejects_raw_text_and_unknown_enums() -> None:
     row = _readme_record()
-    row["readme_evidence_version"] = "gh-ml-readme-evidence-v3"
+    row["readme_evidence_version"] = "gh-ml-readme-evidence-v4"
     with pytest.raises(ValueError, match="unsupported"):
         publish_readme_run("org/data", "token", records=[row], coverage={}, checkpoint={}, api=ReadmeHub())
     with pytest.raises(ValueError, match="unsupported repository fields"):

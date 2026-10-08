@@ -11,6 +11,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from .readme_signals import SUPPORTED_README_EVIDENCE_VERSIONS
+from .probable_content import PROBABLE_CONTENT_SIGNALS
 
 _CHECKPOINT = "state/checkpoint.json"
 _README_CHECKPOINT = "state/readme-evidence.json"
@@ -23,7 +24,7 @@ _README_SIGNAL_ENUMS = {
     "paper-reference", "ml-method-context", "course-cue", "reproduction-cue", "survey-cue",
     "model-training-artifact", "paper-code-relationship", "method-contribution",
     "official-implementation-claim", "dataset-only-cue",
-}
+} | PROBABLE_CONTENT_SIGNALS
 _README_SECTION_ENUMS = {
     "abstract", "overview", "method", "results", "installation", "usage", "citation",
     "references", "course", "dataset", "other",

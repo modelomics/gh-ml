@@ -52,8 +52,9 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
              "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": [], "candidate_rule_version": "ml-candidate-v3",
-         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v4",
+         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence",
+         "candidate_evidence": []},
         {**_row(20, "2026-09-24T12:00:00Z", stars=50, extra={"kept": True},
                 query_ids=["new.query"], domains=["Vision"], methods=["K means"],
                 novelty_signals=["new-signal"]),
@@ -65,14 +66,15 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
              "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": [], "candidate_rule_version": "ml-candidate-v3",
-         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence"},
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v4",
+         "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence",
+         "candidate_evidence": []},
     ]
     assert report["observation_count"] == 4
     assert report["current_view_count"] == 2
-    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 7
+    assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 8
     manifest = json.loads((tmp_path / "view.jsonl.manifest.json").read_text())
-    assert manifest["candidate_rule_version"] == "ml-candidate-v3"
+    assert manifest["candidate_rule_version"] == "ml-candidate-v4"
     assert "queryless absent or false" in manifest["selection"]
     assert manifest["input_files"][1]["observations"] == 2
     assert repeat.read_bytes() == output.read_bytes()
@@ -277,7 +279,7 @@ def test_parquet_export_preserves_numeric_ids_nested_lists_nulls_and_late_extra_
          "stars": 3, "topics": ["vision", "learning"], "domains": [], "description": None},
         {"github_id": 2, "name": "two", "observed_at": "2026-01-02T00:00:00Z",
          "stars": 0, "topics": [], "domains": ["biology"], "description": "example",
-         "candidate_evidence": [{"kind": "paper", "signals": ["citation", "abstract"]}]},
+         "candidate_evidence": ["readme:original-implementation"]},
         {"github_id": 3, "name": "three", "observed_at": "2026-01-03T00:00:00Z",
          "stars": 8, "topics": None, "domains": ["biology", "chemistry"], "description": None,
          "pwc_assertions": {"paper_id": "P42", "models": ["model-a", "model-b"]}},
@@ -293,16 +295,18 @@ def test_parquet_export_preserves_numeric_ids_nested_lists_nulls_and_late_extra_
     assert pa.types.is_int64(table.schema.field("github_id").type)
     assert pa.types.is_list(table.schema.field("topics").type)
     assert pa.types.is_list(table.schema.field("paper_ids").type)
+    assert pa.types.is_list(table.schema.field("candidate_evidence").type)
     assert pa.types.is_string(table.schema.field("observed_at").type)
     assert pa.types.is_string(table.schema.field("extra_json").type)
     assert table.to_pylist()[0]["github_id"] == 1
     assert table.to_pylist()[0]["topics"] == ["vision", "learning"]
     assert table.to_pylist()[0]["domains"] == []
     assert table.to_pylist()[0]["description"] is None
+    assert table.to_pylist()[1]["candidate_evidence"] == ["readme:original-implementation"]
     assert table.to_pylist()[1]["topics"] == []
     assert table.to_pylist()[2]["topics"] is None
     for actual, expected in zip(table.to_pylist(), rows, strict=True):
-        extras = {key: expected[key] for key in ("candidate_evidence", "pwc_assertions") if key in expected}
+        extras = {key: expected[key] for key in ("pwc_assertions",) if key in expected}
         if not extras:
             assert actual["extra_json"] is None
         else:
@@ -335,7 +339,7 @@ def test_raw_observation_parquet_keeps_every_row_in_file_order_and_preserves_ext
         {"github_id": 12, "name": "owner/first", "observed_at": "2026-01-01T00:00:00Z",
          "query_ids": ["first.query"], "domains": ["vision"], "methods": ["transformer"],
          "novelty_signals": ["paper"], "selection_status": "exclude",
-         "candidate_evidence": {"source": "readme", "signals": ["algorithm"]}},
+         "candidate_evidence": ["readme:original-tooling"]},
         {"github_id": 12, "name": "owner/first", "observed_at": "2026-01-02T00:00:00Z",
          "query_ids": ["second.query"], "domains": [], "methods": [], "novelty_signals": [],
          "selection_status": "include", "batch_marker": 2},
@@ -359,9 +363,8 @@ def test_raw_observation_parquet_keeps_every_row_in_file_order_and_preserves_ext
     assert pa.types.is_int64(table.schema.field("github_id").type)
     assert pa.types.is_list(table.schema.field("query_ids").type)
     assert pa.types.is_string(table.schema.field("selection_status").type)
-    assert json.loads(rows[0]["extra_json"]) == {
-        "candidate_evidence": {"source": "readme", "signals": ["algorithm"]},
-    }
+    assert rows[0]["candidate_evidence"] == ["readme:original-tooling"]
+    assert rows[0]["extra_json"] is None
     assert json.loads(rows[1]["extra_json"]) == {"batch_marker": 2}
     assert json.loads(rows[2]["extra_json"]) == {"pwc_assertions": [{"paper_id": "P7"}]}
     assert rows[0]["query_ids"] == ["first.query"]
@@ -422,7 +425,7 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
     newer = _write(tmp_path / "newer.jsonl", [
         _row(7, "2026-01-01T00:00:00Z", query_ids=["new"], domains=["ml"],
              methods=["Transformer"], novelty_signals=["topics"], paper_ids=["P2", "P1"],
-             candidate_evidence=[{"source": "census"}]),
+             description="Implemented a graph neural network for molecular property prediction."),
     ])
     view = tmp_path / "view.jsonl"
     parquet = tmp_path / "view.parquet"
@@ -430,7 +433,6 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
     export_current_view_parquet(view, parquet)
 
     row = pq.read_table(parquet).to_pylist()[0]
-    extra = json.loads(row["extra_json"])
     assert row["all_query_ids"] == ["new", "old"]
     assert row["all_domains"] == ["bio", "ml"]
     assert row["all_methods"] == ["k-means", "transformer"]
@@ -438,8 +440,8 @@ def test_parquet_extra_json_round_trips_aggregated_evidence(tmp_path):
     assert row["paper_ids"] == ["P1", "P2"]
     assert row["observation_count"] == 2
     assert row["first_observed_at"] == "2024-01-01T00:00:00Z"
-    assert extra["candidate_evidence"] == [{"source": "census"}]
-    assert "paper_ids" not in extra
+    assert row["candidate_evidence"] == ["description:original-implementation"]
+    assert row["extra_json"] is None
 
 
 def test_current_view_adds_evidence_only_from_latest_repository_text(tmp_path):
@@ -531,7 +533,7 @@ def test_candidate_assessment_is_applied_to_latest_deduped_observation(tmp_path)
     assert rows[0]["github_id"] == 41
     assert rows[0]["observation_count"] == 2
     assert rows[0]["candidate_eligible"] is True
-    assert rows[0]["candidate_reason"] == "review-with-repository-evidence"
+    assert rows[0]["candidate_reason"] == "probable-original-content:description:original-implementation"
     assert rows[1]["github_id"] == 42
     assert rows[1]["selection_status"] == "exclude"
     assert rows[1]["candidate_eligible"] is False
@@ -606,7 +608,7 @@ def test_readme_evidence_projection_accepts_mixed_legacy_and_current_versions(tm
          "readme_sections": ["method"], "readme_checked_at": None},
         {"github_id": 10, "repository_name_at_fetch": "current/repo", "observed_at": "2026-01-02T00:00:00Z",
          "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None,
-         "readme_evidence_version": "gh-ml-readme-evidence-v2", "readme_signals": ["paper-reference"],
+         "readme_evidence_version": "gh-ml-readme-evidence-v3", "readme_signals": ["paper-reference"],
          "readme_sections": ["references"], "readme_checked_at": None},
     ])
     output = tmp_path / "view.jsonl"
@@ -614,7 +616,7 @@ def test_readme_evidence_projection_accepts_mixed_legacy_and_current_versions(tm
     rows = _read(output)
     assert [(row["github_id"], row["readme_evidence_version"], row["readme_signals"]) for row in rows] == [
         (9, "gh-ml-readme-evidence-v1", ["ml-method-context"]),
-        (10, "gh-ml-readme-evidence-v2", ["paper-reference"]),
+        (10, "gh-ml-readme-evidence-v3", ["paper-reference"]),
     ]
     assert report["readme_evidence_count"] == 2
 
@@ -624,7 +626,7 @@ def test_readme_evidence_rejects_unknown_version(tmp_path):
     evidence = _write(tmp_path / "readme.jsonl", [{
         "github_id": 1, "repository_name_at_fetch": "a/b", "observed_at": "2026-01-02T00:00:00Z",
         "readme_status": "ok", "readme_etag": None, "readme_blob_sha": None,
-        "readme_evidence_version": "gh-ml-readme-evidence-v3", "readme_signals": [],
+        "readme_evidence_version": "gh-ml-readme-evidence-v4", "readme_signals": [],
         "readme_sections": [], "readme_checked_at": None,
     }])
     with pytest.raises(ValueError, match="unsupported readme_evidence_version"):
