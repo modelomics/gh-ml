@@ -19,7 +19,9 @@ from gh_ml.semantic_triage import (
     ENCODER_REPO,
     ENCODER_REVISION,
     MODEL_VERSION,
+    MODEL_VERSION_GUARDED,
     SemanticTriage,
+    guarded_artifact_from_v1,
     load_artifact,
     metadata_fingerprint,
     select_defer_threshold,
@@ -124,6 +126,81 @@ def test_predict_batch_matches_single_predictions_and_uses_one_encoder_call() ->
     ]
     assert [result["decision"] for result in batch_results] == ["fetch", "defer"]
     assert batch_results[0]["metadata_fingerprint"] == metadata_fingerprint(rows[0])
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {"name": "owner/clinic-saas", "description": "AI SaaS for clinical note and workflow support"},
+        {"name": "owner/clinical-platform", "description": "Artificial intelligence for generic clinical workflows"},
+        {"name": "owner/agent-kit", "description": "A toolkit for coding agents and AI agents"},
+        {"name": "owner/vision", "description": "Research tools", "topics": ["computer vision", "deep learning"]},
+        {"name": "owner/ml", "description": "Neural network training toolkit", "language": "Python"},
+        {"name": "owner/framework", "description": "Build models with PyTorch or TensorFlow", "language": "Python"},
+        {"name": "owner/gpt", "description": "LLM application development for teams"},
+    ],
+)
+def test_v2_explicit_ml_metadata_routes_before_encoder(row) -> None:
+    encoder = FakeEncoder()
+    model = SemanticTriage(guarded_artifact_from_v1(_artifact()), encoder=encoder)
+    result = model.predict(row)
+    assert result["decision"] == "fetch"
+    assert result["predicted_label"] == "ml_candidate"
+    assert result["model_score"] is None
+    assert result["reason"] == "explicit_ml_metadata"
+    assert result["artifact_version"] == MODEL_VERSION_GUARDED
+    assert encoder.calls == []
+
+
+def test_positive_guard_uses_word_boundaries_and_only_allowlisted_fields() -> None:
+    encoder = FakeEncoder()
+    model = SemanticTriage(guarded_artifact_from_v1(_artifact()), encoder=encoder)
+    row = {
+        "name": "owner/kitchen-tool",
+        "description": "A strainer drains pasta before mail alerts go to users.",
+        "language": "Python",
+        "selection_status": "ML",
+        "query": "artificial intelligence",
+        "candidate_eligible": True,
+    }
+    result = model.predict(row)
+    assert result["reason"] == "model_score"
+    assert result["predicted_label"] == "not_ml_relevant"
+    assert len(encoder.calls) == 1
+
+
+def test_v1_behavior_is_unchanged_and_guarded_artifact_has_new_fingerprint() -> None:
+    row = {
+        "name": "owner/clinical-saas",
+        "description": "AI SaaS for clinical appointments and billing workflows",
+        "language": "Python",
+    }
+    v1_encoder = FakeEncoder()
+    v1_model = SemanticTriage(_artifact(), encoder=v1_encoder)
+    v1_result = v1_model.predict(row)
+    assert v1_result["predicted_label"] == "not_ml_relevant"
+    assert v1_result["reason"] == "model_score"
+    assert len(v1_encoder.calls) == 1
+
+    v2_artifact = guarded_artifact_from_v1(_artifact())
+    v2_encoder = FakeEncoder()
+    v2_model = SemanticTriage(v2_artifact, encoder=v2_encoder)
+    v2_result = v2_model.predict(row)
+    assert v2_artifact["weights"] == _artifact()["weights"]
+    assert v2_artifact["intercept"] == _artifact()["intercept"]
+    assert v2_artifact["defer_threshold"] == _artifact()["defer_threshold"]
+    assert v2_result["reason"] == "explicit_ml_metadata"
+    assert v2_result["metadata_fingerprint"] == v1_result["metadata_fingerprint"]
+    assert v2_result["artifact_sha256"] != v1_result["artifact_sha256"]
+    assert v2_encoder.calls == []
+
+
+def test_v2_policy_must_match_immutable_pattern_manifest() -> None:
+    artifact = guarded_artifact_from_v1(_artifact())
+    artifact["positive_guard"]["patterns"][0] = r"\bai\b"
+    artifact["artifact_sha256"] = _canonical_hash(artifact)
+    with pytest.raises(ValueError, match="guard policy mismatch"):
+        semantic_triage.validate_artifact(artifact)
 
 
 def test_fingerprint_equivalent_metadata_has_identical_encoder_input() -> None:

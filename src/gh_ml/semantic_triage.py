@@ -13,6 +13,7 @@ import math
 import re
 import time
 import unicodedata
+from copy import deepcopy
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -28,6 +29,27 @@ from .metadata_triage import (
 
 ARTIFACT_SCHEMA = "gh-ml-semantic-triage-v1"
 MODEL_VERSION = "minilm-l6-v2-logreg-v1"
+MODEL_VERSION_GUARDED = "minilm-l6-v2-logreg-v2"
+SUPPORTED_MODEL_VERSIONS = frozenset({MODEL_VERSION, MODEL_VERSION_GUARDED})
+POSITIVE_GUARD_VERSION = "explicit-ml-positive-v1"
+EXPLICIT_ML_SIGNAL_PATTERNS = (
+    r"\b(?:machine[\s-]+learning|deep[\s-]+learning|artificial[\s-]+intelligence|computer[\s-]+vision|reinforcement[\s-]+learning|neural[\s-]+networks?)\b",
+    r"\b(?:ai|ml|llm|gpt)\b",
+    r"\b(?:pytorch|tensorflow|scikit[\s-]*learn|sklearn)\b",
+    r"\b(?:coding[\s-]+agents?|ai[\s-]+agents?)\b",
+)
+_POSITIVE_GUARD_POLICY_BODY = {
+    "version": POSITIVE_GUARD_VERSION,
+    "patterns": list(EXPLICIT_ML_SIGNAL_PATTERNS),
+    "features": list(ALLOWED_FEATURES),
+}
+POSITIVE_GUARD_POLICY_SHA256 = hashlib.sha256(
+    json.dumps(_POSITIVE_GUARD_POLICY_BODY, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+POSITIVE_GUARD_POLICY = {
+    **_POSITIVE_GUARD_POLICY_BODY,
+    "sha256": POSITIVE_GUARD_POLICY_SHA256,
+}
 ENCODER_REPO = "sentence-transformers/all-MiniLM-L6-v2"
 ENCODER_REVISION = "1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 ENCODER_SNAPSHOT_PATH = (
@@ -57,6 +79,7 @@ MIN_INFORMATIVE_TOKENS = 3
 MAX_INPUT_CHARS = 4000
 MAX_SEQUENCE_TOKENS = 256
 _TOKEN_RE = re.compile(r"(?u)\b[\w][\w+#.-]*\b")
+_EXPLICIT_ML_PATTERNS = tuple(re.compile(pattern, re.IGNORECASE) for pattern in EXPLICIT_ML_SIGNAL_PATTERNS)
 
 
 def _canonical_hash(artifact: Mapping[str, Any]) -> str:
@@ -116,6 +139,12 @@ def _unsupported_script(text: str) -> bool:
     return False
 
 
+def _has_explicit_ml_metadata(row: Mapping[str, Any]) -> bool:
+    """Find explicit positive ML evidence in allowlisted metadata only."""
+    text = canonical_metadata_text(_feature_row(row))
+    return any(pattern.search(text) for pattern in _EXPLICIT_ML_PATTERNS)
+
+
 def _json_object(path: str | Path) -> dict[str, Any]:
     with Path(path).open(encoding="utf-8") as handle:
         value = json.load(handle)
@@ -127,8 +156,14 @@ def _json_object(path: str | Path) -> dict[str, Any]:
 def validate_artifact(artifact: Mapping[str, Any]) -> None:
     if artifact.get("schema") != ARTIFACT_SCHEMA:
         raise ValueError("unsupported semantic triage artifact schema")
-    if artifact.get("model_version") != MODEL_VERSION:
+    model_version = artifact.get("model_version")
+    if model_version not in SUPPORTED_MODEL_VERSIONS:
         raise ValueError("unsupported semantic triage model version")
+    if model_version == MODEL_VERSION_GUARDED:
+        if artifact.get("positive_guard") != POSITIVE_GUARD_POLICY:
+            raise ValueError("semantic positive metadata guard policy mismatch")
+    elif "positive_guard" in artifact:
+        raise ValueError("legacy semantic triage artifacts cannot carry a positive guard")
     if artifact.get("features") != list(ALLOWED_FEATURES):
         raise ValueError("semantic triage feature allowlist mismatch")
     if artifact.get("encoder_repo") != ENCODER_REPO or artifact.get("encoder_revision") != ENCODER_REVISION:
@@ -171,6 +206,20 @@ def write_artifact(path: str | Path, artifact: Mapping[str, Any]) -> None:
     with Path(path).open("w", encoding="utf-8") as handle:
         json.dump(artifact, handle, ensure_ascii=False, sort_keys=True, indent=2)
         handle.write("\n")
+
+
+def guarded_artifact_from_v1(artifact: Mapping[str, Any]) -> dict[str, Any]:
+    """Derive a new guarded version without changing the frozen logistic head."""
+    validate_artifact(artifact)
+    if artifact.get("model_version") != MODEL_VERSION:
+        raise ValueError("guarded artifacts must be derived from a v1 semantic artifact")
+    guarded = dict(artifact)
+    guarded["model_version"] = MODEL_VERSION_GUARDED
+    guarded["positive_guard"] = deepcopy(POSITIVE_GUARD_POLICY)
+    guarded.pop("artifact_sha256", None)
+    guarded["artifact_sha256"] = _canonical_hash(guarded)
+    validate_artifact(guarded)
+    return guarded
 
 
 def train_artifact(
@@ -345,6 +394,9 @@ class SemanticTriage:
         eligible: list[tuple[int, str]] = []
         for index, row in enumerate(rows):
             features = _feature_row(row) if isinstance(row, Mapping) else {}
+            if self.version == MODEL_VERSION_GUARDED and _has_explicit_ml_metadata(features):
+                results.append(self._result(features, "ml_candidate", None, "fetch", "explicit_ml_metadata"))
+                continue
             text = _model_text(features)
             informative = _informative_text(features)
             if _unsupported_script(informative):
