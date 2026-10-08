@@ -1052,7 +1052,8 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
     receipt_path = output_path / f"receipt-{run_id}.json"
     _write_json(receipt_path, receipt)
     print(f"GraphQL README collection attempted {summary.get('attempted', 0)} repositories; "
-          f"{pending} remain pending ({stop_reason}).")
+          f"{pending} are currently due, {summary.get('failed', 0)} failed, and "
+          f"{summary.get('deferred', 0)} deferred ({stop_reason}).")
     print(f"Local evidence: {evidence_path}")
     print(f"Run receipt: {receipt_path}")
     return 0
