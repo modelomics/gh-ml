@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import Any
 from urllib.error import HTTPError
@@ -14,6 +15,11 @@ from gh_ml.github import GitHubAPIError, GitHubClient
 def repo(github_id: int = 7, name: str = "Org/Model", *, entries: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     return {"databaseId": github_id, "nameWithOwner": name, "isPrivate": False, "defaultBranchRef": {"target": {
         "oid": "commit123", "tree": {"entries": entries or []}}}}
+
+
+def blob_oid(text: str) -> str:
+    raw = text.encode("utf-8")
+    return hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
 
 
 class Client:
@@ -161,6 +167,116 @@ def test_repository_that_becomes_private_before_blob_fetch_returns_no_content() 
     assert item["error"] == "repository is not public"
     assert item["text"] is None and "private text" not in repr(item)
     assert all(item[field] is None for field in ("blob_sha", "path", "commit_sha", "canonical_name"))
+
+
+def test_verified_cache_hit_keeps_repository_provenance_and_skips_blob_query() -> None:
+    text = "cached README"
+    oid = blob_oid(text)
+    client = Client([
+        {"data": {"r0": repo(7, entries=[{"name": "README.md", "type": "blob", "oid": oid}]),
+                   "r1": repo(8, "Other/Model", entries=[{"name": ".github", "type": "tree", "oid": "tree"}])}},
+        {"data": {"r0": {"databaseId": 7, "isPrivate": False, "dotgithub": None, "docstree": None},
+                   "r1": {"databaseId": 8, "isPrivate": False, "dotgithub": {"entries": [
+                       {"name": "README.md", "type": "blob", "oid": oid}]}, "docstree": None}}},
+    ])
+    lookups: list[str] = []
+
+    def lookup(requested_oid: str) -> str | None:
+        lookups.append(requested_oid)
+        return text
+
+    result = fetch_readme_batch(client, [
+        {"github_id": 7, "full_name": "Org/Model"}, {"github_id": 8, "full_name": "Other/Model"}],
+        cache_lookup=lookup)
+    assert lookups == [oid]
+    assert result["requests"] == 2  # Public identity and tree provenance still require GraphQL.
+    assert result["cache_hits"] == 2 and result["unique_blobs_downloaded"] == 0
+    assert result["download_bytes"] == 0 and result["duplicate_blob_reuses"] == 1
+    assert [item["text"] for item in result["items"]] == [text, text]
+    assert [item["path"] for item in result["items"]] == ["README.md", ".github/README.md"]
+    assert all(item["cache_hit"] and not item["content_downloaded"] for item in result["items"])
+
+
+def test_same_oid_across_repositories_downloads_once_and_rechecks_each_identity() -> None:
+    text = "shared README"
+    oid = blob_oid(text)
+    client = Client([
+        {"data": {"r0": repo(7, entries=[{"name": "README.md", "type": "blob", "oid": oid}]),
+                   "r1": repo(8, "Other/Model", entries=[{"name": "README.md", "type": "blob", "oid": oid}])}},
+        {"data": {"r0": {"databaseId": 7, "isPrivate": False, "dotgithub": None, "docstree": None},
+                   "r1": {"databaseId": 8, "isPrivate": False, "dotgithub": None, "docstree": None}}},
+        {"data": {"b0": {"databaseId": 7, "isPrivate": False, "blob": {"oid": oid, "byteSize": len(text),
+                    "isBinary": False, "isTruncated": False, "text": text}},
+                   "v0_1": {"databaseId": 8, "isPrivate": False}}},
+    ])
+    result = fetch_readme_batch(client, [
+        {"github_id": 7, "full_name": "Org/Model"}, {"github_id": 8, "full_name": "Other/Model"}],
+        cache_lookup=lambda _: None)
+    assert result["requests"] == 3
+    assert result["unique_blobs_downloaded"] == 1
+    assert result["download_bytes"] == len(text.encode("utf-8"))
+    assert result["duplicate_blob_reuses"] == 1
+    assert [item["text"] for item in result["items"]] == [text, text]
+    assert all(item["content_downloaded"] and not item["cache_hit"] for item in result["items"])
+    assert "v0_1" in client.calls[2][0]
+
+
+def test_changed_oid_cannot_reuse_stale_text_and_bad_cache_falls_back_to_graphql() -> None:
+    old_text, current_text = "old", "changed"
+    current_oid = blob_oid(current_text)
+    client = Client([
+        {"data": {"r0": repo(7, entries=[{"name": "README.md", "type": "blob", "oid": current_oid}])}},
+        {"data": {"r0": {"databaseId": 7, "isPrivate": False, "dotgithub": None, "docstree": None}}},
+        {"data": {"b0": {"databaseId": 7, "isPrivate": False, "blob": {"oid": current_oid,
+            "byteSize": len(current_text), "isBinary": False, "isTruncated": False, "text": current_text}}}},
+    ])
+    result = fetch_readme_batch(client, [{"github_id": 7, "full_name": "Org/Model"}],
+                                cache_lookup=lambda _: old_text)
+    assert result["items"][0]["text"] == current_text
+    assert result["items"][0]["cache_hit"] is False
+    assert result["items"][0]["content_downloaded"] is True
+    assert result["cache_hits"] == 0 and result["unique_blobs_downloaded"] == 1
+
+
+def test_cache_lookup_exception_is_sanitized_and_falls_back_to_download() -> None:
+    text = "network README"
+    oid = blob_oid(text)
+    client = Client([
+        {"data": {"r0": repo(7, entries=[{"name": "README.md", "type": "blob", "oid": oid}])}},
+        {"data": {"r0": {"databaseId": 7, "isPrivate": False, "dotgithub": None, "docstree": None}}},
+        {"data": {"b0": {"databaseId": 7, "isPrivate": False, "blob": {"oid": oid,
+            "byteSize": len(text), "isBinary": False, "isTruncated": False, "text": text}}}},
+    ])
+
+    def broken_lookup(_: str) -> str | None:
+        raise RuntimeError("sensitive cache path")
+
+    result = fetch_readme_batch(client, [{"github_id": 7, "full_name": "Org/Model"}],
+                                cache_lookup=broken_lookup)
+    assert result["items"][0]["status"] == "ok"
+    assert result["items"][0]["text"] == text
+    assert "sensitive cache path" not in repr(result)
+    assert result["cache_hits"] == 0 and result["unique_blobs_downloaded"] == 1
+
+
+def test_duplicate_oid_private_repository_does_not_receive_shared_text() -> None:
+    text = "shared"
+    oid = blob_oid(text)
+    client = Client([
+        {"data": {"r0": repo(7, entries=[{"name": "README.md", "type": "blob", "oid": oid}]),
+                   "r1": repo(8, "Other/Model", entries=[{"name": "README.md", "type": "blob", "oid": oid}])}},
+        {"data": {"r0": {"databaseId": 7, "isPrivate": False, "dotgithub": None, "docstree": None},
+                   "r1": {"databaseId": 8, "isPrivate": False, "dotgithub": None, "docstree": None}}},
+        {"data": {"b0": {"databaseId": 7, "isPrivate": False, "blob": {"oid": oid, "byteSize": len(text),
+                    "isBinary": False, "isTruncated": False, "text": text}},
+                   "v0_1": {"databaseId": 8, "isPrivate": True}}},
+    ])
+    result = fetch_readme_batch(client, [
+        {"github_id": 7, "full_name": "Org/Model"}, {"github_id": 8, "full_name": "Other/Model"}])
+    assert result["items"][0]["text"] == text
+    assert result["items"][1]["status"] == "unavailable"
+    assert result["items"][1]["text"] is None
+    assert result["duplicate_blob_reuses"] == 0
 
 
 def test_deadline_prevents_queries_and_invalid_inputs_are_reported_per_item() -> None:

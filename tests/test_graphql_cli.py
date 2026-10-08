@@ -41,6 +41,9 @@ def test_graphql_parser_sets_bounded_resumable_defaults():
     assert args.max_repositories == 10_000
     assert args.max_batches == 1000
     assert args.min_free_gib == 300
+    assert args.triage_model is None
+    assert args.deferred_audit_rate == 0.05
+    assert args.max_triage_repositories == 10_000
 
 
 def test_jsonl_reader_seeks_to_saved_byte_cursor_and_hashes_only_read_rows(tmp_path: Path):
@@ -145,6 +148,39 @@ def test_graphql_cli_can_resume_without_an_input(tmp_path: Path, monkeypatch):
     receipt = json.loads(next((tmp_path / "runs").glob("receipt-*.json")).read_text())
     assert receipt["input_scope"] == "resume-pending-only"
     assert receipt["inputs"] == []
+
+
+def test_graphql_cli_optional_model_is_persisted_as_experimental_triage(tmp_path: Path, monkeypatch):
+    from gh_ml.metadata_triage import ALLOWED_FEATURES, ARTIFACT_SCHEMA, MODEL_VERSION, _canonical_hash, write_artifact
+
+    artifact = {
+        "schema": ARTIFACT_SCHEMA,
+        "model_version": MODEL_VERSION,
+        "features": list(ALLOWED_FEATURES),
+        "positive_label": "ml_relevant",
+        "negative_label": "not_ml_relevant",
+        "vocabulary": {"garden": 0},
+        "idf": [1.0], "weights": [-2.0], "intercept": -4.0,
+    }
+    artifact["artifact_sha256"] = _canonical_hash(artifact)
+    model_path = tmp_path / "triage.json"
+    write_artifact(str(model_path), artifact)
+    observed = {}
+
+    def collect(store, client, **kwargs):
+        observed.update(kwargs)
+        return _summary(**{"run_id": kwargs["run_id"]})
+
+    args = _args(tmp_path)
+    args.triage_model = model_path
+    monkeypatch.setattr(cli, "_github_token", lambda _: None)
+    assert cli._readme_graphql(args, client_factory=lambda token: object(), collection=collect) == 0
+    assert observed["triage_model"].fingerprint == artifact["artifact_sha256"]
+    receipt = json.loads(next((tmp_path / "runs").glob("receipt-*.json")).read_text())
+    assert receipt["metadata_triage"]["enabled"] is True
+    assert receipt["metadata_triage"]["experimental"] is True
+    assert receipt["metadata_triage"]["model_fingerprint"] == artifact["artifact_sha256"]
+    assert receipt["metadata_triage"]["scope"]["assessed"] == 0
 
 
 @pytest.mark.parametrize("field,value", [("batch_size", 51), ("max_seconds", 604801), ("min_free_gib", -1)])

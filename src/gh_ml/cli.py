@@ -265,6 +265,14 @@ def _parser() -> argparse.ArgumentParser:
     graphql.add_argument("--max-batches", type=int, default=1000, help="maximum GraphQL batches per invocation")
     graphql.add_argument("--min-free-gib", type=float, default=300,
                          help="minimum free space on /mnt/archive before starting (default 300 GiB)")
+    graphql.add_argument("--triage-model", type=Path,
+                         help="optional validated metadata relevance model JSON artifact (experimental; default disabled)")
+    graphql.add_argument("--deferred-audit-rate", type=float, default=0.05,
+                         help="per-epoch sampling probability for deferred README audits (default 0.05)")
+    graphql.add_argument("--audit-seed", default="gh-ml-metadata-triage-v1",
+                         help="stable seed for reproducible rotating deferred audit samples")
+    graphql.add_argument("--max-triage-repositories", type=int, default=10_000,
+                         help="maximum stored repositories to rescore/rotate per invocation")
     graphql.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     return parser
 
@@ -924,6 +932,13 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
         raise ValueError("--max-seconds must be from 0 through 604800")
     if args.max_repositories < 0 or args.max_batches < 0:
         raise ValueError("--max-repositories and --max-batches must be nonnegative")
+    audit_rate = getattr(args, "deferred_audit_rate", 0.05)
+    max_triage_repositories = getattr(args, "max_triage_repositories", 10_000)
+    audit_seed = getattr(args, "audit_seed", "gh-ml-metadata-triage-v1")
+    if not isinstance(audit_rate, (int, float)) or not 0 <= audit_rate <= 1:
+        raise ValueError("--deferred-audit-rate must be between 0 and 1")
+    if max_triage_repositories < 0 or not isinstance(audit_seed, str) or not audit_seed:
+        raise ValueError("--max-triage-repositories must be nonnegative and --audit-seed nonempty")
     if not (args.min_free_gib >= 0 and args.min_free_gib < float("inf")):
         raise ValueError("--min-free-gib must be a finite nonnegative number")
     repo_root = Path(__file__).resolve().parents[2]
@@ -964,10 +979,33 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
     run_id = _run_id(now)
     store_type = store_factory or EvidenceStore
     client = (client_factory or GitHubClient)(token=_github_token(args.github_token_env))
+    model_path = getattr(args, "triage_model", None)
+    triage_model = None
+    if model_path is not None:
+        from .metadata_triage import load_model
+        triage_model = load_model(str(model_path.expanduser().resolve()))
     source_receipts: list[dict[str, Any]] = []
     ingestion_counts: dict[str, int] = {key: 0 for key in ("seen", "inserted", "updated", "changed", "unchanged", "invalid")}
     ingestion_complete = True
+    triage_counts: dict[str, Any] = {"enabled": triage_model is not None, "rescored": 0, "remaining_to_rescore": 0,
+                                     "audit_rotated": 0, "audit_selected_this_epoch": 0}
     with store_type(state_path, min_free_bytes=reserve_bytes) as store:
+        if triage_model is not None:
+            triage_budget = max(0.0, deadline - time.monotonic())
+            rescored = store.retriage_existing(
+                triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
+                max_repositories=max_triage_repositories, max_seconds=triage_budget,
+                now=now,
+            )
+            triage_counts.update({"rescored": rescored["scored"], "remaining_to_rescore": rescored["remaining"]})
+            triage_budget = max(0.0, deadline - time.monotonic())
+            rotated = store.rotate_deferred_audit(
+                triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
+                max_repositories=max_triage_repositories, max_seconds=triage_budget, now=now,
+            )
+            triage_counts.update({"audit_rotated": rotated["updated"],
+                                  "audit_selected_this_epoch": rotated["selected"],
+                                  "audit_unrotated": rotated["remaining"]})
         for input_index, input_path in enumerate(inputs):
             if time.monotonic() >= deadline:
                 ingestion_complete = False
@@ -991,6 +1029,7 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
             counts = store.ingest(
                 rows, source=str(input_path), source_revision=source_revision,
                 commit_every=500, max_seconds=max(0.0, deadline - time.monotonic()), resume=True,
+                triage_model=triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
             )
             for key, value in counts.items():
                 ingestion_counts[key] = ingestion_counts.get(key, 0) + value
@@ -1005,10 +1044,14 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
 
         remaining_seconds = max(0.0, deadline - time.monotonic())
         runner = collection or run_collection
+        def cache_aware_fetcher(fetch_client: Any, targets: Any, **kwargs: Any) -> Any:
+            return fetch_readme_batch(fetch_client, targets, cache_lookup=store.lookup_blob_text, **kwargs)
+
         summary = runner(
             store, client, batch_size=args.batch_size, max_seconds=remaining_seconds,
             max_repositories=args.max_repositories, max_batches=args.max_batches,
-            run_id=run_id, fetcher=fetch_readme_batch,
+            run_id=run_id, fetcher=cache_aware_fetcher,
+            triage_model=triage_model, audit_epoch=now.strftime("%Y-%m"),
         )
         evidence_path = output_path / f"evidence-{run_id}.jsonl"
         export_complete = True
@@ -1020,7 +1063,15 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
         except TimeoutError:
             exported = 0
             export_complete = False
-        pending = store.pending_count()
+        pending = summary.get("target_count", store.pending_count())
+        if triage_model is not None:
+            triage_counts.update({
+                "model_version": triage_model.version,
+                "model_fingerprint": triage_model.fingerprint,
+                "experimental": True,
+                "defer_threshold": triage_model.defer_threshold,
+                "scope": store.triage_scope_counts(triage_model.fingerprint),
+            })
     if not inputs:
         input_scope = "resume-pending-only"
     elif ingestion_complete:
@@ -1042,6 +1093,7 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
         "elapsed_seconds": round(time.monotonic() - started, 3), "input_scope": input_scope,
         "selection_scope": "unfiltered_input",
         "inputs": source_receipts, "ingestion": ingestion_counts,
+        "metadata_triage": triage_counts,
         "collection": summary, "pending_repositories": pending,
         "exported_evidence_records": exported, "evidence_jsonl": str(evidence_path),
         "export_complete": export_complete,
@@ -1051,7 +1103,9 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
     }
     receipt_path = output_path / f"receipt-{run_id}.json"
     _write_json(receipt_path, receipt)
-    print(f"GraphQL README collection attempted {summary.get('attempted', 0)} repositories; "
+    print(f"GraphQL README collection inspected {summary.get('repositories_inspected', summary.get('attempted', 0))} repositories, "
+          f"downloaded {summary.get('unique_blobs_downloaded', 0)} unique READMEs ({summary.get('download_bytes', 0)} bytes), "
+          f"used {summary.get('requests', 0)} GraphQL requests and {summary.get('cache_hits', 0)} cached blobs; "
           f"{pending} are currently due, {summary.get('failed', 0)} failed, and "
           f"{summary.get('deferred', 0)} deferred ({stop_reason}).")
     print(f"Local evidence: {evidence_path}")

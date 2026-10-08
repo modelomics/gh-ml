@@ -22,6 +22,9 @@ pwc = [
 parquet = [
   "pyarrow>=20",
 ]
+triage = [
+  "scikit-learn>=1.5,<2",
+]
 
 [project.scripts]
 gh-ml = "gh_ml.cli:main"

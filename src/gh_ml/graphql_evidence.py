@@ -31,6 +31,7 @@ DEFAULT_MIN_FREE_BYTES = 300 * 1024**3
 _METADATA_FIELDS = (
     "name", "full_name", "description", "topics", "methods", "evidence_tier",
     "selection_status", "selection_reason", "selection_signals", "pushed_at",
+    "signals",
     "updated_at", "created_at", "fork", "archived", "url", "homepage",
     "language", "stars", "domains", "paper_ids", "query_ids", "source", "revision",
 )
@@ -80,6 +81,14 @@ def _metadata(row: Mapping[str, Any]) -> dict[str, Any]:
     # payloads. JSON encoding here also validates streamed inputs consistently.
     _json(result)
     return result
+
+
+def _has_contribution_evidence(row: Mapping[str, Any]) -> bool:
+    signals = row.get("selection_signals", row.get("signals", []))
+    signals = {signals} if isinstance(signals, str) else set(signals) if isinstance(signals, (list, tuple, set)) else set()
+    return row.get("selection_status") == "include" or bool(
+        signals & {"paper-and-code-cue", "official-paper-implementation-cue", "ml-method-cue", "method-tied-novelty-claim"}
+    )
 
 
 class StorageLimitExceeded(RuntimeError):
@@ -163,6 +172,24 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
                 blob_sha TEXT,
                 PRIMARY KEY(content_sha256, github_id, source, source_revision)
             );
+            CREATE INDEX IF NOT EXISTS raw_provenance_blob ON raw_provenance(blob_sha, fetched_at);
+            CREATE INDEX IF NOT EXISTS raw_provenance_blob_lower ON raw_provenance(lower(blob_sha), fetched_at);
+            CREATE TABLE IF NOT EXISTS metadata_triage (
+                github_id INTEGER PRIMARY KEY,
+                metadata_fingerprint TEXT NOT NULL,
+                model_version TEXT NOT NULL,
+                model_fingerprint TEXT NOT NULL,
+                decision TEXT NOT NULL,
+                predicted_label TEXT NOT NULL,
+                model_score REAL,
+                reason TEXT NOT NULL,
+                experimental INTEGER NOT NULL,
+                audit_selected INTEGER NOT NULL,
+                audit_epoch TEXT NOT NULL,
+                audit_rate REAL NOT NULL,
+                audit_seed TEXT NOT NULL,
+                assessed_at TEXT NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS run_items (
                 run_id TEXT NOT NULL,
                 github_id INTEGER NOT NULL,
@@ -194,6 +221,10 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
                 remaining INTEGER,
                 reset_at TEXT,
                 rate_limited INTEGER NOT NULL,
+                cache_hits INTEGER NOT NULL DEFAULT 0,
+                unique_blobs_downloaded INTEGER NOT NULL DEFAULT 0,
+                download_bytes INTEGER NOT NULL DEFAULT 0,
+                duplicate_blob_reuses INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY(run_id,batch_number)
             );
             """
@@ -204,6 +235,13 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
         source_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(ingestion_sources)")}
         if "cursor_json" not in source_columns:
             self.connection.execute("ALTER TABLE ingestion_sources ADD COLUMN cursor_json TEXT")
+        triage_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(metadata_triage)")}
+        if "audit_epoch" not in triage_columns:
+            self.connection.execute("ALTER TABLE metadata_triage ADD COLUMN audit_epoch TEXT NOT NULL DEFAULT ''")
+        batch_columns = {row[1] for row in self.connection.execute("PRAGMA table_info(run_batches)")}
+        for name in ("cache_hits", "unique_blobs_downloaded", "download_bytes", "duplicate_blob_reuses"):
+            if name not in batch_columns:
+                self.connection.execute(f"ALTER TABLE run_batches ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
         self.connection.commit()
         return self
 
@@ -224,6 +262,179 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
         stats = os.statvfs(self.path.parent)
         return stats.f_bavail * stats.f_frsize >= self.min_free_bytes
 
+    def lookup_blob_text(self, blob_oid: str) -> str | None:
+        """Return cached text only after checking SHA256 and Git's blob SHA1."""
+        if not isinstance(blob_oid, str) or len(blob_oid) != 40:
+            return None
+        rows = self.db.execute(
+            """SELECT DISTINCT r.content_sha256,r.compressed_text,r.byte_count
+               FROM raw_provenance p JOIN raw_readmes r USING(content_sha256)
+               WHERE lower(p.blob_sha)=lower(?) ORDER BY p.fetched_at DESC""",
+            (blob_oid,),
+        )
+        for row in rows:
+            try:
+                raw = zlib.decompress(row["compressed_text"])
+            except (zlib.error, TypeError):
+                continue
+            if len(raw) != row["byte_count"] or hashlib.sha256(raw).hexdigest() != row["content_sha256"]:
+                continue
+            git_header = f"blob {len(raw)}\0".encode("ascii")
+            if hashlib.sha1(git_header + raw).hexdigest() != blob_oid.casefold():
+                continue
+            try:
+                return raw.decode("utf-8")
+            except UnicodeDecodeError:
+                continue
+        return None
+
+    def _triage_assessment(
+        self, row: Mapping[str, Any], triage_model: Any, *, audit_rate: float, audit_seed: str,
+        audit_interval_days: int, audit_epoch: str,
+    ) -> dict[str, Any]:
+        result = triage_model.predict(row)
+        result = dict(result) if isinstance(result, Mapping) else {}
+        decision = result.get("decision")
+        if decision not in {"fetch", "defer"}:
+            decision = "fetch"
+        # Existing repository-level contribution evidence can only force a fetch.
+        if _has_contribution_evidence(row):
+            decision = "fetch"
+            result["reason"] = "existing_contribution_evidence"
+        metadata_fp = result.get("metadata_fingerprint")
+        if not isinstance(metadata_fp, str) or len(metadata_fp) != 64:
+            from .metadata_triage import metadata_fingerprint
+            metadata_fp = metadata_fingerprint(row)
+        model_version = str(getattr(triage_model, "version", "unknown"))
+        model_fingerprint = str(getattr(triage_model, "fingerprint", model_version))
+        audit_selected = False
+        if decision == "defer":
+            sample_key = f"{audit_seed}:{audit_epoch}:{model_fingerprint}:{_valid_id(row)}:{metadata_fp}".encode("utf-8")
+            sample_value = int.from_bytes(hashlib.sha256(sample_key).digest(), "big") / 2**256
+            audit_selected = sample_value < audit_rate
+        result.update({
+            "metadata_fingerprint": metadata_fp,
+            "model_version": model_version,
+            "model_fingerprint": model_fingerprint,
+            "decision": decision,
+            "audit_selected": audit_selected,
+            "audit_rate": audit_rate,
+            "audit_seed": audit_seed,
+            "audit_interval_days": audit_interval_days,
+            "audit_epoch": audit_epoch,
+        })
+        return result
+
+    def _save_triage(self, repo_id: int, result: Mapping[str, Any], *, now: datetime) -> None:
+        self.db.execute(
+            """INSERT INTO metadata_triage
+               (github_id,metadata_fingerprint,model_version,model_fingerprint,decision,predicted_label,
+                model_score,reason,experimental,audit_selected,audit_epoch,audit_rate,audit_seed,assessed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(github_id) DO UPDATE SET metadata_fingerprint=excluded.metadata_fingerprint,
+                 model_version=excluded.model_version,model_fingerprint=excluded.model_fingerprint,
+                 decision=excluded.decision,predicted_label=excluded.predicted_label,model_score=excluded.model_score,
+                 reason=excluded.reason,experimental=excluded.experimental,audit_selected=excluded.audit_selected,
+                 audit_epoch=excluded.audit_epoch,
+                 audit_rate=excluded.audit_rate,audit_seed=excluded.audit_seed,assessed_at=excluded.assessed_at""",
+            (repo_id, result["metadata_fingerprint"], result["model_version"], result["model_fingerprint"],
+             result["decision"], result.get("predicted_label", "unknown"), result.get("model_score"),
+             str(result.get("reason", "unknown")), int(bool(result.get("experimental", True))),
+             int(bool(result["audit_selected"])), str(result["audit_epoch"]), float(result["audit_rate"]),
+             str(result["audit_seed"]), _iso(now)),
+        )
+
+    def triage_scope_counts(self, model_fingerprint: str) -> dict[str, int]:
+        row = self.db.execute(
+            """SELECT COUNT(*) AS total,
+                      SUM(decision='fetch') AS fetch_count,
+                      SUM(decision='defer') AS deferred_count,
+                      SUM(decision='defer' AND audit_selected=1) AS audit_selected
+               FROM metadata_triage WHERE model_fingerprint=?""",
+            (model_fingerprint,),
+        ).fetchone()
+        return {"assessed": row["total"] or 0, "fetch": row["fetch_count"] or 0,
+                "deferred": row["deferred_count"] or 0, "audit_selected": row["audit_selected"] or 0}
+
+    def rotate_deferred_audit(
+        self, triage_model: Any, *, audit_rate: float = 0.05, audit_seed: str = "2026",
+        max_repositories: int = 10_000, max_seconds: float = 60, now: datetime | None = None,
+    ) -> dict[str, int]:
+        """Choose a deterministic monthly audit sample from persisted deferrals."""
+        if not 0 <= audit_rate <= 1 or max_repositories < 0 or max_seconds < 0:
+            raise ValueError("invalid deferred audit rate or budget")
+        stamp = _now(now)
+        epoch = stamp.strftime("%Y-%m")
+        deadline = time.monotonic() + max_seconds
+        rows = self.db.execute(
+            """SELECT github_id,metadata_fingerprint FROM metadata_triage
+               WHERE model_fingerprint=? AND decision='defer' AND audit_epoch<>?
+               ORDER BY assessed_at,github_id LIMIT ?""",
+            (str(triage_model.fingerprint), epoch, max_repositories),
+        )
+        updated = selected = 0
+        for row in rows:
+            if time.monotonic() >= deadline:
+                break
+            key = f"{audit_seed}:{epoch}:{triage_model.fingerprint}:{row['github_id']}:{row['metadata_fingerprint']}".encode()
+            include = int.from_bytes(hashlib.sha256(key).digest(), "big") / 2**256 < audit_rate
+            self.db.execute(
+                "UPDATE metadata_triage SET audit_selected=?,audit_epoch=?,audit_rate=?,audit_seed=?,assessed_at=? WHERE github_id=?",
+                (int(include), epoch, audit_rate, audit_seed, _iso(stamp), row["github_id"]),
+            )
+            due = stamp.timestamp() if include else (stamp + timedelta(days=30)).timestamp()
+            self.db.execute("UPDATE repositories SET due_at=? WHERE github_id=?", (due, row["github_id"]))
+            self.db.commit()
+            updated += 1
+            selected += include
+        remaining = int(self.db.execute(
+            "SELECT COUNT(*) FROM metadata_triage WHERE model_fingerprint=? AND decision='defer' AND audit_epoch<>?",
+            (str(triage_model.fingerprint), epoch),
+        ).fetchone()[0])
+        return {"updated": updated, "selected": selected, "remaining": remaining}
+
+    def retriage_existing(
+        self, triage_model: Any, *, audit_rate: float = 0.05, audit_seed: str = "2026",
+        audit_interval_days: int = 30, max_repositories: int = 10_000, max_seconds: float = 60,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        """Incrementally rescore stored metadata after a model version change."""
+        if not 0 <= audit_rate <= 1 or audit_interval_days < 1 or max_repositories < 0 or max_seconds < 0:
+            raise ValueError("invalid metadata triage budget or audit policy")
+        stamp = _now(now)
+        deadline = time.monotonic() + max_seconds
+        rows = self.db.execute(
+            """SELECT r.* FROM repositories r LEFT JOIN metadata_triage t USING(github_id)
+               WHERE t.github_id IS NULL OR t.model_fingerprint<>? ORDER BY r.github_id LIMIT ?""",
+            (str(triage_model.fingerprint), max_repositories),
+        )
+        scored = fetch = deferred = selected = 0
+        for stored in rows:
+            if time.monotonic() >= deadline:
+                break
+            row = dict(stored)
+            row.update(json.loads(row["metadata_json"]))
+            assessment = self._triage_assessment(row, triage_model, audit_rate=audit_rate,
+                                                 audit_seed=audit_seed, audit_interval_days=audit_interval_days,
+                                                 audit_epoch=stamp.strftime("%Y-%m"))
+            self._save_triage(stored["github_id"], assessment, now=stamp)
+            due = stamp.timestamp() + (
+                audit_interval_days * 86400
+                if assessment["decision"] == "defer" and not assessment["audit_selected"] else 0
+            )
+            self.db.execute("UPDATE repositories SET due_at=?,last_run_id=NULL WHERE github_id=?", (due, stored["github_id"]))
+            self.db.commit()
+            scored += 1
+            fetch += int(assessment["decision"] == "fetch")
+            deferred += int(assessment["decision"] == "defer")
+            selected += int(assessment["audit_selected"])
+        remaining = int(self.db.execute(
+            "SELECT COUNT(*) FROM repositories r LEFT JOIN metadata_triage t USING(github_id) WHERE t.github_id IS NULL OR t.model_fingerprint<>?",
+            (str(triage_model.fingerprint),),
+        ).fetchone()[0])
+        return {"scored": scored, "fetch": fetch, "deferred": deferred, "audit_selected": selected,
+                "remaining": remaining, "elapsed_seconds": max(0.0, time.monotonic() - deadline + max_seconds)}
+
     def ingest(
         self,
         rows: Iterable[Mapping[str, Any] | tuple[Mapping[str, Any], Any]],
@@ -235,6 +446,10 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
         max_seconds: float | None = None,
         max_rows: int | None = None,
         resume: bool = False,
+        triage_model: Any = None,
+        audit_rate: float = 0.05,
+        audit_seed: str = "gh-ml-metadata-triage-v1",
+        audit_interval_days: int = 30,
     ) -> dict[str, int]:
         """Stream repository metadata into the queue; changed/new identities become due."""
         if not isinstance(source, str) or not source.strip():
@@ -247,6 +462,8 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
             raise ValueError("max_seconds must be nonnegative or None")
         if max_rows is not None and max_rows < 0:
             raise ValueError("max_rows must be nonnegative or None")
+        if not 0 <= audit_rate <= 1 or audit_interval_days < 1:
+            raise ValueError("invalid metadata triage audit policy")
         started = time.monotonic()
         stamp = _now(now).timestamp()
         source_revision_key = source_revision or ""
@@ -265,7 +482,8 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
             )
         self.db.commit()
         counts = {"seen": 0, "inserted": 0, "updated": 0, "changed": 0, "unchanged": 0, "invalid": 0,
-                  "offset": offset, "complete": 0}
+                  "offset": offset, "complete": 0, "triage_scored": 0, "triage_fetch": 0,
+                  "triage_deferred": 0, "triage_audit_selected": 0}
         pending = 0
 
         last_cursor_json = prior[1] if prior else None
@@ -315,18 +533,21 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
                     pending = 0
                 continue
             metadata = _metadata(row)
+            from .metadata_triage import metadata_fingerprint
+            metadata_fp = metadata_fingerprint(row)
             pushed_at = row.get("pushed_at", row.get("revision"))
             pushed_at = pushed_at if isinstance(pushed_at, str) else None
             old = self.db.execute(
-                "SELECT full_name,pushed_at,source_revision_value FROM repositories WHERE github_id=?", (repo_id,)
+                "SELECT full_name,pushed_at,source_revision_value,metadata_json FROM repositories WHERE github_id=?", (repo_id,)
             ).fetchone()
+            metadata_changed = bool(old and json.loads(old["metadata_json"]) != metadata)
             source_revision_value = row.get("revision")
             source_revision_value = source_revision_value if isinstance(source_revision_value, str) else None
             if old is None:
                 due_at = stamp
                 counts["inserted"] += 1
             elif (old["full_name"].casefold() != name.casefold() or old["pushed_at"] != pushed_at
-                  or old["source_revision_value"] != source_revision_value):
+                  or old["source_revision_value"] != source_revision_value or metadata_changed):
                 due_at = stamp
                 counts["changed"] += 1
                 counts["updated"] += 1
@@ -339,6 +560,54 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
                 requeue = False
             if old is None:
                 requeue = True
+
+            triage_result = None
+            if triage_model is not None:
+                prior_triage = self.db.execute(
+                    "SELECT * FROM metadata_triage WHERE github_id=?", (repo_id,)
+                ).fetchone()
+                same_assessment = bool(
+                    prior_triage
+                    and prior_triage["metadata_fingerprint"] == metadata_fp
+                    and prior_triage["model_fingerprint"] == str(triage_model.fingerprint)
+                )
+                if (same_assessment and prior_triage["reason"] == "existing_contribution_evidence"
+                        and not _has_contribution_evidence(row)):
+                    same_assessment = False
+                if same_assessment:
+                    triage_result = dict(prior_triage)
+                    if _has_contribution_evidence(row) and triage_result["decision"] != "fetch":
+                        triage_result["decision"] = "fetch"
+                        triage_result["reason"] = "existing_contribution_evidence"
+                        triage_result["audit_selected"] = 0
+                        triage_result["audit_epoch"] = _now(now).strftime("%Y-%m")
+                        self._save_triage(repo_id, triage_result, now=_now(now))
+                        requeue = True
+                else:
+                    triage_result = self._triage_assessment(
+                        row, triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
+                        audit_interval_days=audit_interval_days, audit_epoch=_now(now).strftime("%Y-%m"),
+                    )
+                    self._save_triage(repo_id, triage_result, now=_now(now))
+                    counts["triage_scored"] += 1
+                    requeue = True
+                counts["triage_fetch"] += int(triage_result["decision"] == "fetch")
+                counts["triage_deferred"] += int(triage_result["decision"] == "defer")
+                counts["triage_audit_selected"] += int(bool(triage_result["audit_selected"]))
+            else:
+                prior_triage = self.db.execute(
+                    "SELECT * FROM metadata_triage WHERE github_id=?", (repo_id,)
+                ).fetchone()
+                if prior_triage and (metadata_changed or requeue):
+                    self.db.execute("DELETE FROM metadata_triage WHERE github_id=?", (repo_id,))
+                    triage_result = None
+                    requeue = True
+
+            if triage_result is not None:
+                if triage_result["decision"] == "defer" and not triage_result["audit_selected"]:
+                    due_at = stamp + audit_interval_days * 86400
+                elif requeue or triage_result["audit_selected"]:
+                    due_at = stamp
             self.db.execute(
                 """INSERT INTO repositories
                    (github_id,full_name,pushed_at,source_revision_value,metadata_json,source,source_revision,due_at)
@@ -578,9 +847,16 @@ def _target_is_current(store: EvidenceStore, target: Mapping[str, Any]) -> bool:
         "SELECT full_name,pushed_at,source_revision_value FROM repositories WHERE github_id=?",
         (target["github_id"],),
     ).fetchone()
-    return bool(row and row["full_name"].casefold() == str(target.get("full_name", "")).casefold()
-                and row["pushed_at"] == target.get("pushed_at")
-                and row["source_revision_value"] == target.get("repository_revision"))
+    current = bool(row and row["full_name"].casefold() == str(target.get("full_name", "")).casefold()
+                   and row["pushed_at"] == target.get("pushed_at")
+                   and row["source_revision_value"] == target.get("repository_revision"))
+    snapshot = target.get("triage_snapshot")
+    if not current or not isinstance(snapshot, Mapping):
+        return current
+    triage = store.db.execute("SELECT * FROM metadata_triage WHERE github_id=?", (target["github_id"],)).fetchone()
+    return bool(triage and all(triage[field] == snapshot.get(field) for field in (
+        "model_fingerprint", "metadata_fingerprint", "decision", "audit_selected", "audit_epoch"
+    )))
 
 
 def run_collection(
@@ -595,6 +871,8 @@ def run_collection(
     run_id: str | None = None,
     now: datetime | None = None,
     max_bytes: int = 1_000_000,
+    triage_model: Any = None,
+    audit_epoch: str | None = None,
 ) -> dict[str, Any]:
     """Collect a resumable due queue in bounded batches, committing each response."""
     if batch_size < 1 or batch_size > 50 or max_repositories < 0 or max_batches < 0 or max_seconds < 0 or max_bytes < 1:
@@ -602,12 +880,16 @@ def run_collection(
     if fetcher is None:
         from .graphql_readme import fetch_readme_batch
         fetcher = fetch_readme_batch
+        use_store_cache = True
+    else:
+        use_store_cache = False
     run_id = run_id or uuid.uuid4().hex
     if not isinstance(run_id, str) or not run_id.strip():
         raise ValueError("run_id must be a nonempty string")
     started = time.monotonic()
     deadline = started + max_seconds
     stamp = _now(now)
+    audit_epoch = audit_epoch or stamp.strftime("%Y-%m")
     attempted = records = failed = deferred = requests = batches = total_cost = 0
     statuses: dict[str, int] = {}
     consecutive_error_batches = 0
@@ -676,21 +958,63 @@ def run_collection(
                 break
         limit = min(batch_size, max_repositories - attempted)
         targets = []
-        for record in store.db.execute(
-            "SELECT * FROM repositories WHERE due_at<=? AND (last_run_id IS NULL OR last_run_id<>?) ORDER BY due_at,github_id LIMIT ?",
-            (stamp.timestamp(), run_id, limit),
-        ):
+        base = """SELECT r.* FROM repositories r WHERE r.due_at<=?
+                  AND (r.last_run_id IS NULL OR r.last_run_id<>?)"""
+        if triage_model is None:
+            selection_records = store.db.execute(base + " ORDER BY r.due_at,r.github_id LIMIT ?",
+                                                 (stamp.timestamp(), run_id, limit))
+        else:
+            identity = str(triage_model.fingerprint)
+            audit_slots = max(1, limit // 5) if limit else 0
+            common = base + " AND EXISTS (SELECT 1 FROM metadata_triage t WHERE t.github_id=r.github_id AND t.model_fingerprint=?)"
+            fetch_capacity = max(0, limit - audit_slots)
+            fetch_rows = list(store.db.execute(
+                common + " AND (SELECT decision FROM metadata_triage t WHERE t.github_id=r.github_id)='fetch' ORDER BY r.due_at,r.github_id LIMIT ?",
+                (stamp.timestamp(), run_id, identity, fetch_capacity),
+            ))
+            audit_rows = []
+            if audit_slots:
+                audit_rows = list(store.db.execute(
+                    common + " AND (SELECT decision FROM metadata_triage t WHERE t.github_id=r.github_id)='defer'"
+                    " AND EXISTS (SELECT 1 FROM metadata_triage t WHERE t.github_id=r.github_id AND t.audit_selected=1 AND t.audit_epoch=?)"
+                    " ORDER BY r.due_at,r.github_id LIMIT ?",
+                    (stamp.timestamp(), run_id, identity, audit_epoch, audit_slots),
+                ))
+            selected = {record["github_id"]: record for record in [*fetch_rows, *audit_rows]}
+            if len(selected) < limit:
+                for record in store.db.execute(
+                    common + " AND ((SELECT decision FROM metadata_triage t WHERE t.github_id=r.github_id)='fetch'"
+                    " OR ((SELECT decision FROM metadata_triage t WHERE t.github_id=r.github_id)='defer'"
+                    " AND EXISTS (SELECT 1 FROM metadata_triage t WHERE t.github_id=r.github_id AND t.audit_selected=1 AND t.audit_epoch=?)))"
+                    " ORDER BY r.due_at,r.github_id LIMIT ?",
+                    (stamp.timestamp(), run_id, identity, audit_epoch, limit),
+                ):
+                    selected.setdefault(record["github_id"], record)
+                    if len(selected) >= limit:
+                        break
+            selection_records = sorted(selected.values(), key=lambda record: (record["due_at"], record["github_id"]))
+        for record in selection_records:
             target = dict(record)
             target.update(json.loads(target["metadata_json"]))
             target.update({"github_id": record["github_id"], "full_name": record["full_name"],
                            "source": record["source"], "source_revision": record["source_revision"],
                            "pushed_at": record["pushed_at"]})
+            if triage_model is not None:
+                triage_row = store.db.execute("SELECT * FROM metadata_triage WHERE github_id=?",
+                                              (record["github_id"],)).fetchone()
+                if triage_row is not None:
+                    target["triage_snapshot"] = {field: triage_row[field] for field in (
+                        "model_fingerprint", "metadata_fingerprint", "decision", "audit_selected", "audit_epoch"
+                    )}
             targets.append(target)
         if not targets:
             stop_reason = "queue_empty"
             break
         batches += 1
-        response = fetcher(client, targets, deadline=deadline, max_bytes=max_bytes)
+        fetch_kwargs = {"deadline": deadline, "max_bytes": max_bytes}
+        if use_store_cache:
+            fetch_kwargs["cache_lookup"] = store.lookup_blob_text
+        response = fetcher(client, targets, **fetch_kwargs)
         if not isinstance(response, Mapping):
             response = {"items": []}
         requests += int(response.get("requests", 0) or 0)
@@ -726,7 +1050,10 @@ def run_collection(
             batch_number = store.db.execute(
                 "SELECT COALESCE(MAX(batch_number),0)+1 FROM run_batches WHERE run_id=?", (run_id,)
             ).fetchone()[0]
-            store.db.execute("INSERT INTO run_batches VALUES (?,?,?,?,?,?,?)", (
+            store.db.execute("""INSERT INTO run_batches
+                (run_id,batch_number,requests,cost,remaining,reset_at,rate_limited,cache_hits,
+                 unique_blobs_downloaded,download_bytes,duplicate_blob_reuses)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)""", (
                 run_id, batch_number, int(response.get("requests", 0) or 0),
                 cost if isinstance(cost, int) and not isinstance(cost, bool) else None,
                 rem if isinstance(rem, int) and not isinstance(rem, bool) else None,
@@ -734,6 +1061,10 @@ def run_collection(
                 int(bool(response.get("rate_limited")) or (
                     isinstance(rem, int) and not isinstance(rem, bool) and rem == 0
                 )),
+                int(response.get("cache_hits", 0) or 0),
+                int(response.get("unique_blobs_downloaded", 0) or 0),
+                int(response.get("download_bytes", 0) or 0),
+                int(response.get("duplicate_blob_reuses", 0) or 0),
             ))
             for target in targets:
                 item = items.get(int(target["github_id"]))
@@ -743,6 +1074,8 @@ def run_collection(
                 provenance_target = {key: target.get(key) for key in
                                      ("github_id", "full_name", "source", "source_revision", "pushed_at")}
                 provenance_target["repository_revision"] = target.get("source_revision_value")
+                if isinstance(target.get("triage_snapshot"), Mapping):
+                    provenance_target["triage_snapshot"] = dict(target["triage_snapshot"])
                 encoded_item = zlib.compress(_json({"target": provenance_target, "item": item}).encode("utf-8"), level=3)
                 store.db.execute("INSERT OR REPLACE INTO pending_fetches VALUES (?,?,?)",
                                  (run_id, target["github_id"], encoded_item))
@@ -764,6 +1097,8 @@ def run_collection(
             provenance_target = {key: target.get(key) for key in
                                  ("github_id", "full_name", "source", "source_revision", "pushed_at")}
             provenance_target["repository_revision"] = target.get("source_revision_value")
+            if isinstance(target.get("triage_snapshot"), Mapping):
+                provenance_target["triage_snapshot"] = dict(target["triage_snapshot"])
             if not _target_is_current(store, provenance_target):
                 store.db.execute("DELETE FROM pending_fetches WHERE run_id=? AND github_id=?",
                                  (run_id, target["github_id"]))
@@ -817,7 +1152,15 @@ def run_collection(
             stop_reason = "rate_limit"
             break
     elapsed = max(0.0, time.monotonic() - started)
-    due_count = store.pending_count(now=stamp)
+    if triage_model is None:
+        due_count = store.pending_count(now=stamp)
+    else:
+        due_count = int(store.db.execute(
+            """SELECT COUNT(*) FROM repositories r WHERE r.due_at<=? AND EXISTS (
+                   SELECT 1 FROM metadata_triage t WHERE t.github_id=r.github_id AND t.model_fingerprint=?
+                   AND (t.decision='fetch' OR (t.decision='defer' AND t.audit_selected=1 AND t.audit_epoch=?)))""",
+            (stamp.timestamp(), str(triage_model.fingerprint), audit_epoch),
+        ).fetchone()[0])
     if stop_reason is None:
         if time.monotonic() >= deadline:
             stop_reason = "time_budget"
@@ -831,7 +1174,7 @@ def run_collection(
     metric_rows = []
     for completed_run in sorted(processed_run_ids):
         metric_rows.extend(store.db.execute(
-            "SELECT requests,cost,remaining,reset_at,rate_limited FROM run_batches WHERE run_id=? ORDER BY batch_number",
+            "SELECT requests,cost,remaining,reset_at,rate_limited,cache_hits,unique_blobs_downloaded,download_bytes,duplicate_blob_reuses FROM run_batches WHERE run_id=? ORDER BY batch_number",
             (completed_run,),
         ))
     requests = sum(row["requests"] for row in metric_rows)
@@ -839,6 +1182,10 @@ def run_collection(
     remaining = metric_rows[-1]["remaining"] if metric_rows else None
     reset_at = metric_rows[-1]["reset_at"] if metric_rows else None
     rate_limited = bool(metric_rows and metric_rows[-1]["rate_limited"])
+    cache_hits = sum(row["cache_hits"] for row in metric_rows)
+    unique_blobs_downloaded = sum(row["unique_blobs_downloaded"] for row in metric_rows)
+    download_bytes = sum(row["download_bytes"] for row in metric_rows)
+    duplicate_blob_reuses = sum(row["duplicate_blob_reuses"] for row in metric_rows)
     return {
         "run_id": run_id, "attempted": attempted, "records": records, "failed": failed,
         "deferred": deferred, "rate_limited": rate_limited, "requests": requests,
@@ -849,6 +1196,12 @@ def run_collection(
         "batches": batches, "errors": failed, "error_counts": statuses, "stop_reason": stop_reason,
         "completed_run_ids": sorted(processed_run_ids),
         "truncated_records": truncated_records,
+        "repositories_inspected": attempted,
+        "cache_hits": cache_hits,
+        "unique_blobs_downloaded": unique_blobs_downloaded,
+        "download_bytes": download_bytes,
+        "duplicate_blob_reuses": duplicate_blob_reuses,
+        "triage_scope": store.triage_scope_counts(str(triage_model.fingerprint)) if triage_model is not None else None,
     }
 
 

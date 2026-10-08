@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 _LOCATIONS = (".github/", "", "docs/")
 _README_NAMES = (
@@ -41,6 +42,21 @@ def _readme_like(path: str) -> bool:
 def _clear_repository_data(item: dict[str, Any]) -> None:
     for field in ("text", "blob_sha", "path", "commit_sha", "canonical_name"):
         item[field] = None
+
+
+def _verified_cached_text(blob_oid: str, text: Any, max_bytes: int) -> str | None:
+    if not isinstance(text, str):
+        return None
+    try:
+        raw = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    if len(raw) > max_bytes or len(blob_oid) != 40:
+        return None
+    header = f"blob {len(raw)}\0".encode("ascii")
+    if hashlib.sha1(header + raw).hexdigest() != blob_oid.casefold():
+        return None
+    return text
 
 
 def _error_aliases(payload: Any) -> set[str]:
@@ -84,11 +100,14 @@ def fetch_readme_batch(
     *,
     deadline: float | None = None,
     max_bytes: int = 1_000_000,
+    cache_lookup: Callable[[str], str | None] | None = None,
 ) -> dict[str, Any]:
     """Fetch one README per target, pinning every result to its GitHub database ID.
 
     Targets are mappings with ``github_id`` and ``full_name``. The return value is
     safe to persist: errors contain no server-provided snippets or query text.
+    ``cache_lookup`` is advisory; its text is accepted only when its Git blob
+    SHA matches the selected OID and its UTF-8 size is within ``max_bytes``.
     At most three GraphQL queries are made, regardless of batch size.
     """
     if isinstance(targets, (str, bytes)) or not isinstance(targets, Sequence):
@@ -104,7 +123,8 @@ def fetch_readme_batch(
         full_name = target.get("full_name") if isinstance(target, Mapping) else None
         item = {"github_id": github_id, "full_name": full_name, "status": "error",
                 "text": None, "blob_sha": None, "path": None, "commit_sha": None,
-                "canonical_name": None, "error": None}
+                "canonical_name": None, "error": None, "cache_hit": False,
+                "content_downloaded": False}
         if isinstance(github_id, bool) or not isinstance(github_id, int) or github_id <= 0:
             item["error"] = "invalid target identity"
         elif not isinstance(full_name, str) or len(full_name.split("/")) != 2:
@@ -196,7 +216,7 @@ def fetch_readme_batch(
             else:
                 failed = _error_aliases(payload)
                 raw_errors = payload.get("errors", []) if isinstance(payload, dict) else []
-                global_error = isinstance(raw_errors, list) and any(
+                global_error = not isinstance(raw_errors, list) or any(
                     not isinstance(err, dict) or not (isinstance(err.get("path"), list) and err["path"] and isinstance(err["path"][0], str))
                     for err in raw_errors
                 )
@@ -296,7 +316,7 @@ def fetch_readme_batch(
                 data = payload.get("data") if isinstance(payload, dict) else None
                 failed = _error_aliases(payload)
                 raw_errors = payload.get("errors", []) if isinstance(payload, dict) else []
-                global_error = isinstance(raw_errors, list) and any(
+                global_error = not isinstance(raw_errors, list) or any(
                     not isinstance(err, dict) or not (isinstance(err.get("path"), list) and err["path"] and isinstance(err["path"][0], str))
                     for err in raw_errors
                 )
@@ -352,30 +372,72 @@ def fetch_readme_batch(
                         metadata[item_index]["blob_oid"] = metadata[item_index]["paths"][0][2]
                         item["error"] = "pending blob fetch"
 
-    blob_indexes = [i for i, m in metadata.items()
-                    if m["blob_oid"] and items[i]["error"] == "pending blob fetch"]
-    if blob_indexes:
+    blob_groups: dict[str, list[int]] = {}
+    for item_index, meta in metadata.items():
+        if meta["blob_oid"] and items[item_index]["error"] == "pending blob fetch":
+            blob_groups.setdefault(meta["blob_oid"], []).append(item_index)
+
+    cache_hits = duplicate_blob_reuses = 0
+    unique_blobs_downloaded = download_bytes = 0
+    cache_misses: dict[str, list[int]] = {}
+    for blob_oid, group_indexes in blob_groups.items():
+        cached_text = None
+        if cache_lookup is not None:
+            try:
+                cached_text = _verified_cached_text(blob_oid, cache_lookup(blob_oid), max_bytes)
+            except Exception:
+                # Cache implementations are advisory; a cache failure is a miss.
+                cached_text = None
+        if cached_text is None:
+            cache_misses[blob_oid] = group_indexes
+            continue
+        for item_index in group_indexes:
+            item = items[item_index]
+            item["status"], item["error"], item["text"] = "ok", None, cached_text
+            item["blob_sha"] = blob_oid
+            item["path"] = metadata[item_index]["path"]
+            item["cache_hit"] = True
+            item["content_downloaded"] = False
+            cache_hits += 1
+        duplicate_blob_reuses += max(0, len(group_indexes) - 1)
+
+    if cache_misses:
         decls, fields, variables = [], [], {}
-        for alias_index, item_index in enumerate(blob_indexes):
+        group_aliases: dict[str, tuple[int, str]] = {}
+        member_aliases: dict[tuple[str, int], str] = {}
+        for alias_index, (blob_oid, group_indexes) in enumerate(cache_misses.items()):
+            item_index = group_indexes[0]
+            group_aliases[blob_oid] = (item_index, f"b{alias_index}")
             decls.append(f"$oid{alias_index}: GitObjectID!")
-            variables[f"oid{alias_index}"] = metadata[item_index]["blob_oid"]
+            variables[f"oid{alias_index}"] = blob_oid
             owner, name = items[item_index]["full_name"].split("/", 1)
             decls.extend((f"$owner{alias_index}: String!", f"$name{alias_index}: String!"))
             variables[f"owner{alias_index}"] = owner
             variables[f"name{alias_index}"] = name
             fields.append(f"b{alias_index}: repository(owner: $owner{alias_index}, name: $name{alias_index}) {{ databaseId isPrivate blob: object(oid: $oid{alias_index}) {{ ... on Blob {{ oid byteSize isBinary isTruncated text }} }} }}")
+            for member_position, duplicate_index in enumerate(group_indexes[1:], start=1):
+                suffix = f"{alias_index}_{member_position}"
+                dup_owner, dup_name = items[duplicate_index]["full_name"].split("/", 1)
+                decls.extend((f"$owner{suffix}: String!", f"$name{suffix}: String!"))
+                variables[f"owner{suffix}"] = dup_owner
+                variables[f"name{suffix}"] = dup_name
+                duplicate_alias = f"v{suffix}"
+                member_aliases[(blob_oid, duplicate_index)] = duplicate_alias
+                fields.append(f"{duplicate_alias}: repository(owner: $owner{suffix}, name: $name{suffix}) {{ databaseId isPrivate }}")
         response = query("query ReadmeBlobs(" + ",".join(decls) + ") { " + " ".join(fields) + " rateLimit { cost remaining resetAt } }", variables)
         if response is None:
-            for i in blob_indexes:
-                items[i]["status"], items[i]["error"] = "unavailable", "deadline exceeded"
+            for group_indexes in cache_misses.values():
+                for i in group_indexes:
+                    items[i]["status"], items[i]["error"] = "unavailable", "deadline exceeded"
         else:
             payload, _headers = response
             transport_failed = isinstance(payload, dict) and "_transport_error" in payload
             if isinstance(payload, dict) and "_transport_error" in payload:
                 message = payload.get("_transport_error")
                 failure = "deadline exceeded" if message == "deadline exceeded" else "GraphQL transport error"
-                for i in blob_indexes:
-                    items[i]["status"], items[i]["error"] = "unavailable", failure
+                for group_indexes in cache_misses.values():
+                    for i in group_indexes:
+                        items[i]["status"], items[i]["error"] = "unavailable", failure
                 payload = None
             data = payload.get("data") if isinstance(payload, dict) else None
             failed = _error_aliases(payload)
@@ -385,43 +447,99 @@ def fetch_readme_batch(
                 for error in raw_errors
             ):
                 rate_limited = True
-            for alias_index, item_index in enumerate(blob_indexes) if not transport_failed else ():
-                item = items[item_index]
-                if f"b{alias_index}" in failed:
-                    item["status"], item["error"] = "error", "GraphQL blob error"
-                    continue
-                repo_node = data.get(f"b{alias_index}") if isinstance(data, dict) else None
-                if not isinstance(repo_node, dict) or repo_node.get("databaseId") != item["github_id"]:
-                    item["status"], item["error"] = "error", "repository identity mismatch"
-                    continue
-                if repo_node.get("isPrivate") is not False:
-                    _clear_repository_data(item)
-                    item["status"], item["error"] = "unavailable", "repository is not public"
-                    continue
-                blob = repo_node.get("blob")
-                if not isinstance(blob, dict):
-                    item["status"], item["error"] = "error", "README blob unavailable"
-                    continue
-                item["blob_sha"] = blob.get("oid") if isinstance(blob.get("oid"), str) else None
-                size = blob.get("byteSize")
-                if isinstance(size, bool) or not isinstance(size, int) or size < 0:
-                    item["status"], item["error"] = "error", "invalid README size"
-                elif size > max_bytes:
-                    item["status"], item["error"] = "oversized", "README exceeds size limit"
-                elif blob.get("isBinary") is True:
-                    item["status"], item["error"] = "unavailable", "README is binary"
-                elif blob.get("isTruncated") is True:
-                    item["status"], item["error"] = "unavailable", "README content truncated"
-                elif not isinstance(blob.get("text"), str):
-                    item["status"], item["error"] = "unavailable", "README content unavailable or truncated"
-                else:
-                    text = blob["text"]
-                    if len(text.encode("utf-8")) > max_bytes or len(text.encode("utf-8")) != size:
-                        item["status"], item["error"] = "oversized" if len(text.encode("utf-8")) > max_bytes else "unavailable", "README size mismatch or truncation"
-                    else:
-                        item["status"], item["error"], item["text"] = "ok", None, text
-                item["path"] = metadata[item_index]["path"]
+            expected_aliases = {alias for _index, alias in group_aliases.values()} | set(member_aliases.values())
+            global_error = not isinstance(raw_errors, list) or any(
+                not isinstance(error, dict)
+                or not isinstance(error.get("path"), list)
+                or not error["path"]
+                or not isinstance(error["path"][0], str)
+                or error["path"][0] not in expected_aliases | {"rateLimit"}
+                for error in raw_errors
+            )
+            if global_error:
+                for group_indexes in cache_misses.values():
+                    for i in group_indexes:
+                        items[i]["status"], items[i]["error"] = "error", "GraphQL response error"
+            elif not transport_failed:
+                for blob_oid, group_indexes in cache_misses.items():
+                    rep_index, rep_alias = group_aliases[blob_oid]
+                    rep_item = items[rep_index]
+                    valid_members = [rep_index]
+                    for duplicate_index in group_indexes[1:]:
+                        duplicate_item = items[duplicate_index]
+                        duplicate_alias = member_aliases[(blob_oid, duplicate_index)]
+                        if duplicate_alias in failed:
+                            duplicate_item["status"], duplicate_item["error"] = "error", "GraphQL repository error"
+                            continue
+                        duplicate_node = data.get(duplicate_alias) if isinstance(data, dict) else None
+                        if not isinstance(duplicate_node, dict) or duplicate_node.get("databaseId") != duplicate_item["github_id"]:
+                            duplicate_item["status"], duplicate_item["error"] = "error", "repository identity mismatch"
+                            continue
+                        if duplicate_node.get("isPrivate") is not False:
+                            _clear_repository_data(duplicate_item)
+                            duplicate_item["status"], duplicate_item["error"] = "unavailable", "repository is not public"
+                            continue
+                        valid_members.append(duplicate_index)
+
+                    if rep_alias in failed:
+                        rep_item["status"], rep_item["error"] = "error", "GraphQL blob error"
+                        for i in valid_members[1:]:
+                            items[i]["status"], items[i]["error"] = "unavailable", "shared README blob unavailable"
+                        continue
+                    repo_node = data.get(rep_alias) if isinstance(data, dict) else None
+                    if not isinstance(repo_node, dict) or repo_node.get("databaseId") != rep_item["github_id"]:
+                        rep_item["status"], rep_item["error"] = "error", "repository identity mismatch"
+                        for i in valid_members[1:]:
+                            items[i]["status"], items[i]["error"] = "unavailable", "shared README blob unavailable"
+                        continue
+                    if repo_node.get("isPrivate") is not False:
+                        for i in valid_members:
+                            _clear_repository_data(items[i])
+                            items[i]["status"], items[i]["error"] = "unavailable", "repository is not public"
+                        continue
+                    blob = repo_node.get("blob")
+                    if not isinstance(blob, dict):
+                        rep_item["status"], rep_item["error"] = "error", "README blob unavailable"
+                        for i in valid_members[1:]:
+                            items[i]["status"], items[i]["error"] = "unavailable", "shared README blob unavailable"
+                        continue
+                    downloaded_text = blob.get("text")
+                    if isinstance(downloaded_text, str):
+                        raw_download = downloaded_text.encode("utf-8")
+                        unique_blobs_downloaded += 1
+                        download_bytes += len(raw_download)
+                    if blob.get("oid") != blob_oid:
+                        rep_item["status"], rep_item["error"] = "error", "README blob identity mismatch"
+                        for i in valid_members[1:]:
+                            items[i]["status"], items[i]["error"] = "unavailable", "shared README blob unavailable"
+                        continue
+                    size = blob.get("byteSize")
+                    status, error = "ok", None
+                    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+                        status, error = "error", "invalid README size"
+                    elif size > max_bytes:
+                        status, error = "oversized", "README exceeds size limit"
+                    elif blob.get("isBinary") is True:
+                        status, error = "unavailable", "README is binary"
+                    elif blob.get("isTruncated") is True:
+                        status, error = "unavailable", "README content truncated"
+                    elif not isinstance(downloaded_text, str):
+                        status, error = "unavailable", "README content unavailable or truncated"
+                    elif len(downloaded_text.encode("utf-8")) > max_bytes or len(downloaded_text.encode("utf-8")) != size:
+                        status = "oversized" if len(downloaded_text.encode("utf-8")) > max_bytes else "unavailable"
+                        error = "README size mismatch or truncation"
+                    if status == "ok" and downloaded_text is not None:
+                        duplicate_blob_reuses += max(0, len(valid_members) - 1)
+                    for item_index in valid_members:
+                        item = items[item_index]
+                        item["status"], item["error"] = status, error
+                        item["blob_sha"] = blob_oid
+                        item["path"] = metadata[item_index]["path"]
+                        item["text"] = downloaded_text if status == "ok" else None
+                        item["content_downloaded"] = isinstance(downloaded_text, str)
 
     return {"items": items, "requests": requests, "cost": total_cost if requests else None,
             "remaining": remaining, "reset_at": reset_at, "rate_limited": rate_limited,
-            "elapsed_seconds": max(0.0, time.monotonic() - start)}
+            "elapsed_seconds": max(0.0, time.monotonic() - start),
+            "cache_hits": cache_hits, "unique_blobs_downloaded": unique_blobs_downloaded,
+            "download_bytes": download_bytes, "duplicate_blob_reuses": duplicate_blob_reuses}

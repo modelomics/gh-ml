@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import hashlib
+import zlib
 
 from gh_ml.graphql_evidence import EvidenceStore, export_run, run_collection
 import gh_ml.graphql_evidence as graphql_evidence
@@ -64,6 +66,30 @@ def _open(path: Path) -> EvidenceStore:
     return EvidenceStore(path, min_free_bytes=0)
 
 
+class DeferredModel:
+    version = "test-triage-v1"
+    fingerprint = "model-test-1"
+    defer_threshold = 0.01
+
+    def predict(self, row):
+        from gh_ml.metadata_triage import metadata_fingerprint
+
+        deferred = row.get("description") == "likely non-ML"
+        return {
+            "decision": "defer" if deferred else "fetch",
+            "predicted_label": "not_ml_relevant" if deferred else "ml_relevant",
+            "model_score": 0.001 if deferred else 0.9,
+            "reason": "test score",
+            "experimental": True,
+            "metadata_fingerprint": metadata_fingerprint(row),
+        }
+
+
+def _git_blob_sha(text: str) -> str:
+    raw = text.encode()
+    return hashlib.sha1(f"blob {len(raw)}\0".encode() + raw).hexdigest()
+
+
 def test_configured_free_space_floor_blocks_store_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     class Statvfs:
         f_bavail = 1
@@ -76,6 +102,130 @@ def test_configured_free_space_floor_blocks_store_setup(tmp_path: Path, monkeypa
         with EvidenceStore(path, min_free_bytes=2):
             pass
     assert not path.exists()
+
+
+def test_blob_cache_lookup_verifies_git_oid_and_recovers_from_corruption(tmp_path: Path) -> None:
+    path = tmp_path / "cache.sqlite"
+    text = "# README\nCached model evidence."
+    blob = _git_blob_sha(text)
+    with _open(path) as store:
+        plan = " ".join(
+            row["detail"] for row in store.db.execute(
+                "EXPLAIN QUERY PLAN SELECT DISTINCT r.content_sha256 FROM raw_provenance p "
+                "JOIN raw_readmes r USING(content_sha256) WHERE lower(p.blob_sha)=lower(?) ORDER BY p.fetched_at DESC",
+                (_git_blob_sha(text),),
+            )
+        )
+        assert "SEARCH p USING INDEX raw_provenance_blob_lower" in plan
+        rows = [repository(801), repository(802)]
+        store.ingest(rows, source="inventory")
+        items = [evidence_item(row, text=text) for row in rows]
+        for item in items:
+            item["blob_sha"] = blob
+        run_collection(store, object(), fetcher=lambda *_args, **_kwargs: {
+            "items": items, "requests": 1, "unique_blobs_downloaded": 1,
+            "download_bytes": len(text.encode()),
+        })
+        assert store.lookup_blob_text(blob) == text
+        assert store.lookup_blob_text("0" * 40) is None
+        assert store.db.execute("SELECT COUNT(*) FROM raw_readmes").fetchone()[0] == 1
+        assert store.db.execute("SELECT COUNT(*) FROM raw_provenance WHERE blob_sha=?", (blob,)).fetchone()[0] == 2
+        store.db.execute("UPDATE raw_readmes SET compressed_text=?", (b"corrupt",))
+        store.db.commit()
+        assert store.lookup_blob_text(blob) is None
+
+
+def test_deferred_audit_rotates_by_epoch_and_never_fetches_unselected_rows(tmp_path: Path) -> None:
+    from datetime import UTC, datetime
+
+    path = tmp_path / "triage.sqlite"
+    model = DeferredModel()
+    rows = [
+        {"github_id": 10_000 + index, "full_name": f"lab/repo-{index}", "description": "likely non-ML"}
+        for index in range(500)
+    ]
+    with _open(path) as store:
+        store.ingest(rows, source="inventory", triage_model=model, audit_rate=0.1, audit_seed="rotate",
+                     now=datetime(2026, 9, 8, tzinfo=UTC))
+        first_epoch = datetime(2026, 10, 8, tzinfo=UTC)
+        first = store.rotate_deferred_audit(model, audit_rate=0.1, audit_seed="rotate", now=first_epoch)
+        selected_first = {
+            row[0] for row in store.db.execute(
+                "SELECT github_id FROM metadata_triage WHERE audit_epoch='2026-10' AND audit_selected=1"
+            )
+        }
+        assert first["updated"] == 500
+        assert 20 <= len(selected_first) <= 80
+        second_epoch = datetime(2026, 11, 8, tzinfo=UTC)
+        second = store.rotate_deferred_audit(model, audit_rate=0.1, audit_seed="rotate", now=second_epoch)
+        selected_second = {
+            row[0] for row in store.db.execute(
+                "SELECT github_id FROM metadata_triage WHERE audit_epoch='2026-11' AND audit_selected=1"
+            )
+        }
+        assert second["updated"] == 500
+        assert selected_second - selected_first
+        assert store.triage_scope_counts(model.fingerprint) == {
+            "assessed": 500, "fetch": 0, "deferred": 500,
+            "audit_selected": len(selected_second),
+        }
+        # Every unselected deferral remains outside the due collection queue,
+        # even after its 30-day reconsideration date has arrived.
+        future = datetime(2026, 12, 9, tzinfo=UTC)
+        third = store.rotate_deferred_audit(model, audit_rate=0.1, audit_seed="rotate", now=future)
+        assert third["updated"] == 500
+        selected_third = {
+            row[0] for row in store.db.execute(
+                "SELECT github_id FROM metadata_triage WHERE audit_epoch='2026-12' AND audit_selected=1"
+            )
+        }
+        fetched: list[int] = []
+
+        def fake_fetcher(_client, targets, **_kwargs):
+            fetched.extend(target["github_id"] for target in targets)
+            return {"items": [evidence_item(target) for target in targets]}
+
+        summary = run_collection(store, object(), fetcher=fake_fetcher, triage_model=model,
+                                 audit_epoch="2026-12", max_repositories=500,
+                                 max_batches=20, now=future)
+        assert set(fetched).issubset(selected_third)
+        assert summary["attempted"] == len(selected_third)
+
+
+def test_metadata_change_and_model_change_rescore_and_requeue(tmp_path: Path) -> None:
+    path = tmp_path / "rescore.sqlite"
+    model = DeferredModel()
+    row = {"github_id": 90_001, "full_name": "lab/repo", "description": "likely non-ML"}
+    with _open(path) as store:
+        first = store.ingest([row], source="inventory", triage_model=model)
+        assert first["triage_scored"] == 1
+        assert store.pending_count() == 0
+        store.db.execute("UPDATE repositories SET last_run_id='finished'")
+        changed = store.ingest([{**row, "description": "known ML method"}], source="inventory", triage_model=model)
+        assert changed["triage_scored"] == 1
+        assert store.pending_count() == 1
+        model.fingerprint = "model-test-2"
+        rescore = store.retriage_existing(model, max_repositories=10)
+        assert rescore["scored"] == 1
+        assert store.db.execute("SELECT model_fingerprint FROM metadata_triage WHERE github_id=?", (90_001,)).fetchone()[0] == "model-test-2"
+
+
+def test_new_contribution_evidence_overrides_reused_metadata_prediction(tmp_path: Path) -> None:
+    path = tmp_path / "contribution.sqlite"
+    model = DeferredModel()
+    row = {"github_id": 90_002, "full_name": "lab/repo", "description": "likely non-ML"}
+    with _open(path) as store:
+        store.ingest([row], source="inventory", triage_model=model)
+        assessment = store.db.execute("SELECT decision FROM metadata_triage WHERE github_id=?", (90_002,)).fetchone()
+        assert assessment[0] == "defer"
+        assert store.pending_count() == 0
+        store.ingest([{**row, "selection_status": "include"}], source="inventory", triage_model=model)
+        assessment = store.db.execute("SELECT decision,reason,audit_selected FROM metadata_triage WHERE github_id=?", (90_002,)).fetchone()
+        assert tuple(assessment) == ("fetch", "existing_contribution_evidence", 0)
+        assert store.pending_count() == 1
+        store.ingest([row], source="inventory", triage_model=model)
+        assessment = store.db.execute("SELECT decision,reason FROM metadata_triage WHERE github_id=?", (90_002,)).fetchone()
+        assert tuple(assessment) == ("defer", "test score")
 
 
 def test_ingest_is_resumable_and_reports_insert_update_unchanged_counts(tmp_path: Path) -> None:
