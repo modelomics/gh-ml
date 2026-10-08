@@ -18,6 +18,8 @@ Store the observation time separately from publication, release, and commit time
 
 Mark cases `unknown` when the comparison corpus or evidence is inadequate. The paper and repository corpus is incomplete, so no nearest neighbor is not proof of novelty, and a nearest neighbor is not proof of prior art. Validate retrieval with recall@K over human-judged related pairs, then audit the final decisions with blinded human review and report uncertainty. Calibrate confidence against adjudicated cases before using it to prioritize or automate review.
 
+The planned daily freshness target is one shared end-to-end hour for repository collection, evidence embedding, novelty assessment, and export. An orchestrator should allocate one global deadline across those stages rather than granting each stage a separate hour; expensive or rate-limited cases remain pending for a later run. A multi-day bootstrap is a separate explicit operation and does not change the daily budget. These are architecture requirements, not implemented runtime guarantees.
+
 Update embeddings when source text changes and add new items incrementally. When a new or corrected evidence edge changes an assessment, enqueue only affected entities and their bounded neighborhoods for reassessment under a daily quota. Periodically rebuild the index offline from versioned source records and swap it in atomically. Start with retrieval and evidence capture; do not add novelty tags to the maintained registry until an evaluation establishes useful precision and uncertainty handling.
 
 ## Classifier role
