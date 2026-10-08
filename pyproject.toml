@@ -25,6 +25,11 @@ parquet = [
 triage = [
   "scikit-learn>=1.5,<2",
 ]
+semantic = [
+  "sentence-transformers==5.7.0",
+  "tokenizers==0.22.2",
+  "safetensors==0.8.0",
+]
 
 [project.scripts]
 gh-ml = "gh_ml.cli:main"

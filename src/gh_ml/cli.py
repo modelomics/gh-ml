@@ -920,6 +920,58 @@ def _graphql_rows(path: Path, digest: Any, cursor: Any = None) -> Any:
     raise ValueError(f"unsupported GraphQL inventory format: {path} (expected .jsonl, .ndjson, or .parquet)")
 
 
+def _load_graphql_triage_model(path: Path) -> tuple[str, Any]:
+    """Dispatch a validated triage artifact by schema without importing unused backends."""
+    with path.open(encoding="utf-8") as handle:
+        artifact = json.load(handle)
+    if not isinstance(artifact, dict) or not isinstance(artifact.get("schema"), str):
+        raise ValueError("triage artifact must be a JSON object with a schema")
+    schema = artifact["schema"]
+    loaders = {
+        "gh-ml-metadata-triage-v1": (".metadata_triage", "load_model"),
+        "gh-ml-lexical-triage-v1": (".lexical_triage", "load_model"),
+        "gh-ml-semantic-triage-v1": (".semantic_triage", "load_model"),
+    }
+    selected = loaders.get(schema)
+    if selected is None:
+        raise ValueError(f"unsupported GraphQL triage artifact schema: {schema}")
+    from importlib import import_module
+    module_name, loader_name = selected
+    module = import_module(module_name, package=__package__)
+    model = getattr(module, loader_name)(str(path))
+    if getattr(model, "schema", schema) != schema:
+        raise ValueError("triage model loader schema does not match the artifact")
+    return schema, model
+
+
+def _predict_graphql_rows(rows: Any, model: Any, *, deadline: float, batch_size: int = 64) -> Any:
+    """Score bounded input batches while preserving each resumable cursor."""
+    from .graphql_evidence import predict_triage_batch
+
+    iterator = iter(rows)
+    exhausted = False
+    while not exhausted:
+        batch = []
+        for _ in range(batch_size):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("metadata triage exceeded the input time budget")
+            try:
+                item = next(iterator)
+            except StopIteration:
+                exhausted = True
+                break
+            if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], dict):
+                raise ValueError("GraphQL input rows must contain a row and resumable cursor")
+            batch.append(item)
+        if not batch:
+            if exhausted:
+                return
+            raise TimeoutError("metadata triage exceeded the input time budget")
+        predictions = predict_triage_batch(model, [row for row, _cursor in batch], deadline=deadline)
+        for (row, cursor), prediction in zip(batch, predictions, strict=True):
+            yield row, cursor, prediction
+
+
 def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
                     collection: Any = None, store_factory: Any = None) -> int:
     """Stream repository inventories into durable local GraphQL README collection."""
@@ -981,9 +1033,11 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
     client = (client_factory or GitHubClient)(token=_github_token(args.github_token_env))
     model_path = getattr(args, "triage_model", None)
     triage_model = None
+    triage_schema = None
     if model_path is not None:
-        from .metadata_triage import load_model
-        triage_model = load_model(str(model_path.expanduser().resolve()))
+        if time.monotonic() >= deadline:
+            raise TimeoutError("whole-invocation deadline expired before triage model initialization")
+        triage_schema, triage_model = _load_graphql_triage_model(model_path.expanduser().resolve())
     source_receipts: list[dict[str, Any]] = []
     ingestion_counts: dict[str, int] = {key: 0 for key in ("seen", "inserted", "updated", "changed", "unchanged", "invalid")}
     ingestion_complete = True
@@ -1026,6 +1080,8 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
             digest = hashlib.sha256()
             cursor = store.ingest_cursor(str(input_path), source_revision)
             rows = _graphql_rows(input_path, digest, cursor=cursor)
+            if triage_model is not None:
+                rows = _predict_graphql_rows(rows, triage_model, deadline=deadline)
             counts = store.ingest(
                 rows, source=str(input_path), source_revision=source_revision,
                 commit_every=500, max_seconds=max(0.0, deadline - time.monotonic()), resume=True,
@@ -1067,6 +1123,7 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
         if triage_model is not None:
             triage_counts.update({
                 "model_version": triage_model.version,
+                "schema": triage_schema,
                 "model_fingerprint": triage_model.fingerprint,
                 "experimental": True,
                 "defer_threshold": triage_model.defer_threshold,

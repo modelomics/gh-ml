@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -44,6 +45,100 @@ def test_graphql_parser_sets_bounded_resumable_defaults():
     assert args.triage_model is None
     assert args.deferred_audit_rate == 0.05
     assert args.max_triage_repositories == 10_000
+
+
+def test_triage_loader_dispatches_by_schema_without_loading_unused_models(tmp_path, monkeypatch):
+    import importlib
+    from gh_ml.metadata_triage import ALLOWED_FEATURES, ARTIFACT_SCHEMA, MODEL_VERSION, _canonical_hash
+
+    artifact = {
+        "schema": ARTIFACT_SCHEMA, "model_version": MODEL_VERSION,
+        "features": list(ALLOWED_FEATURES), "positive_label": "ml_relevant",
+        "negative_label": "not_ml_relevant", "vocabulary": {}, "idf": [], "weights": [],
+        "intercept": 0.0,
+    }
+    artifact["artifact_sha256"] = _canonical_hash(artifact)
+    path = tmp_path / "metadata.json"
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+    loaded = []
+    original = importlib.import_module
+
+    def tracked(name, package=None):
+        loaded.append(name)
+        return original(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", tracked)
+    schema, model = cli._load_graphql_triage_model(path)
+    assert schema == ARTIFACT_SCHEMA
+    assert model.fingerprint == artifact["artifact_sha256"]
+    assert loaded == [".metadata_triage"]
+
+    unsupported = tmp_path / "unknown.json"
+    unsupported.write_text('{"schema":"unregistered"}', encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported.*schema"):
+        cli._load_graphql_triage_model(unsupported)
+
+
+def test_triage_loader_routes_lexical_schema_and_lazy_semantic_backend(tmp_path, monkeypatch):
+    import importlib
+    from gh_ml.lexical_triage import (
+        ALLOWED_FEATURES as LEXICAL_FEATURES,
+        ARTIFACT_SCHEMA as LEXICAL_SCHEMA,
+        MODEL_VERSION as LEXICAL_VERSION,
+        _canonical_hash as lexical_hash,
+    )
+
+    lexical_artifact = {
+        "schema": LEXICAL_SCHEMA, "model_version": LEXICAL_VERSION,
+        "features": list(LEXICAL_FEATURES), "positive_label": "ml_relevant",
+        "negative_label": "not_ml_relevant", "word_ngram_range": [1, 2],
+        "char_ngram_range": [3, 5], "blocks": {
+            "word": {"vocabulary": {}, "idf": [], "weights": [], "norm": "l2", "input_weight": 1.0},
+            "char_wb": {"vocabulary": {}, "idf": [], "weights": [], "norm": "l2", "input_weight": 1.0},
+        }, "intercept": 0.0, "defer_threshold": 0.0,
+    }
+    lexical_artifact["artifact_sha256"] = lexical_hash(lexical_artifact)
+    lexical_path = tmp_path / "lexical.json"
+    lexical_path.write_text(json.dumps(lexical_artifact), encoding="utf-8")
+    schema, model = cli._load_graphql_triage_model(lexical_path)
+    assert schema == LEXICAL_SCHEMA
+    assert model.fingerprint == lexical_artifact["artifact_sha256"]
+
+    semantic_path = tmp_path / "semantic.json"
+    semantic_path.write_text('{"schema":"gh-ml-semantic-triage-v1"}', encoding="utf-8")
+    fake_model = SimpleNamespace(schema="gh-ml-semantic-triage-v1")
+    loaded = []
+    original = importlib.import_module
+
+    class FakeSemanticModule:
+        @staticmethod
+        def load_model(path):
+            assert path == str(semantic_path)
+            return fake_model
+
+    def tracked(name, package=None):
+        loaded.append(name)
+        if name == ".semantic_triage":
+            return FakeSemanticModule
+        return original(name, package)
+
+    monkeypatch.setattr(importlib, "import_module", tracked)
+    schema, model = cli._load_graphql_triage_model(semantic_path)
+    assert schema == fake_model.schema
+    assert model is fake_model
+    assert loaded == [".semantic_triage"]
+
+
+def test_graphql_triage_rows_preserve_cursor_and_batch_predictions():
+    class BatchModel:
+        def predict_batch(self, rows, *, deadline_monotonic=None):
+            assert len(rows) <= 64
+            return [{"decision": "fetch", "github_id": row["github_id"]} for row in rows]
+
+    inputs = [({"github_id": index}, index + 1) for index in range(3)]
+    scored = list(cli._predict_graphql_rows(inputs, BatchModel(), deadline=time.monotonic() + 10, batch_size=2))
+    assert [(row["github_id"], cursor, prediction["github_id"])
+            for row, cursor, prediction in scored] == [(0, 1, 0), (1, 2, 1), (2, 3, 2)]
 
 
 def test_jsonl_reader_seeks_to_saved_byte_cursor_and_hashes_only_read_rows(tmp_path: Path):

@@ -7,6 +7,7 @@ from gh_ml.metadata_triage import (
     ARTIFACT_SCHEMA,
     MODEL_VERSION,
     MetadataTriage,
+    canonical_metadata_text,
     metadata_fingerprint,
     metadata_text,
     load_artifact,
@@ -50,6 +51,33 @@ def test_metadata_features_exclude_selector_and_query_fields() -> None:
     assert "machine-learning" not in text
     assert "selected" not in text
     assert "True" not in text
+
+
+def test_canonical_text_matches_fingerprint_normalization_without_changing_v1_text() -> None:
+    row = {
+        "name": "cafe\u0301   repo",
+        "full_name": "owner/cafe\u0301 repo",
+        "description": "A   small\nmodel tool",
+        "topics": ["vision  models", "deep learning"],
+        "language": "Python",
+        "ignored": "not allowlisted",
+    }
+    reordered = {
+        "name": "café repo",
+        "full_name": "owner/café repo",
+        "description": "A small model tool",
+        "topics": '["deep learning", "vision models"]',
+        "language": "Python",
+    }
+
+    # This locks the existing v1 fingerprint representation against accidental migration.
+    assert metadata_fingerprint(row) == "742d1b2ce56044a4c9cbb7e83e3ef9ee7d15e6d807b4468063e4a4ba5d43272d"
+    assert metadata_fingerprint(row) == metadata_fingerprint(reordered)
+    assert canonical_metadata_text(row) == canonical_metadata_text(reordered)
+    assert metadata_text(row) == (
+        "cafe\u0301   repo owner/cafe\u0301 repo A   small\nmodel tool "
+        "vision  models deep learning Python"
+    )
 
 
 def test_sparse_and_unknown_metadata_always_fetch() -> None:

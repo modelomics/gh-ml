@@ -16,6 +16,7 @@ from pathlib import Path
 import sqlite3
 import time
 from typing import Any, Iterable, Mapping, Sequence
+import inspect
 import uuid
 import zlib
 
@@ -97,6 +98,32 @@ class StorageLimitExceeded(RuntimeError):
 
 class ExportDeadlineExceeded(TimeoutError):
     """The compact JSONL export did not fit within its wall-clock budget."""
+
+
+def predict_triage_batch(model: Any, rows: Sequence[Mapping[str, Any]], *, deadline: float | None = None) -> list[dict[str, Any]]:
+    """Score a bounded row batch with optional model-native batching."""
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("metadata triage exceeded its wall-clock budget")
+    batch_predict = getattr(model, "predict_batch", None)
+    if callable(batch_predict):
+        parameters = inspect.signature(batch_predict).parameters.values()
+        accepts_deadline = any(
+            parameter.name == "deadline_monotonic" or parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters
+        )
+        raw = batch_predict(rows, deadline_monotonic=deadline) if accepts_deadline else batch_predict(rows)
+        predictions = list(raw)
+    else:
+        predictions = []
+        for row in rows:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("metadata triage exceeded its wall-clock budget")
+            predictions.append(model.predict(row))
+    if deadline is not None and time.monotonic() >= deadline:
+        raise TimeoutError("metadata triage exceeded its wall-clock budget")
+    if len(predictions) != len(rows) or any(not isinstance(item, Mapping) for item in predictions):
+        raise ValueError("triage predict_batch must return one mapping per input row")
+    return [dict(item) for item in predictions]
 
 
 def _sqlite_storage_error(exc: sqlite3.OperationalError) -> bool:
@@ -290,9 +317,9 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
 
     def _triage_assessment(
         self, row: Mapping[str, Any], triage_model: Any, *, audit_rate: float, audit_seed: str,
-        audit_interval_days: int, audit_epoch: str,
+        audit_interval_days: int, audit_epoch: str, prediction: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
-        result = triage_model.predict(row)
+        result = prediction if prediction is not None else triage_model.predict(row)
         result = dict(result) if isinstance(result, Mapping) else {}
         decision = result.get("decision")
         if decision not in {"fetch", "defer"}:
@@ -409,25 +436,38 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
             (str(triage_model.fingerprint), max_repositories),
         )
         scored = fetch = deferred = selected = 0
-        for stored in rows:
-            if time.monotonic() >= deadline:
+        while scored < max_repositories and time.monotonic() < deadline:
+            stored_rows = rows.fetchmany(min(64, max_repositories - scored))
+            if not stored_rows:
                 break
-            row = dict(stored)
-            row.update(json.loads(row["metadata_json"]))
-            assessment = self._triage_assessment(row, triage_model, audit_rate=audit_rate,
-                                                 audit_seed=audit_seed, audit_interval_days=audit_interval_days,
-                                                 audit_epoch=stamp.strftime("%Y-%m"))
-            self._save_triage(stored["github_id"], assessment, now=stamp)
-            due = stamp.timestamp() + (
-                audit_interval_days * 86400
-                if assessment["decision"] == "defer" and not assessment["audit_selected"] else 0
-            )
-            self.db.execute("UPDATE repositories SET due_at=?,last_run_id=NULL WHERE github_id=?", (due, stored["github_id"]))
-            self.db.commit()
-            scored += 1
-            fetch += int(assessment["decision"] == "fetch")
-            deferred += int(assessment["decision"] == "defer")
-            selected += int(assessment["audit_selected"])
+            model_rows = []
+            for stored in stored_rows:
+                item = dict(stored)
+                item.update(json.loads(item["metadata_json"]))
+                model_rows.append(item)
+            try:
+                predictions = predict_triage_batch(triage_model, model_rows, deadline=deadline)
+            except TimeoutError:
+                break
+            for stored, row, prediction in zip(stored_rows, model_rows, predictions, strict=True):
+                if time.monotonic() >= deadline:
+                    break
+                assessment = self._triage_assessment(
+                    row, triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
+                    audit_interval_days=audit_interval_days, audit_epoch=stamp.strftime("%Y-%m"),
+                    prediction=prediction,
+                )
+                self._save_triage(stored["github_id"], assessment, now=stamp)
+                due = stamp.timestamp() + (
+                    audit_interval_days * 86400
+                    if assessment["decision"] == "defer" and not assessment["audit_selected"] else 0
+                )
+                self.db.execute("UPDATE repositories SET due_at=?,last_run_id=NULL WHERE github_id=?", (due, stored["github_id"]))
+                self.db.commit()
+                scored += 1
+                fetch += int(assessment["decision"] == "fetch")
+                deferred += int(assessment["decision"] == "defer")
+                selected += int(assessment["audit_selected"])
         remaining = int(self.db.execute(
             "SELECT COUNT(*) FROM repositories r LEFT JOIN metadata_triage t USING(github_id) WHERE t.github_id IS NULL OR t.model_fingerprint<>?",
             (str(triage_model.fingerprint),),
@@ -497,17 +537,29 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
 
         iterator = iter(rows)
         exhausted = False
+        timeout_stopped = False
         while True:
             if ((max_seconds is not None and time.monotonic() - started >= max_seconds)
                     or (max_rows is not None and counts["seen"] >= max_rows)):
                 break
             try:
                 row = next(iterator)
+            except TimeoutError:
+                timeout_stopped = True
+                break
             except StopIteration:
                 exhausted = True
                 break
             cursor_after = None
-            if isinstance(row, tuple) and len(row) == 2 and isinstance(row[0], Mapping):
+            triage_prediction = None
+            if (isinstance(row, tuple) and len(row) == 3 and isinstance(row[0], Mapping)
+                    and isinstance(row[2], Mapping)):
+                row, cursor_after, triage_prediction = row
+                try:
+                    last_cursor_json = _json(cursor_after)
+                except (TypeError, ValueError):
+                    raise ValueError("input cursor must be JSON serializable") from None
+            elif isinstance(row, tuple) and len(row) == 2 and isinstance(row[0], Mapping):
                 row, cursor_after = row
                 try:
                     last_cursor_json = _json(cursor_after)
@@ -587,6 +639,7 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
                     triage_result = self._triage_assessment(
                         row, triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
                         audit_interval_days=audit_interval_days, audit_epoch=_now(now).strftime("%Y-%m"),
+                        prediction=triage_prediction,
                     )
                     self._save_triage(repo_id, triage_result, now=_now(now))
                     counts["triage_scored"] += 1
@@ -626,7 +679,7 @@ class EvidenceStore(AbstractContextManager["EvidenceStore"]):
                 pending = 0
         # A bounded break leaves the exact input offset in SQLite so callers
         # can resume the same immutable source stream without retaining rows.
-        complete = exhausted
+        complete = exhausted and not timeout_stopped
         rows_seen = offset + counts["seen"]
         self.db.execute(
             "UPDATE ingestion_sources SET rows_seen=?,cursor_json=?,complete=?,updated_at=? WHERE source=? AND source_revision=?",

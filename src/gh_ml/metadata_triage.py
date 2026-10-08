@@ -45,8 +45,13 @@ def metadata_text(row: Mapping[str, Any]) -> str:
     return " ".join(fields).strip()
 
 
-def metadata_fingerprint(row: Mapping[str, Any]) -> str:
-    """Stable audit fingerprint derived only from permitted metadata fields."""
+def canonical_metadata(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Return allowlisted metadata in the normalization used by the v1 fingerprint.
+
+    Topic order is ignored; all strings use NFC and collapsed whitespace. Keep
+    this normalization stable because persisted triage fingerprints depend on
+    it. Legacy v1 inference continues to call :func:`metadata_text` directly.
+    """
     normalized: dict[str, Any] = {}
     for key in ALLOWED_FEATURES:
         value = row.get(key) if isinstance(row, Mapping) else None
@@ -69,6 +74,17 @@ def metadata_fingerprint(row: Mapping[str, Any]) -> str:
                 " ".join(unicodedata.normalize("NFC", item).split())
                 for item in value if isinstance(item, str)
             )
+    return normalized
+
+
+def canonical_metadata_text(row: Mapping[str, Any]) -> str:
+    """Build stable model input whose changes match metadata fingerprints."""
+    return metadata_text(canonical_metadata(row))
+
+
+def metadata_fingerprint(row: Mapping[str, Any]) -> str:
+    """Stable audit fingerprint derived only from permitted metadata fields."""
+    normalized = canonical_metadata(row)
     raw = json.dumps(normalized, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(raw).hexdigest()
 

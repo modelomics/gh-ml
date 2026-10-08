@@ -270,6 +270,27 @@ def test_partial_stream_ingest_resumes_from_committed_offset(tmp_path: Path) -> 
         assert store.pending_count() == 4
 
 
+def test_batch_prediction_deadline_keeps_input_source_incomplete(tmp_path: Path) -> None:
+    path = tmp_path / "deadline.sqlite"
+    first = {"github_id": 70_001, "full_name": "lab/first"}
+    second = {"github_id": 70_002, "full_name": "lab/second"}
+
+    def timed_rows():
+        yield first, 101, {"decision": "fetch", "predicted_label": "unknown"}
+        raise TimeoutError("batch model exceeded deadline")
+
+    with _open(path) as store:
+        partial = store.ingest(timed_rows(), source="inventory", source_revision="batch-v1",
+                               triage_model=DeferredModel())
+        assert partial["seen"] == 1 and partial["complete"] == 0
+        assert store.ingest_cursor("inventory", "batch-v1") == 101
+        resumed = store.ingest([(second, 202, {"decision": "fetch", "predicted_label": "unknown"})],
+                               source="inventory", source_revision="batch-v1", resume=True,
+                               triage_model=DeferredModel())
+        assert resumed["seen"] == 1 and resumed["complete"] == 1
+        assert store.pending_count() == 2
+
+
 def test_collection_crash_resume_is_idempotent_and_changed_inputs_requeue(tmp_path: Path) -> None:
     path = tmp_path / "evidence.sqlite"
     rows = [repository(1), repository(2)]
