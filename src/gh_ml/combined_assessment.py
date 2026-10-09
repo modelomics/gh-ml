@@ -24,8 +24,10 @@ from .evidence import EVIDENCE_VERSION as METADATA_EVIDENCE_VERSION
 from .metadata_triage import metadata_fingerprint
 from .readme_signals import README_EVIDENCE_VERSION
 from .selection import SELECTION_VERSION, assess_repository
+from .fork_evidence import verify_fork_change, VerifiedForkChange
 
 RUN_SCHEMA = "gh-ml-combined-assessment-v1"
+FORK_EVIDENCE_INDEX_SCHEMA = "gh-ml-fork-evidence-index-v1"
 INVENTORY_SCHEMA = "gh-ml-combined-inventory-v1"
 ID_DIGEST_VERSION = "sha256-decimal-id-newline-v1"
 DEFAULT_MODEL_PATH = bulk_triage.DEFAULT_MODEL_PATH
@@ -165,8 +167,21 @@ def _assess_row(row: Mapping[str, Any], model: Any,
                 cached_triage: Mapping[str, Any] | None = None,
                 *, model_sha256: str | None = None,
                 frozen_novelty: Mapping[str, Any] | None = None,
-                computed_triage: Mapping[str, Any] | None = None) -> dict[str, Any]:
+                computed_triage: Mapping[str, Any] | None = None,
+                verified_fork_change: VerifiedForkChange | None = None) -> dict[str, Any]:
     item = _readme_default(row)
+    if verified_fork_change is not None:
+        if item.get("fork") is False:
+            raise ValueError("inventory marks a verified fork child as not a fork")
+        declared_parent = item.get("parent_github_id")
+        if declared_parent is not None and _positive_id(declared_parent) != verified_fork_change.parent_repo_id:
+            raise ValueError("inventory parent_github_id disagrees with verified fork parent")
+        for hash_key in ("readme_sha256", "readme_text_sha256"):
+            row_hash = item.get(hash_key)
+            if row_hash is not None and row_hash != verified_fork_change.child_readme_sha256:
+                raise ValueError("inventory README hash disagrees with verified fork evidence")
+        item["parent_github_id"] = verified_fork_change.parent_repo_id
+        item["fork"] = True
     fingerprint = metadata_fingerprint(item)
     if (cached_triage is not None and cached_triage.get("metadata_fingerprint") == fingerprint
             and cached_triage.get("model_sha256") == model_sha256
@@ -183,7 +198,7 @@ def _assess_row(row: Mapping[str, Any], model: Any,
     else:
         triage = bulk_triage.classify_bulk_batch([item], model)[0]
     selection = assess_repository(item)
-    candidate = assess_candidate({**item, **selection})
+    candidate = assess_candidate({**item, **selection}, verified_fork_change=verified_fork_change)
     novelty_tag = frozen_novelty.get("tag") if frozen_novelty else None
     original_status = novelty_tag if isinstance(novelty_tag, str) else "unknown"
     return {
@@ -215,6 +230,16 @@ def _assess_row(row: Mapping[str, Any], model: Any,
         "novelty_assessment_version": (frozen_novelty.get("assessment_version") if frozen_novelty else None),
         "scientific_novelty_status": (frozen_novelty.get("scientific_novelty_status")
                                        if frozen_novelty else "undetermined"),
+        "assessed_parent_github_id": verified_fork_change.parent_repo_id if verified_fork_change else None,
+        "fork_child_readme_sha256": verified_fork_change.child_readme_sha256 if verified_fork_change else None,
+        "fork_parent_readme_sha256": verified_fork_change.parent_readme_sha256 if verified_fork_change else None,
+        "fork_annotation_manifest_sha256": verified_fork_change.annotation_manifest_sha256 if verified_fork_change else None,
+        "fork_parent_edge_record_id": verified_fork_change.parent_edge_record_id if verified_fork_change else None,
+        "fork_parent_edge_source_url": verified_fork_change.parent_edge_source_url if verified_fork_change else None,
+        "fork_parent_edge_captured_at": verified_fork_change.parent_edge_captured_at if verified_fork_change else None,
+        "fork_annotation_model_ids": list(verified_fork_change.annotation_model_ids) if verified_fork_change else [],
+        "fork_artifact_sha256": [f"{name}:{digest}" for name, digest in verified_fork_change.artifact_sha256]
+                                if verified_fork_change else [],
     }
 
 
@@ -250,6 +275,15 @@ def _assessment_schema(pa: Any) -> Any:
         pa.field("novelty_status", pa.string(), nullable=False),
         pa.field("novelty_assessment_version", pa.string()),
         pa.field("scientific_novelty_status", pa.string(), nullable=False),
+        pa.field("assessed_parent_github_id", pa.int64()),
+        pa.field("fork_child_readme_sha256", pa.string()),
+        pa.field("fork_parent_readme_sha256", pa.string()),
+        pa.field("fork_annotation_manifest_sha256", pa.string()),
+        pa.field("fork_parent_edge_record_id", pa.string()),
+        pa.field("fork_parent_edge_source_url", pa.string()),
+        pa.field("fork_parent_edge_captured_at", pa.string()),
+        pa.field("fork_annotation_model_ids", strings, nullable=False),
+        pa.field("fork_artifact_sha256", strings, nullable=False),
     ])
 
 
@@ -332,6 +366,73 @@ def _read_frozen_novelty(path: Path | None) -> tuple[dict[int, dict[str, Any]], 
     return records, digest
 
 
+def _read_fork_evidence_index(
+    path: Path | None, *, evidence_root: Path | None, bucket_id: str,
+) -> tuple[dict[int, VerifiedForkChange], dict[str, Any] | None]:
+    """Validate declared child evidence once and return typed verified records."""
+    if path is None or not path.is_file():
+        return {}, None
+    if evidence_root is None or path.resolve().parent != (evidence_root / "buckets" / bucket_id).resolve():
+        raise ValueError("fork evidence index is outside its declared bucket")
+    raw = path.read_bytes()
+    try:
+        index = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid fork evidence index: {path}") from exc
+    if (not isinstance(index, Mapping) or index.get("schema") != FORK_EVIDENCE_INDEX_SCHEMA
+            or index.get("bucket_id") != bucket_id or not isinstance(index.get("records"), list)):
+        raise ValueError("unsupported or malformed fork evidence index")
+    verified: dict[int, VerifiedForkChange] = {}
+    artifact_inputs: list[dict[str, Any]] = []
+    root = evidence_root.resolve()
+
+    def contained(raw_path: Any, label: str) -> Path:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            raise ValueError(f"fork evidence {label} path is required")
+        ref = Path(raw_path)
+        if ref.is_absolute():
+            raise ValueError(f"fork evidence {label} path must be relative")
+        target = (root / ref).resolve()
+        if target != root and root not in target.parents:
+            raise ValueError(f"fork evidence {label} path escapes its evidence directory")
+        if not target.is_file():
+            raise ValueError(f"fork evidence {label} file is missing")
+        return target
+
+    for item in index["records"]:
+        if not isinstance(item, Mapping):
+            raise ValueError("fork evidence records must be objects")
+        child_id = _positive_id(item.get("child_repo_id"))
+        parent_id = _positive_id(item.get("parent_repo_id"))
+        if child_id == parent_id or child_id in verified:
+            raise ValueError("fork evidence child IDs must be unique and differ from parents")
+        manifest_ref = item.get("annotation_manifest")
+        if not isinstance(manifest_ref, Mapping):
+            raise ValueError("fork evidence record requires pinned annotation_manifest reference")
+        manifest_path = contained(manifest_ref.get("path"), "annotation manifest")
+        manifest_sha = manifest_ref.get("sha256")
+        if not isinstance(manifest_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", manifest_sha):
+            raise ValueError("fork evidence annotation_manifest requires lowercase SHA256")
+        if _sha256(manifest_path) != manifest_sha:
+            raise ValueError("fork evidence annotation manifest hash mismatch")
+        edge = item.get("github_parent_edge")
+        if not isinstance(edge, Mapping):
+            raise ValueError("fork evidence record requires github_parent_edge reference")
+        edge_path = contained(edge.get("path"), "parent edge")
+        edge_ref = {**edge, "path": str(edge_path)}
+        record = verify_fork_change(manifest_path, child_repo_id=child_id,
+                                    parent_repo_id=parent_id, github_parent_edge=edge_ref)
+        verified[child_id] = record
+        artifact_inputs.append({
+            "child_repo_id": child_id, "parent_repo_id": parent_id,
+            "annotation_manifest_file_sha256": manifest_sha,
+            "annotation_manifest_sha256": record.annotation_manifest_sha256,
+            "artifact_sha256": dict(record.artifact_sha256),
+        })
+    return verified, {"bucket_id": bucket_id, "input_sha256": _sha256(path),
+                      "verified_children": artifact_inputs}
+
+
 def _run_combined_assessment_locked(
     inventory_dir: str | Path,
     output_dir: str | Path,
@@ -339,6 +440,7 @@ def _run_combined_assessment_locked(
     model_path: str | Path | None = DEFAULT_MODEL_PATH,
     reuse_dir: str | Path | None = None,
     novelty_dir: str | Path | None = None,
+    fork_evidence_dir: str | Path | None = None,
     batch_size: int = MAX_BATCH_ROWS,
     max_output_bytes: int = 80 * 1024**3,
 ) -> dict[str, Any]:
@@ -358,6 +460,7 @@ def _run_combined_assessment_locked(
     if isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int) or max_output_bytes < 1:
         raise ValueError("max_output_bytes must be a positive integer")
     inventory = Path(inventory_dir).resolve()
+    fork_root = Path(fork_evidence_dir).expanduser().resolve() if fork_evidence_dir is not None else None
     output = Path(output_dir).resolve()
     manifest_path = inventory / "inventory-manifest.json"
     manifest = _manifest(manifest_path)
@@ -442,10 +545,16 @@ def _run_combined_assessment_locked(
         novelty_path = (Path(novelty_dir).resolve() / "buckets" / bucket_id / "assessment.jsonl"
                         if novelty_dir is not None else None)
         frozen_novelty, novelty_input_sha = _read_frozen_novelty(novelty_path)
+        fork_index_path = (fork_root / "buckets" / bucket_id / "fork-evidence.json"
+                           if fork_root is not None else None)
+        verified_forks, fork_input = _read_fork_evidence_index(
+            fork_index_path, evidence_root=fork_root, bucket_id=bucket_id,
+        )
         wanted = {"bucket_id": bucket_id, "source_bucket_sha256": part["sha256"],
                   "source_fingerprints": source_fp, "rows": part.get("rows"),
                   "readme_evidence_input_sha256": part["sha256"],
                   "novelty_assessment_input_sha256": novelty_input_sha,
+                  "fork_evidence_input": fork_input,
                   "id_digest_version": ID_DIGEST_VERSION, **expected}
         if receipt_path.exists() and final_path.exists():
             old = json.loads(receipt_path.read_text(encoding="utf-8"))
@@ -531,7 +640,8 @@ def _run_combined_assessment_locked(
                 ids.append(github_id)
                 value = _assess_row(row, model, cached_by_id.get(github_id), model_sha256=model_sha,
                                     frozen_novelty=frozen_novelty.get(github_id),
-                                    computed_triage=predictions.get(github_id))
+                                    computed_triage=predictions.get(github_id),
+                                    verified_fork_change=verified_forks.get(github_id))
                 if value["github_id"] != github_id:
                     output_id_mismatches += 1
                     bucket_output_id_mismatches += 1
@@ -557,6 +667,9 @@ def _run_combined_assessment_locked(
         if not set(frozen_novelty) <= set(ids):
             shutil.rmtree(staged_bucket, ignore_errors=True)
             raise ValueError(f"frozen novelty input contains IDs outside inventory bucket: {bucket_id}")
+        if not set(verified_forks) <= set(ids):
+            shutil.rmtree(staged_bucket, ignore_errors=True)
+            raise ValueError(f"fork evidence contains children outside inventory bucket: {bucket_id}")
         sorted_ids = sorted(ids)
         id_sha = _id_digest(sorted_ids)
         for github_id in sorted_ids:
@@ -630,6 +743,10 @@ def _run_combined_assessment_locked(
                            "input_sha256": row.get("novelty_assessment_input_sha256")}
                           for row in bucket_receipts if row.get("novelty_assessment_input_sha256") is not None
                       ],
+                      "fork_evidence_inputs": [
+                          {"bucket_id": row["bucket_id"], **row["fork_evidence_input"]}
+                          for row in bucket_receipts if row.get("fork_evidence_input") is not None
+                      ],
                       "missing_bucket_ids": sorted(missing_buckets),
                       "unknown_backlog_rows": route_counts.get("unknown", 0) + missing_inventory_rows,
                       "output_bytes": output_bytes}
@@ -646,6 +763,7 @@ def run_combined_assessment(
     model_path: str | Path | None = DEFAULT_MODEL_PATH,
     reuse_dir: str | Path | None = None,
     novelty_dir: str | Path | None = None,
+    fork_evidence_dir: str | Path | None = None,
     batch_size: int = MAX_BATCH_ROWS,
     max_output_bytes: int = 80 * 1024**3,
 ) -> dict[str, Any]:
@@ -658,7 +776,7 @@ def run_combined_assessment(
         try:
             return _run_combined_assessment_locked(
                 inventory_dir, output, model_path=model_path, reuse_dir=reuse_dir,
-                novelty_dir=novelty_dir, batch_size=batch_size,
+                novelty_dir=novelty_dir, fork_evidence_dir=fork_evidence_dir, batch_size=batch_size,
                 max_output_bytes=max_output_bytes,
             )
         finally:

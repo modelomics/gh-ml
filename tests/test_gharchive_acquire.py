@@ -508,3 +508,53 @@ def test_deadline_return_keeps_completed_prefetch_receipt_for_resume(tmp_path, m
     assert resumed["status"] == "complete_through_fixed_end"
     assert request_hours.count(1) == 1, "resume should consume the durable prefetched raw"
     assert not part.exists() and not receipt.exists()
+
+
+@pytest.mark.parametrize(
+    "prefetch_error",
+    [BrokenPipeError("simulated socket write failure"), urllib.error.URLError("simulated URL failure")],
+    ids=["broken-pipe", "url-error"],
+)
+def test_deadline_bounded_prefetch_error_is_recorded_retried_and_continues(
+    tmp_path, prefetch_error
+):
+    bodies = {hour: _event_hour(hour) for hour in range(3)}
+    calls = {hour: 0 for hour in bodies}
+    timeouts = []
+
+    def opener(request, timeout):
+        hour = int(request.full_url.rsplit("-", 1)[1].split(".", 1)[0])
+        calls[hour] += 1
+        timeouts.append(timeout)
+        if hour == 1 and calls[hour] == 1:
+            raise prefetch_error
+        return Response(bodies[hour])
+
+    run = tmp_path / "run"
+    result = acquire.catch_up(
+        run,
+        start="2023-08-29T00:00:00Z",
+        end="2023-08-29T02:00:00Z",
+        opener=opener,
+        timeout_seconds=4,
+        max_seconds=30,
+        max_attempts_per_hour=2,
+        min_free_bytes=0,
+        rate_limit_bytes_per_second=10**9,
+        max_compressed_hour_bytes=1024**2,
+        max_uncompressed_hour_bytes=1024**2,
+        prefetch_hours=1,
+        sleep=lambda _: None,
+    )
+
+    assert result["status"] == "complete_through_fixed_end"
+    assert calls == {0: 1, 1: 2, 2: 1}
+    assert timeouts and all(0 < timeout <= 4 for timeout in timeouts)
+    manifest = json.loads((run / "manifest.json").read_text())
+    hour1 = manifest["hours"]["2023-08-29T01:00:00Z"]
+    assert hour1["status"] == "deleted"
+    assert [attempt["status"] for attempt in hour1["attempts"]] == ["failed", "verified"]
+    assert type(prefetch_error).__name__ in hour1["attempts"][0]["error"]
+    assert manifest["hours"]["2023-08-29T02:00:00Z"]["status"] == "deleted"
+    assert manifest["contiguous_watermark"] == "2023-08-29T02:00:00Z"
+    assert not list((run / "raw").iterdir())

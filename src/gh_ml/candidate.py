@@ -8,7 +8,7 @@ from typing import Any
 from .probable_content import PROBABLE_CONTENT_SIGNALS, assess_probable_content
 
 
-CANDIDATE_RULE_VERSION = "ml-candidate-v4"
+CANDIDATE_RULE_VERSION = "ml-candidate-v5"
 _REVIEW_REASON = "ml-relevance-without-clear-contribution"
 _ALLOWED_EVIDENCE_TIERS = {"direct_ml_text", "ml_related_text"}
 _REVIEWABLE_REASONS = {
@@ -26,14 +26,15 @@ _RESCUABLE_EXCLUSION_REASONS = {
     "non-ml-utility",
 }
 _HARD_EXCLUSION_REASONS = {
-    "fork",
     "owner-profile-repository",
     "survey-or-paper-list-repository",
 }
 _LEGACY_PAPER_SIGNALS = {"ml-method-cue", "paper-and-code-cue"}
 
 
-def assess_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
+def assess_candidate(
+    row: Mapping[str, Any], *, verified_fork_change: Any = None,
+) -> dict[str, Any]:
     """Assess repository-owned text without using query or popularity metadata."""
     evidence: set[str] = set()
     reason = "insufficient-repository-evidence"
@@ -44,7 +45,43 @@ def assess_candidate(row: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(row, Mapping):
         eligible = False
     elif row.get("fork") is True or selection_reason == "fork":
-        eligible, reason = False, "fork"
+        # A fork is eligible only when the v2 evidence adapter produced a
+        # verified record bound to this exact child and its declared parent.
+        from .fork_evidence import VerifiedForkChange
+
+        child_id = row.get("github_id")
+        parent_id = row.get("parent_github_id")
+        supplied_readme_hashes = [
+            row.get(key) for key in ("source_readme_sha256", "readme_text_sha256")
+            if row.get(key) is not None
+        ]
+        row_hashes_match = isinstance(verified_fork_change, VerifiedForkChange) and all(
+            value == verified_fork_change.child_readme_sha256 for value in supplied_readme_hashes
+        )
+        if (
+            isinstance(verified_fork_change, VerifiedForkChange)
+            and type(child_id) is int and child_id > 0
+            and type(parent_id) is int and parent_id > 0
+            and verified_fork_change.child_repo_id == child_id
+            and verified_fork_change.parent_repo_id == parent_id
+            and row_hashes_match
+            and verified_fork_change.child_contribution_signals
+        ):
+            eligible = True
+            reason = f"verified-fork-change:{verified_fork_change.pair_id}"
+            evidence.update(
+                f"fork-change:{signal}"
+                for signal in verified_fork_change.child_contribution_signals
+            )
+            evidence.add(f"fork-change-manifest-sha256:{verified_fork_change.annotation_manifest_sha256}")
+            evidence.add(f"fork-change-parent-readme-sha256:{verified_fork_change.parent_readme_sha256}")
+            evidence.add(f"fork-change-child-readme-sha256:{verified_fork_change.child_readme_sha256}")
+            evidence.update(
+                f"fork-change-artifact-sha256:{name}:{digest}"
+                for name, digest in verified_fork_change.artifact_sha256
+            )
+        else:
+            eligible, reason = False, "fork-change-not-established"
     elif selection_reason in _HARD_EXCLUSION_REASONS:
         eligible, reason = False, "not-selected-or-reviewable"
     elif status == "include":

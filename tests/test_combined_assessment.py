@@ -240,3 +240,119 @@ def test_assessment_receipt_schema_round_trips_through_bundle_verifier(tmp_path:
     receipt = json.loads((output / "buckets" / bucket_id / "receipt.json").read_text())
     physical_schema = str(pq.ParquetFile(output / receipt["assessment_path"]).schema_arrow)
     assert receipt["schema"] == physical_schema
+
+
+def _fork_evidence_index(root: Path, *, child_id: int = 202, parent_id: int = 101) -> Path:
+    from test_fork_evidence import _fixture
+
+    evidence_root = root / "fork-evidence"
+    bucket_dir = evidence_root / "buckets/outer-000/inner-000"
+    bucket_dir.mkdir(parents=True)
+    source = root / "fixture"
+    source.mkdir()
+    manifest, edge = _fixture(source)
+    manifest_copy = bucket_dir / "annotations/manifest.json"
+    manifest_copy.parent.mkdir()
+    manifest_data = json.loads(manifest.read_text())
+    for artifact in manifest_data["files"].values():
+        (manifest_copy.parent / artifact["path"]).write_bytes((source / artifact["path"]).read_bytes())
+    manifest_copy.write_text(json.dumps(manifest_data))
+    edge_source = Path(edge["path"])
+    edge_copy = bucket_dir / "annotations/parent-edges.jsonl"
+    edge_copy.write_bytes(edge_source.read_bytes())
+    edge["path"] = "buckets/outer-000/inner-000/annotations/parent-edges.jsonl"
+    (bucket_dir / "fork-evidence.json").write_text(json.dumps({
+        "schema": "gh-ml-fork-evidence-index-v1", "bucket_id": "outer-000/inner-000",
+        "records": [{
+            "child_repo_id": child_id, "parent_repo_id": parent_id,
+            "annotation_manifest": {
+                "path": "buckets/outer-000/inner-000/annotations/manifest.json",
+                "sha256": hashlib.sha256(manifest_copy.read_bytes()).hexdigest(),
+            },
+            "github_parent_edge": edge,
+        }],
+    }), encoding="utf-8")
+    return evidence_root
+
+
+def test_combined_assessment_accepts_verified_fork_and_pins_provenance(tmp_path: Path) -> None:
+    inventory = _inventory(tmp_path / "inv", [{
+        "github_id": 202, "parent_github_id": 101, "name": "fork", "full_name": "owner/fork",
+        "description": "A transformer extension.", "topics": [], "language": "Python", "fork": True,
+        "readme_sha256": hashlib.sha256(
+            b"We fine-tuned a transformer model using 500 labeled sequences and improved accuracy."
+        ).hexdigest(),
+    }])
+    evidence_dir = _fork_evidence_index(tmp_path)
+    output = tmp_path / "assessment"
+    result = run_combined_assessment(inventory, output, model_path=None, fork_evidence_dir=evidence_dir)
+    row = pq.read_table(output / "buckets/outer-000/inner-000/assessment.parquet").to_pylist()[0]
+    assert result["complete"] is True
+    assert row["candidate_eligible"] is True
+    assert row["assessed_parent_github_id"] == 101
+    assert row["fork_child_readme_sha256"] == hashlib.sha256(
+        b"We fine-tuned a transformer model using 500 labeled sequences and improved accuracy."
+    ).hexdigest()
+    assert row["fork_annotation_manifest_sha256"]
+    receipt = json.loads((output / "buckets/outer-000/inner-000/receipt.json").read_text())
+    assert receipt["fork_evidence_input"]["verified_children"][0]["artifact_sha256"]
+    assert result["fork_evidence_inputs"]
+
+
+def test_fork_without_verified_evidence_remains_ineligible(tmp_path: Path) -> None:
+    inventory = _inventory(tmp_path, [{
+        "github_id": 202, "parent_github_id": 101, "name": "fork", "full_name": "owner/fork",
+        "description": "A transformer extension.", "topics": [], "language": "Python", "fork": True,
+    }])
+    output = tmp_path / "assessment"
+    run_combined_assessment(inventory, output, model_path=None)
+    row = pq.read_table(output / "buckets/outer-000/inner-000/assessment.parquet").to_pylist()[0]
+    assert row["candidate_eligible"] is False
+    assert row["candidate_reason"] == "fork-change-not-established"
+
+
+@pytest.mark.parametrize("mutation,match", [
+    ("outside_child", "outside inventory bucket"),
+    ("manifest_hash", "manifest hash mismatch"),
+    ("parent_mismatch", "parent_github_id disagrees"),
+])
+def test_fork_assessment_rejects_bad_evidence_binding(tmp_path: Path, mutation: str, match: str) -> None:
+    evidence = _fork_evidence_index(tmp_path)
+    index_path = evidence / "buckets/outer-000/inner-000/fork-evidence.json"
+    index = json.loads(index_path.read_text())
+    if mutation == "outside_child":
+        pass
+    elif mutation == "manifest_hash":
+        index["records"][0]["annotation_manifest"]["sha256"] = "0" * 64
+    index_path.write_text(json.dumps(index))
+    parent_id = 999 if mutation == "parent_mismatch" else 101
+    inventory = _inventory(tmp_path / "inv", [{
+        "github_id": 203 if mutation == "outside_child" else 202,
+        "parent_github_id": parent_id, "name": "fork", "full_name": "owner/fork",
+        "description": "A transformer extension.", "topics": [], "language": "Python", "fork": True,
+    }])
+    with pytest.raises(ValueError, match=match):
+        run_combined_assessment(inventory, tmp_path / "assessment", model_path=None,
+                                fork_evidence_dir=evidence)
+
+
+def test_changed_fork_index_invalidates_bucket_replay(tmp_path: Path) -> None:
+    inventory = _inventory(tmp_path / "inv", [{
+        "github_id": 202, "parent_github_id": 101, "name": "fork", "full_name": "owner/fork",
+        "description": "A transformer extension.", "topics": [], "language": "Python", "fork": True,
+    }])
+    evidence = _fork_evidence_index(tmp_path)
+    output = tmp_path / "assessment"
+    run_combined_assessment(inventory, output, model_path=None, fork_evidence_dir=evidence)
+    index_path = evidence / "buckets/outer-000/inner-000/fork-evidence.json"
+    index = json.loads(index_path.read_text())
+    edge_ref = index["records"][0]["github_parent_edge"]
+    edge_path = evidence / edge_ref["path"]
+    edge_row = json.loads(edge_path.read_text())
+    edge_row["query_schema_version"] = "repo-parent-v2"
+    edge_bytes = (json.dumps(edge_row, sort_keys=True) + "\n").encode()
+    edge_path.write_bytes(edge_bytes)
+    edge_ref["sha256"] = hashlib.sha256(edge_bytes).hexdigest()
+    index_path.write_text(json.dumps(index))
+    with pytest.raises(ValueError, match="existing bucket output does not match replay pins"):
+        run_combined_assessment(inventory, output, model_path=None, fork_evidence_dir=evidence)

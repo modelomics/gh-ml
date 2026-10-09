@@ -404,12 +404,19 @@ def catch_up(
                         return None
                     try:
                         result = future.result()
-                    except BaseException as exc:
+                    except Exception as exc:
                         result = exc
+                except Exception as exc:
+                    # A completed future re-raises its worker exception from
+                    # result(). Treat it like a normal download failure so the
+                    # coordinator can record the attempt and retry this hour.
+                    # BaseException subclasses such as KeyboardInterrupt and
+                    # SystemExit must still interrupt the caller.
+                    result = exc
             else:
                 try:
                     result = future.result()
-                except BaseException as exc:
+                except Exception as exc:
                     result = exc
             pending_prefetch = None
             if isinstance(result, BaseException):
