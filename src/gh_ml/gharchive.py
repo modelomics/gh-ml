@@ -237,7 +237,8 @@ def _atomic_text(path: Path, content: str) -> None:
     os.replace(temporary, path)
 
 
-def aggregate_archives(paths: Sequence[Path], output_dir: Path, *, max_events: int | None = None) -> dict[str, Any]:
+def aggregate_archives(paths: Sequence[Path], output_dir: Path, *, max_events: int | None = None,
+                       export: bool = True) -> dict[str, Any]:
     """Aggregate local gzip GH Archive files into a durable, deduplicated registry."""
     if max_events is not None and max_events < 0:
         raise ValueError("max_events must be non-negative")
@@ -339,14 +340,6 @@ def aggregate_archives(paths: Sequence[Path], output_dir: Path, *, max_events: i
                             "error": error})
             if stopped:
                 break
-        repo_count = db.execute("SELECT count(*) FROM repositories").fetchone()[0]
-        event_count = db.execute("SELECT count(*) FROM events").fetchone()[0]
-        association_counts = {row[0]: row[1] for row in db.execute(
-            "SELECT observation_source,count(*) FROM event_repositories GROUP BY observation_source")}
-        primary_repositories = db.execute("SELECT count(*) FROM repositories WHERE instr(observation_sources, 'event.repo') > 0").fetchone()[0]
-        fork_child_repositories = db.execute("SELECT count(*) FROM repositories WHERE instr(observation_sources, 'payload.forkee') > 0").fetchone()[0]
-        types = {row[0]: row[1] for row in db.execute("SELECT event_type,count(*) FROM events GROUP BY event_type ORDER BY event_type")}
-        coverage = {field: db.execute(f"SELECT count(*) FROM repositories WHERE {field} IS NOT NULL").fetchone()[0] for field in _FIELDS}
         db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         db_bytes = sum((outdir / name).stat().st_size for name in ("gharchive.sqlite3", "gharchive.sqlite3-wal") if (outdir / name).exists())
         report = {"status": "partial" if stopped or any(not x["complete"] for x in results) else "complete",
@@ -355,19 +348,55 @@ def aggregate_archives(paths: Sequence[Path], output_dir: Path, *, max_events: i
                   "invocation_malformed_events": total_malformed,
                   "source_processed_events": sum(x["processed_events"] for x in results),
                   "source_malformed_events": sum(x["malformed_events"] for x in results),
-                  "distinct_repositories": repo_count,
-                  "primary_repositories": primary_repositories,
-                  "fork_child_repositories": fork_child_repositories,
-                  "event_repository_associations": association_counts,
-                  "unique_events_in_ledger": event_count, "database_bytes": db_bytes,
-                  "event_types": types, "metadata_availability": coverage,
+                  "database_bytes": db_bytes,
                   "classifier_suitability": "not_assessed_by_this_module",
                   "discovery_scope": ["event.repo", "ForkEvent.payload.forkee", "PullRequestEvent.payload.pull_request.base.repo", "PullRequestEvent.payload.pull_request.head.repo", "same-ID payload.repository/payload.repo"],
                   "coverage_limitations": ["ForkEvent.forkee is recorded as a separate child repository when its ID differs from event.repo; child metadata is never assigned to the parent.", "Only documented repository-object paths are inspected; other nested payload objects are not searched.", "Missing metadata is unknown, and this module does not assess classifier suitability."],
                   "inputs": results}
-        _exports(db, outdir, report)
+        if export:
+            _populate_registry_summary(db, report)
+            _exports(db, outdir, report)
+        else:
+            report["inventory_exported"] = False
+            _atomic_text(outdir / "report.json", json.dumps(report, ensure_ascii=False, indent=2) + "\n")
         report["wall_seconds"] = round(time.monotonic() - started, 3)
         _atomic_text(outdir / "report.json", json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+        return report
+    finally:
+        db.close()
+
+
+def _populate_registry_summary(db: sqlite3.Connection, report: dict[str, Any]) -> None:
+    """Add whole-ledger metrics; intentionally called only at final export time."""
+    report["distinct_repositories"] = db.execute("SELECT count(*) FROM repositories").fetchone()[0]
+    report["unique_events_in_ledger"] = db.execute("SELECT count(*) FROM events").fetchone()[0]
+    report["event_repository_associations"] = {row[0]: row[1] for row in db.execute(
+        "SELECT observation_source,count(*) FROM event_repositories GROUP BY observation_source")}
+    report["primary_repositories"] = db.execute(
+        "SELECT count(*) FROM repositories WHERE instr(observation_sources, 'event.repo') > 0").fetchone()[0]
+    report["fork_child_repositories"] = db.execute(
+        "SELECT count(*) FROM repositories WHERE instr(observation_sources, 'payload.forkee') > 0").fetchone()[0]
+    report["event_types"] = {row[0]: row[1] for row in db.execute(
+        "SELECT event_type,count(*) FROM events GROUP BY event_type ORDER BY event_type")}
+    report["metadata_availability"] = {
+        field: db.execute(f"SELECT count(*) FROM repositories WHERE {field} IS NOT NULL").fetchone()[0]
+        for field in _FIELDS
+    }
+
+
+def export_registry(output_dir: Path, *, report_context: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Write the full repository JSONL and global summary after incremental ingestion."""
+    outdir = Path(output_dir).expanduser().resolve()
+    db = sqlite3.connect(outdir / "gharchive.sqlite3")
+    db.row_factory = sqlite3.Row
+    try:
+        _init(db)
+        report = dict(report_context or {})
+        _populate_registry_summary(db, report)
+        report["inventory_exported"] = True
+        report["database_bytes"] = sum((outdir / name).stat().st_size for name in
+                                        ("gharchive.sqlite3", "gharchive.sqlite3-wal") if (outdir / name).exists())
+        _exports(db, outdir, report)
         return report
     finally:
         db.close()

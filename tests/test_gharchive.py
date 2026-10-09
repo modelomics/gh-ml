@@ -54,6 +54,22 @@ def test_aggregates_multiple_archives_and_deduplicates_events_across_inputs(tmp_
         assert db.execute("select count(*) from events").fetchone()[0] == 4
 
 
+def test_incremental_mode_defers_inventory_export_until_finalization(tmp_path):
+    path = archive(tmp_path / "incremental.json.gz", event("e1", 42, "2026-01-01T00:00:00Z"))
+    out = tmp_path / "incremental-out"
+
+    report = gharchive.aggregate_archives([path], out, export=False)
+
+    assert report["status"] == "complete"
+    assert report["inventory_exported"] is False
+    assert not (out / "repositories.jsonl").exists()
+    final = gharchive.export_registry(out, report_context={"coverage_status": "complete_with_gaps"})
+    assert final["inventory_exported"] is True
+    assert final["coverage_status"] == "complete_with_gaps"
+    assert final["distinct_repositories"] == 1
+    assert json.loads((out / "repositories.jsonl").read_text().splitlines()[0])["id"] == 42
+
+
 def test_metadata_is_attributed_only_to_matching_repo_and_newer_values_win(tmp_path):
     path = archive(
         tmp_path / "metadata.json.gz",
