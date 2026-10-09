@@ -18,7 +18,7 @@ from pathlib import Path
 import shutil
 import time
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from . import bulk_triage
 from .ecosystems_bulk import ARCHIVE_FREE_SPACE_FLOOR_BYTES, MAX_OUTPUT_BYTES, SCHEMA_VERSION
@@ -309,6 +309,7 @@ def process_committed_shards(
     max_shards: int | None = None,
     full_verify: bool = False,
     import_run_dir: str | Path = DEFAULT_IMPORT_RUN_DIR,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Process checkpointed immutable shards incrementally and idempotently.
 
@@ -332,6 +333,7 @@ def process_committed_shards(
     checkpoint_path, manifest_path = source / "checkpoint.json", source / "manifest.json"
     checkpoint, source_manifest = _json_object(checkpoint_path), _json_object(manifest_path)
     source_report = inspect_source(source, import_run_dir)
+    source_snapshot_at_unix = time.time()
     if not source_report.get("source_fingerprint"):
         return {**source_report, "output_dir": str(destination), "processed_shards": 0,
                 "pending_shards": 0, "output_bytes": 0, "status": "waiting_for_committed_shards"}
@@ -394,6 +396,64 @@ def process_committed_shards(
         counts = Counter()
         processed = skipped = 0
         stop_reason = "all_committed_shards_processed"
+
+        def progress_snapshot() -> dict[str, Any]:
+            triaged_shards = len(recorded_shards)
+            triaged_rows = sum(int(record.get("rows", 0)) for record in recorded_shards.values())
+            pending = max(0, len(shards) - triaged_shards)
+            complete = bool(
+                source_report["source_complete"] and pending == 0
+                and triaged_rows == source_report["committed_rows"]
+                and sum(counts.values()) == triaged_rows
+            )
+            return {
+                "source_snapshot": {
+                    "captured_at_unix": source_snapshot_at_unix,
+                    "source_fingerprint": source_report["source_fingerprint"],
+                    "source_state_sha256": source_report.get("source_state_sha256"),
+                    "committed_shards": len(shards),
+                    "committed_rows": source_report["committed_rows"],
+                    "source_complete": source_report["source_complete"],
+                },
+                "triage_progress": {
+                    "updated_at_unix": time.time(),
+                    "committed_shards": triaged_shards,
+                    "committed_rows": triaged_rows,
+                    "pending_shards": pending,
+                    "pending_count_basis": "source_snapshot",
+                    "output_bytes": completed_bytes,
+                    "output_budget_bytes": max_output_bytes,
+                    "routing_counts": dict(sorted(counts.items())),
+                    "routing_counts_complete": sum(counts.values()) == triaged_rows,
+                    "complete": complete,
+                },
+            }
+
+        def persist_progress(*, notify: bool) -> None:
+            snapshot = progress_snapshot()
+            source_snapshot = snapshot["source_snapshot"]
+            triage_progress = snapshot["triage_progress"]
+            state.update(
+                source_snapshot_at_unix=source_snapshot["captured_at_unix"],
+                source_state_sha256=source_snapshot["source_state_sha256"],
+                source_committed_shards=source_snapshot["committed_shards"],
+                source_committed_rows=source_snapshot["committed_rows"],
+                source_complete=source_snapshot["source_complete"],
+                triaged_shards=triage_progress["committed_shards"],
+                triaged_rows=triage_progress["committed_rows"],
+                pending_shards=triage_progress["pending_shards"],
+                output_bytes=triage_progress["output_bytes"],
+                output_budget_bytes=max_output_bytes,
+                routing_counts=triage_progress["routing_counts"],
+                routing_counts_complete=triage_progress["routing_counts_complete"],
+            )
+            state["complete"] = bool(
+                triage_progress["complete"]
+            )
+            _atomic_json(run_manifest_path, state)
+            if notify and progress_callback is not None:
+                progress_callback(snapshot)
+
         for source_shard in shards:
             name = source_shard["name"]
             final_dir = destination / "shards" / Path(name).stem
@@ -426,7 +486,7 @@ def process_committed_shards(
                 }
                 state["output_bytes"] = completed_bytes + receipt["output_bytes"]
                 completed_bytes = state["output_bytes"]
-                _atomic_json(run_manifest_path, state)
+                persist_progress(notify=True)
                 skipped += 1
                 continue
 
@@ -555,10 +615,9 @@ def process_committed_shards(
                 "output_dir": str(final_dir), "source_stat": source_shard["source_stat"],
             }
             completed_bytes += output_bytes
-            state["output_bytes"] = completed_bytes
-            _atomic_json(run_manifest_path, state)
             counts.update(routing_counts)
             processed += 1
+            persist_progress(notify=True)
         aggregate: Counter[str] = Counter()
         triaged_rows = 0
         descriptors = {item["name"]: item for item in shards}
@@ -602,6 +661,7 @@ def process_committed_shards(
         "output_budget_bytes": max_output_bytes,
         "routing_counts_this_invocation": dict(sorted(counts.items())),
         "triage_complete": bool(state["complete"]),
+        "progress_snapshot": progress_snapshot(),
         "status": stop_reason if stop_reason != "all_committed_shards_processed" else (
             "triage_complete" if state["complete"] else (
                 "source_pending" if not source_report["source_complete"] else "triage_pending"

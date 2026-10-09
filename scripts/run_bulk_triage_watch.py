@@ -166,6 +166,51 @@ def run_iteration(config: Mapping[str, Any], *, now: datetime | None = None,
         source = api.inspect_source(config["source_dir"], config["import_run_dir"])
         triage: dict[str, Any] | None = None
         if source.get("committed_shards", 0):
+
+            def persist_shard_progress(progress: Mapping[str, Any]) -> None:
+                source_snapshot = progress["source_snapshot"]
+                triage_progress = progress["triage_progress"]
+                progress_state = {
+                    **base,
+                    "updated_at": utc_now(),
+                    "state": "running",
+                    "terminal": False,
+                    "source_state": "complete" if source_snapshot["source_complete"] else "source_pending",
+                    "import_state": source.get("import_state"),
+                    "import_receipt_state": source.get("import_receipt_state"),
+                    "source_complete": bool(source_snapshot["source_complete"]),
+                    "committed_shards": int(source_snapshot["committed_shards"]),
+                    "committed_rows": int(source_snapshot["committed_rows"]),
+                    "progress_source_snapshot": dict(source_snapshot),
+                    "progress_source_snapshot_basis": "runner_inspect_source_at_batch_start",
+                    "triage_pending_shards": int(triage_progress["pending_shards"]),
+                    "triage_pending_count_basis": "progress_source_snapshot",
+                    "triaged_shards": int(triage_progress["committed_shards"]),
+                    "triaged_rows": int(triage_progress["committed_rows"]),
+                    "triage_output_bytes": int(triage_progress["output_bytes"]),
+                    "triage_output_budget_bytes": int(triage_progress["output_budget_bytes"]),
+                    "triage_routing_counts": dict(triage_progress["routing_counts"]),
+                    "triage_routing_counts_complete": bool(triage_progress["routing_counts_complete"]),
+                    "triage_progress_updated_at_unix": triage_progress["updated_at_unix"],
+                    "triage_complete": bool(triage_progress["complete"]),
+                    "triage_result": {
+                        "status": "shard_progress",
+                        "triaged_shards": int(triage_progress["committed_shards"]),
+                        "triaged_rows": int(triage_progress["committed_rows"]),
+                        "pending_shards": int(triage_progress["pending_shards"]),
+                        "pending_count_basis": "progress_source_snapshot",
+                        "output_bytes": int(triage_progress["output_bytes"]),
+                        "output_budget_bytes": int(triage_progress["output_budget_bytes"]),
+                        "routing_counts": dict(triage_progress["routing_counts"]),
+                        "routing_counts_complete": bool(triage_progress["routing_counts_complete"]),
+                        "complete": bool(triage_progress["complete"]),
+                        "source_snapshot": dict(source_snapshot),
+                    },
+                    "source_progress": source.get("source_progress"),
+                    "reason": "triage_batch_in_progress; counts are as of the pinned source snapshot",
+                }
+                _save_state(state_path, log_path, progress_state)
+
             triage = api.process_committed_shards(
                 config["source_dir"], config["output_dir"],
                 model_path=config["model_path"],
@@ -174,6 +219,7 @@ def run_iteration(config: Mapping[str, Any], *, now: datetime | None = None,
                 max_shards=int(config["batch_shards"]),
                 reserve_bytes=int(config["reserve_bytes"]),
                 import_run_dir=config["import_run_dir"],
+                progress_callback=persist_shard_progress,
             )
         triage_pending = (
             int(triage.get("pending_shards", source.get("committed_shards", 0)))
@@ -217,6 +263,22 @@ def run_iteration(config: Mapping[str, Any], *, now: datetime | None = None,
                 else None
             ),
         }
+        if triage is not None and isinstance(triage.get("progress_snapshot"), Mapping):
+            progress = triage["progress_snapshot"]
+            source_snapshot = progress["source_snapshot"]
+            triage_progress = progress["triage_progress"]
+            state.update(
+                progress_source_snapshot=dict(source_snapshot),
+                progress_source_snapshot_basis="runner_inspect_source_at_batch_start",
+                triaged_shards=int(triage_progress["committed_shards"]),
+                triaged_rows=int(triage_progress["committed_rows"]),
+                triage_output_bytes=int(triage_progress["output_bytes"]),
+                triage_output_budget_bytes=int(triage_progress["output_budget_bytes"]),
+                triage_routing_counts=dict(triage_progress["routing_counts"]),
+                triage_routing_counts_complete=bool(triage_progress["routing_counts_complete"]),
+                triage_progress_updated_at_unix=triage_progress["updated_at_unix"],
+                triage_pending_count_basis="progress_source_snapshot",
+            )
     except OSError as exc:
         state = {**base, "state": "disk_or_io_failure", "terminal": True,
                  "reason": str(exc)}

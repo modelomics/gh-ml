@@ -191,6 +191,146 @@ def test_max_shards_limits_new_work_and_does_not_starve_later_shards(tmp_path, m
     assert second_run["pending_shards"] == 0
 
 
+def _append_duplicate_committed_shard(source: Path, first: dict) -> dict:
+    second_path = source / "repositories-000001.parquet"
+    second_path.write_bytes((source / first["path"]).read_bytes())
+    second = {**first, "path": second_path.name,
+              "bytes": second_path.stat().st_size,
+              "sha256": hashlib.sha256(second_path.read_bytes()).hexdigest()}
+    checkpoint_path = source / "checkpoint.json"
+    checkpoint = json.loads(checkpoint_path.read_text())
+    checkpoint["shards"].append(second)
+    checkpoint_path.write_text(json.dumps(checkpoint), encoding="utf-8")
+    return second
+
+
+def test_progress_callback_follows_each_durable_shard_manifest_commit(tmp_path, monkeypatch):
+    source, first = _source(tmp_path)
+    _append_duplicate_committed_shard(source, first)
+    model_path = _install_model(monkeypatch, tmp_path)
+    monkeypatch.setattr("gh_ml.bulk_triage_runner._space_guard", lambda *_: None)
+    output = tmp_path / "triage"
+    snapshots = []
+
+    def progress_callback(snapshot):
+        manifest = json.loads((output / "run-manifest.json").read_text())
+        progress = snapshot["triage_progress"]
+        snapshots.append(snapshot)
+        assert manifest["triaged_shards"] == progress["committed_shards"]
+        assert manifest["triaged_rows"] == progress["committed_rows"]
+        assert manifest["pending_shards"] == progress["pending_shards"]
+        assert manifest["output_bytes"] == progress["output_bytes"]
+
+    result = process_committed_shards(source, output, model_path=model_path,
+                                      max_shards=2, progress_callback=progress_callback)
+
+    assert result["processed_shards"] == 2
+    assert [snapshot["triage_progress"]["committed_shards"] for snapshot in snapshots] == [1, 2]
+    assert [snapshot["triage_progress"]["committed_rows"] for snapshot in snapshots] == [3, 6]
+    assert [snapshot["triage_progress"]["pending_shards"] for snapshot in snapshots] == [1, 0]
+    assert all(snapshot["triage_progress"]["pending_count_basis"] == "source_snapshot" for snapshot in snapshots)
+    assert all(snapshot["source_snapshot"]["committed_shards"] == 2 for snapshot in snapshots)
+    assert all(snapshot["source_snapshot"]["committed_rows"] == 6 for snapshot in snapshots)
+    assert all(snapshot["source_snapshot"]["source_state_sha256"] for snapshot in snapshots)
+    assert sum(result["progress_snapshot"]["triage_progress"]["routing_counts"].values()) == 6
+    assert all(snapshot["triage_progress"]["routing_counts_complete"] for snapshot in snapshots)
+    assert result["source_complete"] is False
+    assert result["status"] == "source_pending"
+    assert result["triage_complete"] is False
+    assert result["progress_snapshot"]["triage_progress"]["complete"] is False
+
+
+def test_callback_failure_after_commit_replays_without_reprocessing_committed_shard(tmp_path, monkeypatch):
+    source, first = _source(tmp_path)
+    _append_duplicate_committed_shard(source, first)
+    model_path = _install_model(monkeypatch, tmp_path)
+    monkeypatch.setattr("gh_ml.bulk_triage_runner._space_guard", lambda *_: None)
+    original_classify = bulk_triage.classify_bulk_batch
+    calls = 0
+
+    def count_classify(rows, model):
+        nonlocal calls
+        calls += 1
+        return original_classify(rows, model)
+
+    monkeypatch.setattr(bulk_triage, "classify_bulk_batch", count_classify)
+    output = tmp_path / "triage"
+    committed_dir = output / "shards" / Path(first["path"]).stem
+    committed_output_hash = None
+
+    def fail_after_commit(snapshot):
+        nonlocal committed_output_hash
+        state = json.loads((output / "run-manifest.json").read_text())
+        assert state["triaged_shards"] == 1
+        assert state["pending_shards"] == 1
+        committed_output_hash = hashlib.sha256(
+            (committed_dir / "inventory.parquet").read_bytes()
+        ).hexdigest()
+        assert snapshot["triage_progress"]["committed_shards"] == 1
+        raise RuntimeError("simulated progress callback failure")
+
+    with pytest.raises(RuntimeError, match="progress callback failure"):
+        process_committed_shards(source, output, model_path=model_path,
+                                 max_shards=2, progress_callback=fail_after_commit)
+
+    assert calls == 1
+    replay = process_committed_shards(source, output, model_path=model_path, max_shards=2)
+
+    assert replay["skipped_verified_shards"] == 1
+    assert replay["processed_shards"] == 1
+    assert replay["pending_shards"] == 0
+    assert replay["source_complete"] is False
+    assert replay["status"] == "source_pending"
+    assert replay["triage_complete"] is False
+    assert replay["progress_snapshot"]["triage_progress"]["complete"] is False
+    assert calls == 2
+    assert hashlib.sha256((committed_dir / "inventory.parquet").read_bytes()).hexdigest() == committed_output_hash
+    counts = replay["progress_snapshot"]["triage_progress"]["routing_counts"]
+    assert counts == {"candidate": 2, "deferred": 2, "unknown": 2}
+    assert replay["progress_snapshot"]["triage_progress"]["routing_counts_complete"] is True
+
+
+def test_progress_counters_remain_consistent_after_failure_and_replay(tmp_path, monkeypatch):
+    source, first = _source(tmp_path)
+    _append_duplicate_committed_shard(source, first)
+    model_path = _install_model(monkeypatch, tmp_path)
+    monkeypatch.setattr("gh_ml.bulk_triage_runner._space_guard", lambda *_: None)
+    original_classify = bulk_triage.classify_bulk_batch
+    calls = 0
+
+    def fail_second_shard(rows, model):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("simulated second-shard failure")
+        return original_classify(rows, model)
+
+    monkeypatch.setattr(bulk_triage, "classify_bulk_batch", fail_second_shard)
+    output = tmp_path / "triage"
+    progress = []
+    with pytest.raises(RuntimeError, match="second-shard failure"):
+        process_committed_shards(source, output, model_path=model_path, max_shards=2,
+                                 progress_callback=progress.append)
+    partial = json.loads((output / "run-manifest.json").read_text())
+    assert partial["triaged_shards"] == 1
+    assert partial["triaged_rows"] == 3
+    assert partial["pending_shards"] == 1
+    assert sum(partial["routing_counts"].values()) == 3
+    assert progress[-1]["triage_progress"]["committed_shards"] == 1
+
+    monkeypatch.setattr(bulk_triage, "classify_bulk_batch", original_classify)
+    replay_progress = []
+    replay = process_committed_shards(source, output, model_path=model_path, max_shards=2,
+                                      progress_callback=replay_progress.append)
+    assert replay["skipped_verified_shards"] == 1
+    assert replay["processed_shards"] == 1
+    assert replay["pending_shards"] == 0
+    assert replay_progress[-1]["triage_progress"]["committed_shards"] == 2
+    assert replay_progress[-1]["triage_progress"]["committed_rows"] == 6
+    assert sum(replay_progress[-1]["triage_progress"]["routing_counts"].values()) == 6
+    assert replay_progress[-1]["triage_progress"]["routing_counts_complete"] is True
+
+
 def test_manifest_marks_source_complete_only_after_checkpoint_agrees(tmp_path):
     source, _ = _source(tmp_path, final_manifest=True)
     import_run = tmp_path / "import-run"

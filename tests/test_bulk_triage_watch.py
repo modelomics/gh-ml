@@ -116,3 +116,59 @@ def test_output_budget_and_source_pin_drift_stop_visibly(tmp_path):
     drift = run_iteration(drift_config, api=api)
     assert drift["state"] == "failed"
     assert "frozen source hash drift" in drift["reason"]
+
+
+def test_watcher_persists_per_shard_progress_during_runner_batch(tmp_path):
+    config = _config(tmp_path)
+    source = _source(shards=3)
+
+    class ProgressAPI(_RunnerAPI):
+        during_batch = None
+
+        def process_committed_shards(self, *_args, progress_callback=None, **_kwargs):
+            progress = {
+                "source_snapshot": {
+                    "captured_at_unix": 100.0,
+                    "source_fingerprint": "sha256:source-pin",
+                    "source_state_sha256": "a" * 64,
+                    "committed_shards": 3,
+                    "committed_rows": 300,
+                    "source_complete": False,
+                },
+                "triage_progress": {
+                    "updated_at_unix": 101.0,
+                    "committed_shards": 1,
+                    "committed_rows": 100,
+                    "pending_shards": 2,
+                    "pending_count_basis": "source_snapshot",
+                    "output_bytes": 4096,
+                    "output_budget_bytes": 10 * 1024**3,
+                    "routing_counts": {"candidate": 20, "review": 40, "deferred": 10, "unknown": 30},
+                    "routing_counts_complete": True,
+                    "complete": False,
+                },
+            }
+            progress_callback(progress)
+            self.during_batch = json.loads((config["run_dir"] / "watcher-status.json").read_text())
+            return {
+                "pending_shards": 2,
+                "triage_complete": False,
+                "status": "source_pending",
+                "progress_snapshot": progress,
+            }
+
+    api = ProgressAPI(source)
+    result = run_iteration(config, api=api)
+
+    during = api.during_batch
+    assert during["triaged_shards"] == 1
+    assert during["triaged_rows"] == 100
+    assert during["triage_pending_shards"] == 2
+    assert during["triage_pending_count_basis"] == "progress_source_snapshot"
+    assert during["progress_source_snapshot"]["source_state_sha256"] == "a" * 64
+    assert during["progress_source_snapshot"]["committed_shards"] == 3
+    assert sum(during["triage_routing_counts"].values()) == 100
+    assert during["triage_routing_counts_complete"] is True
+    assert result["triaged_shards"] == 1
+    assert result["triaged_rows"] == 100
+    assert result["progress_source_snapshot"]["committed_rows"] == 300
