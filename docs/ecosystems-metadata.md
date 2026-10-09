@@ -47,7 +47,28 @@ The existing `readme-graphql` enrichment stage also accepts repeatable `--github
 
 ## Downstream use and operational status
 
-Treat each delta as source observations and pass it to the existing review and compact-README pipeline as an inventory input. Preserve the receipt alongside the run, including the cursor and queue state needed for resumption. The command does not classify records as ML or novelty, or establish complete GitHub coverage. It performs bounded local imports; there is no scheduled full-crawl workflow.
+Treat each delta as source observations and pass it to the existing review and compact-README pipeline as an inventory input. Preserve the receipt alongside the run, including the cursor and queue state needed for resumption. The command does not classify records as ML or novelty, or establish complete GitHub coverage. The one-time full inventory runner is documented below; it is not a recurring scheduled workflow.
+
+### One-time resumable full inventory run
+
+The full runner performs the ecosyste.ms listing pass first, with GitHub fallback disabled, until the listing cursor reaches an empty page. Only then does it enter the fallback phase and retry eligible queued records through GitHub. A provider outage or rate limit is retried with exponential backoff (10 seconds up to one hour); it does not trigger a GitHub-wide fallback. Each invocation has a seven-day continuous runtime budget by default. If that budget expires, restart the same command with the same state database and run directory to resume. Do not change the source revision during a run or resume: the runner pins a source revision in `status.json` and refuses a mismatch.
+
+The production run directory is `/mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08`; it holds `code/`, `state.sqlite`, `deltas/`, `logs/`, and `status.json`. The frozen source snapshot in `code/` is used for launch and every resume. The initial run is tracked in [the maintained run manifest](ecosystems-full-run-2026-10-08.md). The systemd unit runs:
+
+```sh
+PYTHONPATH=/mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08/code/src \
+uv run --no-project \
+  --python /mnt/shared/Projects/Code/Academic/modelomics/gh-ml-graphql/.venv/bin/python \
+  python -m gh_ml.ecosystems_full_run \
+  --state-db /mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08/state.sqlite \
+  --run-dir /mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08 \
+  --chunk-pages 10 --per-page 1000 --chunk-seconds 3300 \
+  --max-runtime-seconds 604800 --fallback-requests 100
+```
+
+This invocation uses the existing project virtualenv and explicitly sets the frozen snapshot's `src/` on `PYTHONPATH`. The run creates compressed JSONL deltas only after verifying decompressed record count and SHA256 against the raw export; each receipt is updated with the compressed path, record count, and hash. The runner checks archive free space before each chunk and stops with resumable status if free space falls below 300 GiB. GitHub credentials are read from `GITHUB_TOKEN` only when the runner reaches fallback; the token is not included in arguments or artifacts. Monitor `status.json` for phase, cursor, counts, last receipt/export, retry delay, free space, and errors. Do not launch another copy against the same run directory.
+
+The source listing sorts by mutable `full_name`, so page movement can cause omissions or repeats while repositories are renamed. An exhausted cursor means the endpoint walk ended; it does not prove complete or point-in-time GitHub coverage. Preserve the resulting inventory as an ecosyste.ms observation with source age and provenance intact.
 
 ### Primary-source pilot
 

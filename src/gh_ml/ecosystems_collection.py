@@ -117,6 +117,7 @@ def _init(db: sqlite3.Connection) -> None:
         CREATE TABLE IF NOT EXISTS pending_exports (
             github_id INTEGER PRIMARY KEY, changed_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS collector_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     """)
     if db.execute("SELECT 1 FROM stats WHERE key='repository_count'").fetchone() is None:
         count = db.execute("SELECT count(*) FROM repositories").fetchone()[0]
@@ -407,9 +408,9 @@ def _local(db: sqlite3.Connection, rid: int | None, name: str | None) -> dict[st
 
 
 def _iter_unresolved(db: sqlite3.Connection, *, deadline: float | None,
-                     min_free_gib: int, batch_size: int = 100) -> Iterable[sqlite3.Row]:
+                     min_free_gib: int, after_key: str = "", batch_size: int = 100) -> Iterable[sqlite3.Row]:
     """Yield queue records in bounded keyset pages while rows may be deleted."""
-    last_key = ""
+    last_key = after_key
     while True:
         _check_budget(deadline, min_free_gib)
         batch = db.execute("SELECT * FROM unresolved WHERE target_key>? ORDER BY target_key LIMIT ?",
@@ -430,7 +431,9 @@ def run_import(*, state_db: Path, output_dir: Path, ecosystems_client: Any,
                github_client: Any = None, max_pages: int = 1, per_page: int = 1000,
                max_github_requests: int = 100, deadline: float | None = None,
                discovery_paths: Iterable[Path] = (), updated_after: str | None = None,
-               min_free_gib: int = 300) -> dict[str, Any]:
+               min_free_gib: int = 300, process_queue: bool = True,
+               queue_target_limit: int | None = None,
+               export_batch_limit: int | None = None) -> dict[str, Any]:
     """Import inventory pages, then hydrate selected discovery targets.
 
     The ``deadline`` is an absolute ``time.monotonic()`` value. Cursors advance
@@ -440,6 +443,10 @@ def run_import(*, state_db: Path, output_dir: Path, ecosystems_client: Any,
         raise ValueError("page count and request limits must be nonnegative; per_page must be 1 through 1000")
     if min_free_gib < 300:
         raise CollectionError("minimum archive free-space floor cannot be lower than 300 GiB")
+    if queue_target_limit is not None and queue_target_limit < 1:
+        raise ValueError("queue_target_limit must be positive when supplied")
+    if export_batch_limit is not None and export_batch_limit < 1:
+        raise ValueError("export_batch_limit must be positive when supplied")
     db_path, out = _safe_paths(Path(state_db), Path(output_dir))
     _check_budget(deadline, min_free_gib)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -513,11 +520,20 @@ def run_import(*, state_db: Path, output_dir: Path, ecosystems_client: Any,
             page += 1
             report["pages_requested"] += 1
 
-        if report["status"] == "complete":
+        if report["status"] == "complete" and process_queue:
             with db:
                 _discovery_targets(db, discovery_paths, deadline, min_free_gib)
             gh_calls = 0
-            for item in _iter_unresolved(db, deadline=deadline, min_free_gib=min_free_gib):
+            saved = db.execute("SELECT value FROM collector_state WHERE key='queue_after_key'").fetchone()
+            queue_after = str(saved[0]) if saved else ""
+            queue_last = queue_after
+            queue_visited = 0
+            for item in _iter_unresolved(db, deadline=deadline, min_free_gib=min_free_gib,
+                                         after_key=queue_after):
+                if queue_target_limit is not None and queue_visited >= queue_target_limit:
+                    break
+                queue_visited += 1
+                queue_last = str(item["target_key"])
                 _check_budget(deadline, min_free_gib)
                 rid, name, expected = item["github_id"], item["full_name"], item["expected_id"]
                 cached = _local(db, rid, name)
@@ -623,8 +639,16 @@ def run_import(*, state_db: Path, output_dir: Path, ecosystems_client: Any,
                     with db:
                         db.execute("DELETE FROM unresolved WHERE target_key=?", (item["target_key"],))
 
+            has_later = db.execute("SELECT 1 FROM unresolved WHERE target_key>? LIMIT 1", (queue_last,)).fetchone()
+            next_key = queue_last if has_later else ""
+            with db:
+                db.execute("INSERT INTO collector_state(key,value) VALUES('queue_after_key',?) "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (next_key,))
+            report["queue_targets_scanned"] = queue_visited
+
         rows = []
-        export_limit = max(per_page, min(10_000, per_page + max_github_requests))
+        export_limit = (max(per_page, min(10_000, per_page + max_github_requests))
+                        if export_batch_limit is None else max(per_page, export_batch_limit))
         pending_ids = [row[0] for row in db.execute(
             "SELECT github_id FROM pending_exports ORDER BY github_id LIMIT ?", (export_limit,))]
         for rid in pending_ids:
