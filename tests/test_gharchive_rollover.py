@@ -236,6 +236,155 @@ def test_read_marker_same_hash_is_idempotent_and_conflicting_hash_does_not_apply
     assert store.read_marker(HOURS[0])["sha256"] == marker["sha256"]
 
 
+def test_proven_replay_obeys_free_floor_without_write_reservation(tmp_path, monkeypatch):
+    root, _, _, store = _legacy_store(tmp_path)
+    marker = store.read_marker(HOURS[0])
+    digest = marker["sha256"]
+    prepared = gharchive_compact.PreparedHour(
+        source_path=root / "unused-input.json.gz", output_dir=root,
+        scratch_path=gharchive_compact._scratch_path_for(root, HOURS[0]),
+        source_hour=HOURS[0], sha256=digest, compressed_bytes=marker["compressed_bytes"],
+        uncompressed_bytes=marker["uncompressed_bytes"], unique_events=marker["unique_events"],
+        malformed_events=marker["malformed_events"],
+        repository_observations=marker["repository_observations"], parse_seconds=marker["parse_seconds"],
+        scratch_sha256=None, max_store_bytes=10_000_000, min_free_bytes=1,
+        already_committed=True,
+    )
+    monkeypatch.setattr(gharchive_rollover.shutil, "disk_usage",
+                        lambda _path: type("Usage", (), {"free": 0})())
+    with pytest.raises(OSError, match="below required reserve"):
+        store.commit_hour(prepared)
+    assert not list((root / "hour-reports").glob("*"))
+
+    # A missing report is a real write and must fit the cap before it is made.
+    prepared = gharchive_compact.PreparedHour(
+        source_path=prepared.source_path, output_dir=root, scratch_path=prepared.scratch_path,
+        source_hour=HOURS[0], sha256=digest, compressed_bytes=marker["compressed_bytes"],
+        uncompressed_bytes=marker["uncompressed_bytes"], unique_events=marker["unique_events"],
+        malformed_events=marker["malformed_events"],
+        repository_observations=marker["repository_observations"], parse_seconds=marker["parse_seconds"],
+        scratch_sha256=None, max_store_bytes=store.used_bytes(), min_free_bytes=0,
+        already_committed=True,
+    )
+    with pytest.raises(gharchive_compact.StoreCapReached, match="would exceed cap"):
+        store.commit_hour(prepared)
+    assert not list((root / "hour-reports").glob("*"))
+
+    # With the floor met, an already materialized report can replay at the
+    # exact current store cap; no transaction headroom is reserved.
+    gharchive_compact.result_from_marker(root, marker, ledger_locator="../gharchive-catalog.json")
+    prepared = gharchive_compact.PreparedHour(
+        source_path=prepared.source_path, output_dir=root, scratch_path=prepared.scratch_path,
+        source_hour=HOURS[0], sha256=digest, compressed_bytes=marker["compressed_bytes"],
+        uncompressed_bytes=marker["uncompressed_bytes"], unique_events=marker["unique_events"],
+        malformed_events=marker["malformed_events"],
+        repository_observations=marker["repository_observations"], parse_seconds=marker["parse_seconds"],
+        scratch_sha256=None, max_store_bytes=store.used_bytes(), min_free_bytes=0,
+        already_committed=True,
+    )
+    result = store.commit_hour(prepared, replay_budget_check=lambda: store.ensure_budget_locked(
+        prepared.max_store_bytes, scratch_path=prepared.scratch_path, transaction_headroom=0, min_free_bytes=0))
+    assert result["already_committed"] is True
+
+
+def test_active_marker_ledger_repair_reserves_sqlite_pages_before_insert(tmp_path):
+    root, _, _, store = _legacy_store(tmp_path)
+    marker = _read_marker_for_test(store.active_db_path, HOURS[0])
+    with sqlite3.connect(store.ledger_path) as ledger:
+        ledger.execute("DELETE FROM hour_markers WHERE source_hour=?", (HOURS[0],))
+    assert store.used_bytes() > 0
+    assert store.read_marker(HOURS[0]) == marker
+    with sqlite3.connect(store.ledger_path) as ledger:
+        assert ledger.execute("SELECT count(*) FROM hour_markers WHERE source_hour=?",
+                              (HOURS[0],)).fetchone()[0] == 0
+    prepared = gharchive_compact.PreparedHour(
+        source_path=root / "unused-input.json.gz", output_dir=root,
+        scratch_path=gharchive_compact._scratch_path_for(root, HOURS[0]),
+        source_hour=HOURS[0], sha256=marker["sha256"], compressed_bytes=marker["compressed_bytes"],
+        uncompressed_bytes=marker["uncompressed_bytes"], unique_events=marker["unique_events"],
+        malformed_events=marker["malformed_events"],
+        repository_observations=marker["repository_observations"], parse_seconds=marker["parse_seconds"],
+        scratch_sha256=None, max_store_bytes=store.used_bytes(), min_free_bytes=0,
+        already_committed=True,
+    )
+    with pytest.raises(gharchive_compact.StoreCapReached, match="would exceed cap"):
+        store.commit_hour(prepared)
+    with sqlite3.connect(store.ledger_path) as ledger:
+        assert ledger.execute("SELECT count(*) FROM hour_markers WHERE source_hour=?",
+                              (HOURS[0],)).fetchone()[0] == 0
+    assert _read_marker_for_test(store.active_db_path, HOURS[0]) == marker
+    # The source transaction remains the authority and report recovery can
+    # repair the missing ledger receipt when budget permits.
+    recovered = store.recover_hour_report(root, HOURS[0], marker["sha256"], max_store_bytes=10_000_000)
+    assert Path(recovered["report_path"]).is_file()
+    assert store.read_marker(HOURS[0]) == marker
+
+
+def _read_marker_for_test(database_path: Path, hour: str) -> dict[str, object]:
+    db = sqlite3.connect(database_path)
+    db.row_factory = sqlite3.Row
+    try:
+        return dict(db.execute(f"SELECT {','.join(gharchive_rollover.MARKER_COLUMNS)} FROM hours WHERE source_hour=?",
+                               (hour,)).fetchone())
+    finally:
+        db.close()
+
+
+def test_recover_hour_report_honors_cap_and_free_floor(tmp_path, monkeypatch):
+    root, _, _, store = _legacy_store(tmp_path)
+    marker = store.read_marker(HOURS[0])
+    cap = store.used_bytes()
+    with pytest.raises(gharchive_compact.StoreCapReached, match="would exceed cap"):
+        store.recover_hour_report(root, HOURS[0], marker["sha256"], max_store_bytes=cap)
+    assert not list((root / "hour-reports").glob("*"))
+    monkeypatch.setattr(gharchive_rollover.shutil, "disk_usage",
+                        lambda _path: type("Usage", (), {"free": 0})())
+    with pytest.raises(OSError, match="below required reserve"):
+        store.recover_hour_report(root, HOURS[0], marker["sha256"],
+                                  max_store_bytes=10_000_000, min_free_bytes=1)
+    assert not list((root / "hour-reports").glob("*"))
+    monkeypatch.setattr(gharchive_rollover.shutil, "disk_usage",
+                        lambda _path: type("Usage", (), {"free": 10_000_000})())
+    recovered = store.recover_hour_report(root, HOURS[0], marker["sha256"], max_store_bytes=10_000_000)
+    assert Path(recovered["report_path"]).is_file()
+
+
+def test_budget_repeated_checks_do_not_walk_historical_files(tmp_path, monkeypatch):
+    root, _, _, store = _legacy_store(tmp_path)
+    store.ensure_budget(10_000_000, min_free_bytes=0)
+    walks = 0
+    original = gharchive_rollover.os.walk
+
+    def counted(*args, **kwargs):
+        nonlocal walks
+        walks += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(gharchive_rollover.os, "walk", counted)
+    for _ in range(5):
+        store.ensure_budget(10_000_000, min_free_bytes=0)
+    assert walks == 0
+    assert store.used_bytes() > 0
+
+
+def test_locked_snapshots_are_read_only_and_expose_active_and_segment_metadata(tmp_path):
+    root, _, _, store = _legacy_store(tmp_path)
+    store.rollover(export_closed_sqlite, max_output_bytes=10_000_000, min_free_bytes=0)
+    ledger_before = hashlib.sha256(store.ledger_path.read_bytes()).hexdigest()
+    with store.writer():
+        catalog = store.catalog_snapshot_locked()
+        markers = store.hour_ledger_snapshot_locked()
+        coverage = store.coverage_summary_locked()
+        active = store.active_db_path_locked()
+    assert active == store.active_db_path
+    assert catalog["generation"] == 1
+    assert catalog["active_epoch"] == 1
+    assert catalog["segments"][0]["manifest_sha256"]
+    assert catalog["segments"][0]["covered_hours"][HOURS[0]] == hashlib.sha256(HOURS[0].encode()).hexdigest()
+    assert len(markers) == coverage["hour_count"] == 2
+    assert hashlib.sha256(store.ledger_path.read_bytes()).hexdigest() == ledger_before
+
+
 def test_fresh_store_creates_empty_epoch_without_overwriting_existing_epoch(tmp_path):
     root = tmp_path / "fresh"
     orphan = root / "epochs/epoch-00000000"

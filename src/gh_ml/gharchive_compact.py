@@ -133,7 +133,8 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
 
 def _materialize_hour_report(output_dir: Path, marker: sqlite3.Row, *,
                              source_path: str | None, reconstructed: bool,
-                             force_reconstructed: bool = False) -> dict[str, Any]:
+                             force_reconstructed: bool = False,
+                             ledger_locator: str | None = None) -> dict[str, Any]:
     hour = marker["source_hour"]
     hour_tag = hour.replace(":", "").replace("-", "")
     report_path = output_dir / "hour-reports" / f"{hour_tag}-{marker['sha256'][:16]}-compact-v1.json"
@@ -153,7 +154,7 @@ def _materialize_hour_report(output_dir: Path, marker: sqlite3.Row, *,
             "malformed_events": marker["malformed_events"],
             "repository_observations": marker["repository_observations"],
             "committed_at": marker["committed_at"],
-            "ledger": "../gharchive-compact.sqlite3",
+            "ledger": ledger_locator or "../gharchive-compact.sqlite3",
         }
     if marker["parse_seconds"] is not None:
         report["parse_wall_seconds"] = marker["parse_seconds"]
@@ -184,7 +185,7 @@ def _materialize_hour_report(output_dir: Path, marker: sqlite3.Row, *,
         marker_fields = (
             "schema_version", "parser", "result", "source_hour", "sha256",
             "compressed_bytes", "uncompressed_bytes", "unique_events_within_hour",
-            "malformed_events", "repository_observations", "committed_at", "ledger",
+            "malformed_events", "repository_observations", "committed_at",
             "parse_wall_seconds", "merge_wall_seconds",
         )
         if existing is None or any(existing.get(key) != report.get(key) for key in marker_fields):
@@ -207,6 +208,10 @@ def _materialize_hour_report(output_dir: Path, marker: sqlite3.Row, *,
                     raise RuntimeError(f"recovered parser report is inconsistent with compact hour marker: {report_path}")
             else:
                 _atomic_json(report_path, report)
+        else:
+            # The report is an immutable provenance artifact. A newer logical
+            # ledger locator does not justify replacing its original bytes.
+            report = existing
     else:
         _atomic_json(report_path, report)
     digest = gharchive._file_hash(report_path)
@@ -368,6 +373,7 @@ def _parse_hour(path: Path, scratch_path: Path, source_hour: str, sha256: str,
                 *, max_compressed_bytes: int, max_uncompressed_bytes: int,
                 max_events: int, max_event_line_bytes: int, min_free_bytes: int,
                 max_store_bytes: int,
+                budget_check: Callable[[], Any] | None = None,
                 expected_scratch_sha256: str | None = None) -> dict[str, Any]:
     size = path.stat().st_size
     if size > max_compressed_bytes:
@@ -411,8 +417,11 @@ def _parse_hour(path: Path, scratch_path: Path, source_hour: str, sha256: str,
         with gzip.open(path, "rb") as stream:
             while True:
                 _ensure_free(scratch_path.parent, min_free_bytes)
-                _ensure_store_cap(scratch_path.parent.parent, scratch_path, max_store_bytes,
-                                  transaction_headroom=3 * (SCRATCH_BATCH_BYTES + max_event_line_bytes))
+                if budget_check is None:
+                    _ensure_store_cap(scratch_path.parent.parent, scratch_path, max_store_bytes,
+                                      transaction_headroom=3 * (SCRATCH_BATCH_BYTES + max_event_line_bytes))
+                else:
+                    budget_check()
                 with db:
                     batch_bytes = 0
                     for _ in range(SCRATCH_BATCH_EVENTS):
@@ -570,7 +579,10 @@ def prepare_hour(path: Path, output_dir: Path, *, source_hour: str,
                  max_events: int = MAX_EVENTS_PER_HOUR,
                  max_event_line_bytes: int = MAX_EVENT_LINE_BYTES,
                  max_store_bytes: int = MAX_COMPACT_STORE_BYTES,
-                 min_free_bytes: int = 300 * 1024**3) -> PreparedHour:
+                 min_free_bytes: int = 300 * 1024**3,
+                 committed_marker_lookup: Callable[[str, str | None], Any] | None = None,
+                 global_db_path: Path | None = None,
+                 budget_check: Callable[[], Any] | None = None) -> PreparedHour:
     """Validate and parse an hour into durable scratch without writing the ledger."""
     path = Path(path).expanduser().resolve()
     output_dir = Path(output_dir).expanduser().resolve()
@@ -583,10 +595,13 @@ def prepare_hour(path: Path, output_dir: Path, *, source_hour: str,
     if expected_sha256 is not None and digest != expected_sha256:
         raise ValueError("input SHA256 differs from acquisition receipt")
     compressed_bytes = path.stat().st_size
-    global_path = output_dir / "gharchive-compact.sqlite3"
+    global_path = Path(global_db_path).expanduser().resolve() if global_db_path is not None else output_dir / "gharchive-compact.sqlite3"
     scratch_dir = output_dir / "scratch"
     scratch_path = _scratch_path_for(output_dir, source_hour)
-    existing = _read_existing_marker(global_path, source_hour)
+    existing = (committed_marker_lookup(source_hour, digest)
+                if committed_marker_lookup is not None else None)
+    if existing is None and committed_marker_lookup is None:
+        existing = _read_existing_marker(global_path, source_hour)
     if existing is not None:
         if existing["sha256"] != digest:
             raise RuntimeError("a different hash is already committed for this UTC hour")
@@ -598,7 +613,10 @@ def prepare_hour(path: Path, output_dir: Path, *, source_hour: str,
 
     output_dir.mkdir(parents=True, exist_ok=True)
     scratch_dir.mkdir(exist_ok=True)
-    _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
+    if budget_check is None:
+        _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
+    else:
+        budget_check()
     expected_scratch_sha256 = _load_scratch_receipt(
         scratch_path, path, source_hour, digest, compressed_bytes,
     )
@@ -607,6 +625,7 @@ def prepare_hour(path: Path, output_dir: Path, *, source_hour: str,
                          max_uncompressed_bytes=max_uncompressed_bytes, max_events=max_events,
                          max_event_line_bytes=max_event_line_bytes,
                          min_free_bytes=min_free_bytes, max_store_bytes=max_store_bytes,
+                         budget_check=budget_check,
                          expected_scratch_sha256=expected_scratch_sha256)
     scratch_sha256 = gharchive._file_hash(scratch_path)
     _atomic_json(_scratch_receipt_path(scratch_path), {
@@ -617,7 +636,10 @@ def prepare_hour(path: Path, output_dir: Path, *, source_hour: str,
         "compressed_bytes": compressed_bytes,
         "scratch_sha256": scratch_sha256,
     })
-    _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
+    if budget_check is None:
+        _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
+    else:
+        budget_check()
     return PreparedHour(path, output_dir, scratch_path, source_hour, digest, compressed_bytes,
                         parsed["uncompressed_bytes"], parsed["unique_events"],
                         parsed["malformed_events"], parsed["repository_observations"],
@@ -669,7 +691,27 @@ def _validate_prepared_scratch(prepared: PreparedHour) -> dict[str, Any]:
             "parse_seconds": prepared.parse_seconds}
 
 
-def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
+def result_from_marker(output_dir: Path, marker: Any, *, source_path: str | None = None,
+                       already_committed: bool = True,
+                       ledger_locator: str | None = None,
+                       database_path: Path | None = None) -> dict[str, Any]:
+    """Build a stable replay result from a full durable hour marker."""
+    output_dir = Path(output_dir).expanduser().resolve()
+    marker_values = dict(marker)
+    report = _materialize_hour_report(
+        output_dir, marker_values, source_path=source_path, reconstructed=True,
+        ledger_locator=ledger_locator,
+    )
+    return {"status": "complete", "hour": marker_values["source_hour"],
+            "already_committed": already_committed,
+            "repository_observations": marker_values["repository_observations"], **report,
+            "database_bytes": _db_bytes(output_dir, database_path), "wall_seconds": 0.0}
+
+
+def commit_prepared_hour(prepared: PreparedHour, *, global_db_path: Path | None = None,
+                         already_committed_marker: Any | None = None,
+                         budget_check: Callable[[], Any] | None = None,
+                         ledger_locator: str | None = None) -> dict[str, Any]:
     """Commit one validated prepared hour through the single global writer."""
     if not isinstance(prepared, PreparedHour):
         raise TypeError("prepared must be a PreparedHour receipt")
@@ -681,10 +723,25 @@ def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
     expected_scratch = _scratch_path_for(output_dir, source_hour).resolve()
     if prepared.scratch_path.expanduser().resolve() != expected_scratch:
         raise ValueError("prepared scratch path is not canonical for its output directory and hour")
-    global_db = _global_db(output_dir / "gharchive-compact.sqlite3")
+    global_path = (Path(global_db_path).expanduser().resolve() if global_db_path is not None
+                   else output_dir / "gharchive-compact.sqlite3")
+    if budget_check is not None:
+        budget_check()
+    if already_committed_marker is not None:
+        if already_committed_marker["source_hour"] != source_hour:
+            raise ValueError("durable replay marker refers to another hour")
+        if already_committed_marker["sha256"] != prepared.sha256:
+            raise RuntimeError("a different hash is already committed for this UTC hour")
+        return result_from_marker(output_dir, already_committed_marker,
+                                  ledger_locator=ledger_locator)
+    global_path.parent.mkdir(parents=True, exist_ok=True)
+    global_db = _global_db(global_path)
     scratch_path = expected_scratch
     try:
-        _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+        if budget_check is None:
+            _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+        else:
+            budget_check()
         raw_path = prepared.source_path.expanduser().resolve()
         if raw_path != prepared.source_path or not raw_path.is_file():
             raise ValueError("prepared raw source path is missing or noncanonical")
@@ -697,7 +754,7 @@ def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
             if existing["sha256"] != prepared.sha256:
                 raise RuntimeError("a different hash is already committed for this UTC hour")
             report = _materialize_hour_report(output_dir, existing, source_path=str(prepared.source_path),
-                                              reconstructed=True)
+                                              reconstructed=True, ledger_locator=ledger_locator)
             if scratch_path.exists() and prepared.scratch_sha256:
                 try:
                     _validate_prepared_scratch(prepared)
@@ -707,7 +764,7 @@ def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
                     _cleanup_scratch(scratch_path)
             return {"status": "complete", "hour": source_hour, "already_committed": True,
                     "repository_observations": existing["repository_observations"], **report,
-                    "database_bytes": _db_bytes(output_dir), "wall_seconds": round(time.monotonic() - started, 3)}
+                    "database_bytes": _db_bytes(output_dir, global_path), "wall_seconds": round(time.monotonic() - started, 3)}
         if prepared.already_committed:
             raise RuntimeError("prepared receipt references a committed hour that is no longer in the ledger")
 
@@ -715,7 +772,10 @@ def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
         scratch_size = scratch_path.stat().st_size
         _ensure_free(output_dir, prepared.min_free_bytes,
                      headroom=max(DISK_HEADROOM_BYTES, scratch_size * 2))
-        _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+        if budget_check is None:
+            _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+        else:
+            budget_check()
         merge_started = time.monotonic()
         with sqlite3.connect(scratch_path) as scratch:
             scratch.row_factory = sqlite3.Row
@@ -725,7 +785,12 @@ def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
                     if index % 5000 == 0:
                         _ensure_free(output_dir, prepared.min_free_bytes,
                                      headroom=max(DISK_HEADROOM_BYTES, scratch_size * 2))
-                        _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+                        if budget_check is None:
+                            _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+                        else:
+                            budget_check()
+                if budget_check is not None:
+                    budget_check()
                 merge_seconds = round(time.monotonic() - merge_started, 3)
                 global_db.execute("""INSERT INTO hours(
                     source_hour,sha256,compressed_bytes,uncompressed_bytes,unique_events,malformed_events,
@@ -738,10 +803,10 @@ def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
         global_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         marker = global_db.execute("SELECT * FROM hours WHERE source_hour=?", (source_hour,)).fetchone()
         report = _materialize_hour_report(output_dir, marker, source_path=str(prepared.source_path),
-                                          reconstructed=False)
+                                          reconstructed=False, ledger_locator=ledger_locator)
         result = {"status": "complete", "hour": source_hour, "already_committed": False,
                   "repository_observations": parsed["repository_observations"], **report,
-                  "database_bytes": _db_bytes(output_dir), "wall_seconds": round(time.monotonic() - started, 3)}
+                  "database_bytes": _db_bytes(output_dir, global_path), "wall_seconds": round(time.monotonic() - started, 3)}
         _atomic_json(output_dir / "last-hour-report.json", result)
         _cleanup_scratch(scratch_path)
         return result
@@ -767,9 +832,10 @@ def aggregate_hour(path: Path, output_dir: Path, *, source_hour: str,
     return commit_prepared_hour(prepared)
 
 
-def _db_bytes(output_dir: Path) -> int:
-    return sum((output_dir / f"gharchive-compact.sqlite3{suffix}").stat().st_size
-               for suffix in ("", "-wal") if (output_dir / f"gharchive-compact.sqlite3{suffix}").exists())
+def _db_bytes(output_dir: Path, database_path: Path | None = None) -> int:
+    path = Path(database_path) if database_path is not None else output_dir / "gharchive-compact.sqlite3"
+    return sum(Path(f"{path}{suffix}").stat().st_size
+               for suffix in ("", "-wal") if Path(f"{path}{suffix}").exists())
 
 
 def recover_hour_report(output_dir: Path, source_hour: str, expected_sha256: str) -> dict[str, Any]:

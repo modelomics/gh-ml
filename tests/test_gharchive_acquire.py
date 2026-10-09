@@ -10,7 +10,7 @@ from pathlib import Path
 import urllib.error
 import pytest
 
-from gh_ml import gharchive_acquire as acquire
+from gh_ml import gharchive_acquire as acquire, gharchive_compact, gharchive_rollover
 
 
 class Response:
@@ -264,6 +264,7 @@ def test_default_acquisition_uses_compact_ledger(tmp_path):
         assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 1
         tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         assert "events" not in tables
+    assert not (run / "aggregate" / gharchive_rollover.CATALOG_NAME).exists()
 
 
 def test_legacy_manifest_report_repair_uses_only_compact_markers(tmp_path):
@@ -558,3 +559,116 @@ def test_deadline_bounded_prefetch_error_is_recorded_retried_and_continues(
     assert manifest["hours"]["2023-08-29T02:00:00Z"]["status"] == "deleted"
     assert manifest["contiguous_watermark"] == "2023-08-29T02:00:00Z"
     assert not list((run / "raw").iterdir())
+
+
+def test_catalog_gated_acquire_rollover_replay_recovery_and_next_hour(tmp_path):
+    from gh_ml.gharchive_segment_export import export_closed_sqlite
+
+    run = tmp_path / "run"
+    aggregate = run / "aggregate"
+    store = gharchive_rollover.open_store(aggregate)
+    bodies = {0: _event_hour(0), 1: _event_hour(1)}
+
+    def opener(request, timeout):
+        hour = int(request.full_url.rsplit("-", 1)[1].split(".", 1)[0])
+        return Response(bodies[hour])
+
+    first = acquire.catch_up(
+        run, start="2023-08-29T00:00:00Z", end="2023-08-29T01:00:00Z",
+        max_hours=1, opener=opener, min_free_bytes=0,
+        rate_limit_bytes_per_second=10**9, max_compressed_hour_bytes=1024**2,
+        max_uncompressed_hour_bytes=1024**2,
+    )
+    assert first["status"] == "running_partial"
+    before_rollover = store.active_db_path
+    segment = store.rollover(export_closed_sqlite, max_output_bytes=16 * 1024**2,
+                             min_free_bytes=0)
+    assert segment is not None
+    duplicate_raw = tmp_path / "same-hour-replay.json.gz"
+    duplicate_raw.write_bytes(bodies[0])
+    duplicate_prepared = gharchive_compact.prepare_hour(
+        duplicate_raw, aggregate, source_hour="2023-08-29T00:00:00Z",
+        expected_sha256=acquire.gharchive._file_hash(duplicate_raw), min_free_bytes=0,
+        committed_marker_lookup=store.read_marker)
+    replay = store.commit_hour(duplicate_prepared)
+    assert replay["already_committed"] is True
+    assert store.coverage_summary()["hour_count"] == 1
+
+    manifest_path = run / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    hour0 = manifest["hours"]["2023-08-29T00:00:00Z"]
+    report_path = Path(hour0["parser_report"])
+    if not report_path.is_absolute():
+        report_path = run / report_path
+    report_path.unlink()
+    stable0 = run / "raw" / "2023-08-29-00.json.gz"
+    stable0.parent.mkdir(exist_ok=True)
+    stable0.write_bytes(bodies[0])
+    hour0["status"] = "aggregated"
+    acquire._atomic_json(manifest_path, manifest)
+
+    # Model safe retired-epoch cleanup after the catalog swap. Replay and
+    # report recovery must rely on the persistent marker ledger/segment.
+    for suffix in ("", "-wal", "-shm"):
+        Path(f"{before_rollover}{suffix}").unlink(missing_ok=True)
+
+    resumed = acquire.catch_up(
+        run, start="2023-08-29T00:00:00Z", opener=opener, min_free_bytes=0,
+        rate_limit_bytes_per_second=10**9, max_compressed_hour_bytes=1024**2,
+        max_uncompressed_hour_bytes=1024**2,
+    )
+
+    assert resumed["status"] == "complete_through_fixed_end"
+    final_manifest = json.loads(manifest_path.read_text())
+    assert final_manifest["hours"]["2023-08-29T00:00:00Z"]["status"] == "deleted"
+    assert final_manifest["hours"]["2023-08-29T01:00:00Z"]["status"] == "deleted"
+    recovered_path = Path(final_manifest["hours"]["2023-08-29T00:00:00Z"]["parser_report"])
+    recovered = json.loads(recovered_path.read_text())
+    assert recovered["reconstructed_from_compact_hour_marker"] is True
+    assert recovered["ledger"] == "../gharchive-catalog.json"
+    assert final_manifest["aggregate_report"]["successfully_processed_hours"] == 2
+    assert final_manifest["aggregate_report"]["event_occurrences_within_hours"] == 2
+    assert final_manifest["aggregate_report"]["distinct_repositories"] is None
+
+
+def test_catalog_active_commit_crash_before_ledger_mirror_reconciles_once(tmp_path):
+    raw = tmp_path / "2023-08-29-00.json.gz"
+    raw.write_bytes(_event_hour(0))
+    aggregate = tmp_path / "aggregate"
+    store = gharchive_rollover.open_store(aggregate)
+    digest = acquire.gharchive._file_hash(raw)
+    scratch = gharchive_compact._scratch_path_for(aggregate, "2023-08-29T00:00:00Z")
+    prepared = gharchive_compact.prepare_hour(
+        raw, aggregate, source_hour="2023-08-29T00:00:00Z", expected_sha256=digest,
+        min_free_bytes=0, committed_marker_lookup=store.read_marker,
+        budget_check=lambda: store.ensure_budget(gharchive_compact.MAX_COMPACT_STORE_BYTES,
+                                                  scratch_path=scratch, min_free_bytes=0),
+    )
+
+    def crash_after_sqlite_commit(boundary):
+        if boundary == "after_active_commit_before_ledger_mirror":
+            raise RuntimeError("simulated crash before ledger mirror")
+
+    crashing_store = gharchive_rollover.open_store(aggregate, failpoint=crash_after_sqlite_commit)
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        crashing_store.commit_hour(prepared, budget_check=lambda: crashing_store.ensure_budget_locked(
+            gharchive_compact.MAX_COMPACT_STORE_BYTES, scratch_path=scratch, min_free_bytes=0))
+
+    with sqlite3.connect(aggregate / "gharchive-hour-ledger.sqlite3") as ledger:
+        assert ledger.execute("SELECT count(*) FROM hour_markers").fetchone()[0] == 0
+    with sqlite3.connect(store.active_db_path) as active:
+        assert active.execute("SELECT count(*) FROM hours").fetchone()[0] == 1
+        assert active.execute("SELECT event_occurrences FROM repositories WHERE id=42").fetchone()[0] == 1
+        report_path = Path(json.loads((aggregate / "last-hour-report.json").read_text())["report_path"])
+        report_hash = acquire.gharchive._file_hash(report_path)
+
+    recovered = gharchive_rollover.open_store(aggregate)
+    marker = recovered.read_marker("2023-08-29T00:00:00Z", digest)
+    assert marker is not None and marker["sha256"] == digest
+    repaired = recovered.recover_hour_report(aggregate, "2023-08-29T00:00:00Z", digest)
+    assert repaired["report_sha256"] == report_hash
+    assert acquire.gharchive._file_hash(report_path) == report_hash
+    with sqlite3.connect(aggregate / "gharchive-hour-ledger.sqlite3") as ledger:
+        assert ledger.execute("SELECT count(*) FROM hour_markers").fetchone()[0] == 1
+    with sqlite3.connect(recovered.active_db_path) as active:
+        assert active.execute("SELECT event_occurrences FROM repositories WHERE id=42").fetchone()[0] == 1

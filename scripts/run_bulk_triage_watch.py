@@ -259,7 +259,14 @@ def run_iteration(config: Mapping[str, Any], *, now: datetime | None = None,
             "reason": (
                 "import_failed_after_committed_shards_drained" if state_name == "source_failed"
                 else "import_failed_committed_shards_are_still_being_triaged" if state_name == "draining_source_failure"
-                else "all_committed_shards_processed_but_source_is_not_validated_complete" if state_name == "running"
+                else (
+                    f"triage_batch_limit_reached; {triage_pending} shards remain untriaged "
+                    "in the pinned source snapshot"
+                    if triage is not None and triage.get("status") == "shard_batch_limit_reached"
+                    else f"{triage_pending} shards remain untriaged in the pinned source snapshot"
+                    if triage_pending > 0
+                    else "all committed shards in the pinned source snapshot are processed; waiting for source completion"
+                ) if state_name == "running"
                 else None
             ),
         }
@@ -289,9 +296,10 @@ def run_iteration(config: Mapping[str, Any], *, now: datetime | None = None,
 
 
 def _save_state(state_path: Path, log_path: Path, state: dict[str, Any]) -> dict[str, Any]:
-    atomic_json(state_path, state)
-    _append_event(log_path, state)
-    return state
+    persisted = {**state, "updated_at": utc_now()}
+    atomic_json(state_path, persisted)
+    _append_event(log_path, persisted)
+    return persisted
 
 
 def watch(config: Mapping[str, Any]) -> int:

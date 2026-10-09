@@ -27,11 +27,13 @@ third-party contents fall within that grant.
 ## Scoped licensing decision for the local bundle
 
 The checked public statements do not support one blanket license for the
-combined registry today. Keep the dataset card’s `license: other` field as an
-explicit unresolved placeholder and state that no combined data license is
-being asserted. `other` is a Hub metadata value, not a license text or a grant
-of permission; do not present it as one. The source-attribution artifact must
-carry the scope distinctions in [source-attribution.md](source-attribution.md).
+combined registry. Keep the dataset card’s `license: other` field and explain
+that it denotes mixed, source-specific terms with no blanket license asserted
+for the combined data. `other` is a Hub metadata value, not a license text or a
+grant of permission. This wording describes the local review bundle; it does
+not decide whether or how to distribute it externally. The source-attribution
+artifact must carry the scope distinctions in
+[source-attribution.md](source-attribution.md).
 
 This leaves room for narrow, source-specific statements without converting
 them into a compilation-wide grant:
@@ -64,12 +66,15 @@ questions for every field. No blanket expert or legal clearance is claimed.
 ## Generator-facing rule
 
 The existing local release generator writes `README.md`, `schema.json`, and
-`source-attribution.json` from the verified bundle receipt. Its current
-`source-statements` list is a policy summary, not a rights engine: it contains
-standard source descriptions even when a given bundle may not include every
-source, and fingerprints alone do not prove a source’s inclusion or license
-scope. The generated card correctly keeps the rights gate unresolved; preserve
-that behavior unless source-specific evidence changes.
+`source-attribution.json` from the verified bundle receipt. Its
+`source_statements` are emitted only for source labels included in verified
+fingerprints, using explicit semantic bindings where available and exact
+canonical keys otherwise. Unknown or baseline labels receive generic
+provenance statements rather than guessed license terms. The current
+ecosyste.ms service footer is nested as contextual terms information on the
+dated snapshot record; it is not a separate included-source entry or a
+substitute license statement. The generated card keeps the rights gate
+unresolved; preserve that behavior unless source-specific evidence changes.
 
 For each source actually present in a bundle, the machine-readable
 `source-attribution.json` should let a downstream reader determine:

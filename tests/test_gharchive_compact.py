@@ -205,6 +205,58 @@ def test_uncompressed_hour_limit_is_enforced_before_unbounded_line_read(tmp_path
     assert_empty_or_absent_ledger(out)
 
 
+def test_prepare_uses_catalog_marker_lookup_without_opening_legacy_database(tmp_path):
+    path = archive(tmp_path / "2023-08-29-00.json.gz", event("e1", "2023-08-29T00:20:00Z", "first"))
+    out = tmp_path / "aggregate"
+    digest = gharchive._file_hash(path)
+    marker = {"source_hour": "2023-08-29T00:00:00Z", "sha256": digest,
+              "compressed_bytes": path.stat().st_size, "uncompressed_bytes": 123,
+              "unique_events": 1, "malformed_events": 0, "repository_observations": 1,
+              "committed_at": "2023-08-29T01:00:00+00:00", "parse_seconds": 1.25,
+              "merge_seconds": 0.5}
+    calls = []
+
+    prepared = gharchive_compact.prepare_hour(
+        path, out, source_hour=marker["source_hour"], global_db_path=out / "missing-active.sqlite3",
+        committed_marker_lookup=lambda hour, expected: calls.append((hour, expected)) or marker,
+        min_free_bytes=0)
+
+    assert prepared.already_committed is True
+    assert prepared.uncompressed_bytes == 123
+    assert calls == [(marker["source_hour"], digest)]
+    assert not out.exists()
+
+
+def test_commit_supports_catalog_selected_db_and_preserves_existing_report_bytes(tmp_path):
+    path = archive(tmp_path / "2023-08-29-00.json.gz", event("e1", "2023-08-29T00:20:00Z", "first"))
+    out = tmp_path / "aggregate"
+    active = out / "epochs" / "epoch-00000003" / "gharchive-compact.sqlite3"
+    prepared = gharchive_compact.prepare_hour(path, out, source_hour="2023-08-29T00:00:00Z",
+                                               min_free_bytes=0)
+    budget_checks = []
+    committed = gharchive_compact.commit_prepared_hour(
+        prepared, global_db_path=active,
+        budget_check=lambda: budget_checks.append(True),
+        ledger_locator="../gharchive-catalog.json")
+    report_path = Path(committed["report_path"])
+    original_bytes = report_path.read_bytes()
+    original_hash = gharchive._file_hash(report_path)
+
+    replay = gharchive_compact.commit_prepared_hour(
+        prepared, global_db_path=active, budget_check=lambda: budget_checks.append(True),
+        ledger_locator="../new-logical-ledger.json")
+
+    assert replay["already_committed"] is True
+    assert replay["report_path"] == str(report_path)
+    assert replay["report_sha256"] == original_hash
+    assert report_path.read_bytes() == original_bytes
+    assert json.loads(original_bytes)["ledger"] == "../gharchive-catalog.json"
+    assert budget_checks
+    with sqlite3.connect(active) as db:
+        assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 1
+        assert db.execute("SELECT event_occurrences FROM repositories WHERE id=42").fetchone()[0] == 1
+
+
 def test_repository_ids_are_checked_against_sqlite_integer_range(tmp_path):
     too_large = 2**63
     path = archive(tmp_path / "2023-08-29-00.json.gz",

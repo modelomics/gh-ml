@@ -98,6 +98,45 @@ def test_generate_metadata_uses_receipts_and_keeps_rights_and_scope_limits_expli
     assert schema["verified_gates"]["full_corpus_audit_passed"] is False
     assert schema["evidence_attachment"]["status"] == "missing"
     assert schema["corpus_audit"]["status"] == "missing"
+    assert card.startswith("---\npretty_name: GitHub ML\nlicense: other\n---\n")
+    assert "mixed, source-specific terms" in card
+    assert "no blanket license is asserted" in card
+
+
+def test_baseline_only_card_attributes_only_the_included_baseline(tmp_path):
+    manifest = _bundle(tmp_path)
+    manifest["source_fingerprints"] = {"baseline": "sha256:baseline-fixture"}
+    _json(tmp_path / "manifest.json", manifest)
+
+    generate_release_metadata(tmp_path)
+    card = (tmp_path / "README.md").read_text()
+    attribution = json.loads((tmp_path / "source-attribution.json").read_text())
+    statements = attribution["source_statements"]
+
+    assert [item["source_labels"] for item in statements] == [["baseline"]]
+    assert statements[0]["status"] == "included"
+    assert statements[0]["source_fingerprints"] == {"baseline": "sha256:baseline-fixture"}
+    assert "ecosyste.ms 2023-08-30" not in card
+    assert "current ecosyste.ms Repos service" not in card
+    assert "GH Archive" not in card
+    assert "Papers with Code" not in card
+
+
+def test_bulk_attribution_preserves_dated_and_current_ecosystems_scopes(tmp_path):
+    manifest = _bundle(tmp_path)
+    manifest["source_fingerprints"] = {"bulk_ecosystems_2023_08_30": "sha256:bulk-fixture"}
+    _json(tmp_path / "manifest.json", manifest)
+
+    generate_release_metadata(tmp_path)
+    statements = json.loads((tmp_path / "source-attribution.json").read_text())["source_statements"]
+
+    assert [item["source"] for item in statements] == [
+        "ecosyste.ms 2023-08-30 repository snapshot",
+    ]
+    assert statements[0]["status"] == "included"
+    assert "CC-BY without a version" in statements[0]["terms"]
+    assert "CC BY-SA 4.0" in statements[0]["terms_context"]["statement"]
+    assert "not the license statement" in statements[0]["terms_context"]["scope"]
 
 
 @pytest.mark.parametrize("corruption", ["missing_view", "incomplete_gate", "contradictory_count", "tampered_shard", "contradictory_statuses", "contradictory_eligible"])

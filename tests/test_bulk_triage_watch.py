@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 
+from scripts import run_bulk_triage_watch
 from scripts.run_bulk_triage_watch import freeze_sources, run_iteration
 
 
@@ -172,3 +173,73 @@ def test_watcher_persists_per_shard_progress_during_runner_batch(tmp_path):
     assert result["triaged_shards"] == 1
     assert result["triaged_rows"] == 100
     assert result["progress_source_snapshot"]["committed_rows"] == 300
+
+
+def test_batch_limit_reports_remaining_pinned_shards_and_actual_status_write_time(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    processing_started = datetime(2026, 10, 9, 17, 39, 0, tzinfo=UTC)
+    written_at = "2026-10-09T18:32:00Z"
+    monkeypatch.setattr(run_bulk_triage_watch, "utc_now", lambda: written_at)
+    source_snapshot = {
+        "captured_at_unix": 1791567545.0,
+        "source_fingerprint": "sha256:source-snapshot",
+        "source_state_sha256": "a" * 64,
+        "committed_shards": 500,
+        "committed_rows": 50_000_000,
+        "source_complete": False,
+    }
+    triage_progress = {
+        "updated_at_unix": 1791570706.0,
+        "committed_shards": 48,
+        "committed_rows": 4_800_000,
+        "pending_shards": 452,
+        "pending_count_basis": "source_snapshot",
+        "output_bytes": 2_500_000_000,
+        "output_budget_bytes": 32 * 1024**3,
+        "routing_counts": {"candidate": 100, "review": 200, "deferred": 300, "unknown": 400},
+        "routing_counts_complete": True,
+        "complete": False,
+    }
+    api = _RunnerAPI(
+        _source(shards=500),
+        {"status": "shard_batch_limit_reached", "pending_shards": 452,
+         "triage_complete": False,
+         "progress_snapshot": {"source_snapshot": source_snapshot,
+                               "triage_progress": triage_progress}},
+    )
+
+    state = run_iteration(config, api=api, now=processing_started)
+
+    assert state["updated_at"] == written_at
+    assert state["state"] == "running"
+    assert state["source_complete"] is False
+    assert state["triage_pending_shards"] == 452
+    assert state["triage_pending_count_basis"] == "progress_source_snapshot"
+    assert state["triage_result"]["status"] == "shard_batch_limit_reached"
+    assert state["triage_result"]["pending_shards"] == 452
+    assert "batch_limit_reached" in state["reason"]
+    assert "452" in state["reason"]
+    assert state["progress_source_snapshot"]["captured_at_unix"] == 1791567545.0
+    assert state["triage_progress_updated_at_unix"] == 1791570706.0
+
+
+def test_all_current_shards_processed_waits_for_source_completion(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    monkeypatch.setattr(run_bulk_triage_watch, "utc_now", lambda: "2026-10-09T18:33:00Z")
+    api = _RunnerAPI(
+        _source(shards=3),
+        {"status": "source_pending", "pending_shards": 0, "triage_complete": False},
+    )
+
+    state = run_iteration(
+        config, api=api, now=datetime(2026, 10, 9, 17, 39, tzinfo=UTC),
+    )
+
+    assert state["updated_at"] == "2026-10-09T18:33:00Z"
+    assert state["state"] == "running"
+    assert state["source_complete"] is False
+    assert state["triage_pending_shards"] == 0
+    assert state["reason"] == (
+        "all committed shards in the pinned source snapshot are processed; "
+        "waiting for source completion"
+    )

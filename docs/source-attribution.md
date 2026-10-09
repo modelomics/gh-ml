@@ -16,11 +16,14 @@ other sources, that attribution alone grants redistribution rights, or that a
 source fingerprint proves inclusion or permission.
 
 Keep `license: other` and the generated **rights gate: unresolved** while the
-combined dataset scope has no supported license statement. The metadata value
-`other` is a placeholder, not a custom license. A later, narrower license
-statement for maintainers’ original selection/arrangement or documentation
-must clearly exclude material governed by third-party terms and must not be
-rendered as a license for the entire data bundle.
+combined dataset has mixed source-specific terms and no supported blanket
+license. On the card, explain that `other` describes this mixed scope; it is a
+metadata value, not a custom license or grant of permission. This is the
+labeling for a local review bundle, not an external distribution decision. A
+later, narrower license statement for maintainers’ original
+selection/arrangement or documentation must clearly exclude material governed
+by third-party terms and must not be rendered as a license for the entire data
+bundle.
 
 ## Source-by-source record
 
@@ -58,24 +61,15 @@ or the fact that the source is publicly accessible.
 
 ## Current generator interface
 
-[`publication_metadata.py`](../src/gh_ml/publication_metadata.py) currently
-generates three local files: `README.md`, `schema.json`, and
-`source-attribution.json`. The generated attribution object contains
-`source_fingerprints`, `source_terms_policy`, a `source_statements` list with
-`source`, `terms`, `url` or `source_reference`, and `scope`, plus
-`applicability`, `rights_gate`, and `limitations`. The README links the JSON
-file and explicitly says source inclusion must be confirmed against retained
-manifests. Preserve those safeguards.
-
-The generator currently emits a fixed source-statement list, even when a
-particular bundle may not include all listed sources. Treat those entries as
-the project’s reference policy, not as bundle-specific inclusion evidence.
-`source_fingerprints` are copied from a verified receipt, but the current
-generated artifact does not map every fingerprint to a source-specific set of
-output fields or artifacts. A bundle reviewer must use retained manifests to
-confirm source inclusion. The table above gives the human-readable mapping to
-apply; a future format can make each row an explicit structured record using
-the required fields above.
+[`publication_metadata.py`](../src/gh_ml/publication_metadata.py) generates
+three local files: `README.md`, `schema.json`, and
+`source-attribution.json`. The attribution object binds source statements to
+included verified source labels and fingerprints. It uses exact semantic
+source bindings where available and exact canonical source keys otherwise;
+unknown or baseline labels receive a generic provenance statement rather than
+being guessed into a source category. README-text attribution is included
+only when the retained schema identifies README fields. A statement does not
+establish redistribution permission.
 
 Keep public-facing output sanitized: include logical source names, source
 URLs, source hashes, repository-relative paths, and public dates/revisions.

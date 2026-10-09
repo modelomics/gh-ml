@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from . import gharchive, gharchive_compact
+from . import gharchive, gharchive_compact, gharchive_rollover
 
 BASE_URL = "https://data.gharchive.org"
 START_DEFAULT = "2023-08-29T00:00:00Z"
@@ -328,6 +328,28 @@ def catch_up(
     raw_dir, aggregate_dir = run_dir / "raw", run_dir / "aggregate"
     raw_dir.mkdir(exist_ok=True)
     aggregate_dir.mkdir(exist_ok=True)
+    # A catalog is an explicit opt-in to segmented-store semantics. Never
+    # bootstrap or migrate a legacy aggregate here; the absent-catalog path
+    # retains its original single-database behavior.
+    catalog_path = aggregate_dir / gharchive_rollover.CATALOG_NAME
+    rollover_store = (gharchive_rollover.open_store(aggregate_dir)
+                      if compact_mode and catalog_path.exists() else None)
+
+    def catalog_budget_check(scratch_path: Path, *, transaction_headroom: int = 0,
+                             required_free_bytes: int | None = None,
+                             lock_held: bool = False) -> Callable[[], None] | None:
+        if rollover_store is None:
+            return None
+        def check() -> None:
+            ensure = (rollover_store.ensure_budget_locked if lock_held
+                      else rollover_store.ensure_budget)
+            ensure(
+                max_compact_store_bytes, scratch_path=scratch_path,
+                transaction_headroom=transaction_headroom,
+                min_free_bytes=(min_free_bytes if required_free_bytes is None else required_free_bytes),
+            )
+        return check
+
     _advance_watermark(data)
     scanned_before = _hour(data["scanned_through"]) if data.get("scanned_through") else start_dt - timedelta(hours=1)
     cursor = scanned_before + timedelta(hours=1)
@@ -445,7 +467,12 @@ def catch_up(
             else:
                 if not _manifest_report_valid(run_dir, record, key, actual) and compact_mode:
                     try:
-                        report = gharchive_compact.recover_hour_report(aggregate_dir, key, actual)
+                        report = (rollover_store.recover_hour_report(
+                                      aggregate_dir, key, actual,
+                                      max_store_bytes=max_compact_store_bytes,
+                                      min_free_bytes=min_free_bytes)
+                                  if rollover_store is not None else
+                                  gharchive_compact.recover_hour_report(aggregate_dir, key, actual))
                         record.update(parser_complete=True, parser_report=report["report_path"],
                                       parser_report_sha256=report["report_sha256"],
                                       parser_report_kind="reconstructed_from_compact_hour_marker",
@@ -457,7 +484,8 @@ def catch_up(
                                                         "reconstructed_from": "aggregate/gharchive-compact.sqlite3:hours",
                                                         "source_path_status": report["source_path_status"],
                                                         "at": datetime.now(timezone.utc).isoformat()})
-                    except (KeyError, ValueError, OSError, sqlite3.Error):
+                    except (KeyError, ValueError, OSError, sqlite3.Error,
+                            gharchive_rollover.RolloverError):
                         record["status"] = "verified"
                     _atomic_json(manifest_path, data)
                 if not _manifest_report_valid(run_dir, record, key, actual):
@@ -545,15 +573,39 @@ def catch_up(
                         schedule_prefetch(next_hour)
                     reservation = (max_compressed_hour_bytes
                                    if pending_prefetch is not None and not pending_prefetch[1].done() else 0)
-                    prepared = gharchive_compact.prepare_hour(
-                        stable, aggregate_dir, source_hour=key, expected_sha256=digest,
-                        max_compressed_bytes=max_compressed_hour_bytes,
-                        max_uncompressed_bytes=max_uncompressed_hour_bytes,
-                        max_events=max_events_per_hour,
-                        max_event_line_bytes=max_event_line_bytes,
-                        max_store_bytes=max_compact_store_bytes,
-                        min_free_bytes=min_free_bytes + reservation)
-                    report = gharchive_compact.commit_prepared_hour(prepared)
+                    if rollover_store is None:
+                        prepared = gharchive_compact.prepare_hour(
+                            stable, aggregate_dir, source_hour=key, expected_sha256=digest,
+                            max_compressed_bytes=max_compressed_hour_bytes,
+                            max_uncompressed_bytes=max_uncompressed_hour_bytes,
+                            max_events=max_events_per_hour,
+                            max_event_line_bytes=max_event_line_bytes,
+                            max_store_bytes=max_compact_store_bytes,
+                            min_free_bytes=min_free_bytes + reservation)
+                        report = gharchive_compact.commit_prepared_hour(prepared)
+                    else:
+                        scratch_path = gharchive_compact._scratch_path_for(aggregate_dir, key)
+                        prepared = gharchive_compact.prepare_hour(
+                            stable, aggregate_dir, source_hour=key, expected_sha256=digest,
+                            max_compressed_bytes=max_compressed_hour_bytes,
+                            max_uncompressed_bytes=max_uncompressed_hour_bytes,
+                            max_events=max_events_per_hour,
+                            max_event_line_bytes=max_event_line_bytes,
+                            max_store_bytes=max_compact_store_bytes,
+                            min_free_bytes=min_free_bytes + reservation,
+                            committed_marker_lookup=rollover_store.read_marker,
+                            budget_check=catalog_budget_check(scratch_path,
+                                                              transaction_headroom=3 * (8 * 1024**2 + max_event_line_bytes),
+                                                              required_free_bytes=min_free_bytes + reservation))
+                        report = rollover_store.commit_hour(
+                            prepared, budget_check=catalog_budget_check(
+                                prepared.scratch_path, transaction_headroom=0,
+                                required_free_bytes=min_free_bytes + reservation,
+                                lock_held=True),
+                            replay_budget_check=catalog_budget_check(
+                                prepared.scratch_path, transaction_headroom=0,
+                                required_free_bytes=min_free_bytes,
+                                lock_held=True))
                     input_match = report if report.get("hour") == key and report.get("sha256") == digest else None
                 elif aggregate_fn is gharchive.aggregate_archives:
                     report = aggregate_fn([stable], aggregate_dir, export=False)
@@ -666,10 +718,28 @@ def catch_up(
     unresolved = any(hour.get("status") != "deleted" for hour in data["hours"].values())
     data["status"] = "complete_through_fixed_end" if not unresolved else "complete_with_gaps"
     if compact_mode:
-        final_report = gharchive_compact.finalize(aggregate_dir, status=data["status"],
-                                                  start=data["start"], end=data["end"],
-                                                  contiguous_watermark=data["contiguous_watermark"],
-                                                  scanned_through=data["scanned_through"])
+        if rollover_store is None:
+            final_report = gharchive_compact.finalize(aggregate_dir, status=data["status"],
+                                                      start=data["start"], end=data["end"],
+                                                      contiguous_watermark=data["contiguous_watermark"],
+                                                      scanned_through=data["scanned_through"])
+        else:
+            coverage = rollover_store.coverage_summary()
+            final_report = {
+                "status": data["status"], "start": data["start"], "end": data["end"],
+                "contiguous_watermark": data["contiguous_watermark"],
+                "scanned_through": data["scanned_through"],
+                "successfully_processed_hours": coverage["hour_count"],
+                "event_occurrences_within_hours": coverage["unique_events"],
+                "malformed_events": coverage["malformed_events"],
+                "distinct_repositories": None,
+                "distinct_repositories_status": "not_computed_requires_verified_full_snapshot",
+                "metadata_availability": None,
+                "ledger": str(rollover_store.catalog_path),
+                "ledger_bytes": rollover_store.used_bytes(),
+                "coverage_note": "Event counts deduplicate IDs within each UTC hour; IDs are not retained globally.",
+            }
+            gharchive_compact._atomic_json(aggregate_dir / "report.json", final_report)
         data["aggregate_report"] = final_report
     elif aggregate_fn is gharchive.aggregate_archives:
         final_report = gharchive.export_registry(aggregate_dir, report_context={
@@ -696,16 +766,26 @@ def _summary(data: dict[str, Any], run_dir: Path) -> dict[str, Any]:
             "aggregate_dir": str(run_dir / "aggregate")}
 
 
-def repair_manifest_parser_reports(run_dir: Path) -> dict[str, Any]:
-    """Repair missing per-hour report locators from compact SQLite hour markers.
+def repair_manifest_parser_reports(
+    run_dir: Path, *,
+    max_compact_store_bytes: int = gharchive_compact.MAX_COMPACT_STORE_BYTES,
+    min_free_bytes: int = 0,
+) -> dict[str, Any]:
+    """Repair missing per-hour reports from compact or catalog hour markers.
 
-    This reads only the manifest's committed hours and corresponding SQLite marker
-    rows. It never downloads or parses raw hours; missing source paths stay unknown.
+    This reads only the manifest's committed hours and corresponding durable
+    markers. It never downloads or parses raw hours; missing source paths stay unknown.
     """
+    if max_compact_store_bytes < 1 or min_free_bytes < 0:
+        raise ValueError("compact store cap must be positive and free-space floor nonnegative")
     run_dir = Path(run_dir).expanduser().resolve()
     manifest_path = run_dir / "manifest.json"
     receipts_path = run_dir / "receipts.jsonl"
     data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    aggregate_dir = run_dir / "aggregate"
+    catalog_path = aggregate_dir / gharchive_rollover.CATALOG_NAME
+    rollover_store = (gharchive_rollover.open_store(aggregate_dir)
+                      if catalog_path.exists() else None)
     repaired, unavailable = [], []
     for hour, record in sorted(data.get("hours", {}).items()):
         if record.get("status") not in ("aggregated", "deleted"):
@@ -718,9 +798,13 @@ def repair_manifest_parser_reports(run_dir: Path) -> dict[str, Any]:
             if gharchive._file_hash(report_path) == expected_report_hash:
                 continue
         try:
-            report = gharchive_compact.recover_hour_report(
-                run_dir / "aggregate", hour, record.get("sha256", ""))
-        except (KeyError, ValueError, OSError, sqlite3.Error) as exc:
+            report = (rollover_store.recover_hour_report(
+                          aggregate_dir, hour, record.get("sha256", ""),
+                          max_store_bytes=max_compact_store_bytes,
+                          min_free_bytes=min_free_bytes)
+                      if rollover_store is not None else
+                      gharchive_compact.recover_hour_report(aggregate_dir, hour, record.get("sha256", "")))
+        except (KeyError, ValueError, OSError, sqlite3.Error, gharchive_rollover.RolloverError) as exc:
             record["parser_report_recovery_error"] = f"{type(exc).__name__}: {exc}"
             unavailable.append(hour)
             _atomic_json(manifest_path, data)
@@ -734,7 +818,9 @@ def repair_manifest_parser_reports(run_dir: Path) -> dict[str, Any]:
         receipt = {"hour": hour, "status": "parser_report_recovered",
                    "sha256": record.get("sha256"), "parser_report": report["report_path"],
                    "parser_report_sha256": report["report_sha256"],
-                   "reconstructed_from": "aggregate/gharchive-compact.sqlite3:hours",
+                   "reconstructed_from": ("aggregate/gharchive-catalog.json:hour-markers"
+                                          if rollover_store is not None else
+                                          "aggregate/gharchive-compact.sqlite3:hours"),
                    "source_path": report.get("source_path"),
                    "source_path_status": report.get("source_path_status"),
                    "unique_events_within_hour": report["unique_events"],
@@ -771,6 +857,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-events-per-hour", type=int, default=gharchive_compact.MAX_EVENTS_PER_HOUR)
     parser.add_argument("--max-event-line-bytes", type=int, default=gharchive_compact.MAX_EVENT_LINE_BYTES)
     parser.add_argument("--max-compact-store-bytes", type=int, default=gharchive_compact.MAX_COMPACT_STORE_BYTES)
+    parser.add_argument("--min-free-bytes", type=int, default=300 * 1024**3,
+                        help="required free archive space floor")
     args = parser.parse_args(argv)
     try:
         run_dir = args.run_dir.expanduser().resolve()
@@ -778,7 +866,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not run_dir.is_relative_to(archive_runs) or run_dir == archive_runs:
             raise ValueError("--run-dir must be a named child directory of /mnt/archive/runs")
         if args.repair_reports_only:
-            report = repair_manifest_parser_reports(run_dir)
+            report = repair_manifest_parser_reports(
+                run_dir, max_compact_store_bytes=args.max_compact_store_bytes,
+                min_free_bytes=args.min_free_bytes)
             print(json.dumps(report, ensure_ascii=False, indent=2))
             return 0 if report["status"] == "complete" else 1
         report = catch_up(args.run_dir, start=args.start, end=args.end,
@@ -789,7 +879,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                           max_uncompressed_hour_bytes=args.max_uncompressed_hour_bytes,
                           max_events_per_hour=args.max_events_per_hour,
                           max_event_line_bytes=args.max_event_line_bytes,
-                          max_compact_store_bytes=args.max_compact_store_bytes)
+                          max_compact_store_bytes=args.max_compact_store_bytes,
+                          min_free_bytes=args.min_free_bytes)
     except Exception as exc:
         print(f"gharchive-acquire: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

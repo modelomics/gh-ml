@@ -101,6 +101,12 @@ def _valid_hash(value: Any, context: str) -> str:
     return value
 
 
+def _database_bytes(path: Path) -> int:
+    return sum(candidate.stat().st_size for candidate in (
+        path, Path(f"{path}-wal"), Path(f"{path}-shm"), Path(f"{path}-journal"),
+    ) if candidate.is_file())
+
+
 def _hour(value: Any) -> str:
     try:
         return gharchive_segments._hour(value)
@@ -129,6 +135,22 @@ def _open_ledger(path: Path) -> sqlite3.Connection:
         db.close()
         raise RolloverError("persistent hour-ledger marker schema mismatch")
     db.execute("PRAGMA user_version=1")
+    return db
+
+
+def _read_ledger(path: Path) -> sqlite3.Connection:
+    if not path.is_file() or path.is_symlink():
+        raise RolloverError(f"persistent hour ledger is missing or unsafe: {path}")
+    db = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
+    db.row_factory = sqlite3.Row
+    try:
+        version = db.execute("PRAGMA user_version").fetchone()[0]
+        columns = {row[1] for row in db.execute("PRAGMA table_info(hour_markers)")}
+        if version != 1 or columns != set(MARKER_COLUMNS):
+            raise RolloverError("persistent hour-ledger schema mismatch")
+    except BaseException:
+        db.close()
+        raise
     return db
 
 
@@ -214,6 +236,9 @@ class RolloverStore:
     _segments_cache_generation: int | None = None
     _segments_cache_catalog_identity: tuple[int, int, int, int] | None = None
     _segments_cache: tuple[list[gharchive_segments.Segment], dict[str, str]] | None = None
+    _budget_cache_catalog_identity: tuple[int, int, int, int] | None = None
+    _budget_static_files: dict[Path, int] | None = None
+    _budget_report_files: dict[Path, int] | None = None
 
     @property
     def catalog_path(self) -> Path:
@@ -234,9 +259,254 @@ class RolloverStore:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    @contextmanager
+    def writer(self) -> Iterator["RolloverStore"]:
+        """Hold the exclusive store writer lock for a multi-step read/export."""
+        with self._locked():
+            yield self
+
+    def active_db_path_locked(self) -> Path:
+        """Return the active DB path while the caller holds :meth:`writer`."""
+        return _safe_relative(self.root, self._catalog()["active_db"], "active database path")
+
     def _trip(self, boundary: str) -> None:
         if self.failpoint is not None:
             self.failpoint(boundary)
+
+    def _ledger_marker_locked(self, source_hour: str) -> dict[str, Any] | None:
+        db = _read_ledger(self.ledger_path)
+        try:
+            row = db.execute(f"SELECT {','.join(MARKER_COLUMNS)} FROM hour_markers WHERE source_hour=?",
+                             (source_hour,)).fetchone()
+            return dict(row) if row is not None else None
+        finally:
+            db.close()
+
+    def _mirror_marker_locked(self, marker: Mapping[str, Any]) -> None:
+        hour = _hour(marker.get("source_hour"))
+        _valid_hash(marker.get("sha256"), hour)
+        db = _open_ledger(self.ledger_path)
+        try:
+            with db:
+                existing = db.execute(f"SELECT {','.join(MARKER_COLUMNS)} FROM hour_markers WHERE source_hour=?",
+                                      (hour,)).fetchone()
+                expected = {column: marker[column] for column in MARKER_COLUMNS}
+                if existing is not None and dict(existing) != expected:
+                    raise RolloverError(f"persistent marker conflicts with committed active marker for {hour}")
+                if existing is None:
+                    db.execute(f"INSERT INTO hour_markers ({','.join(MARKER_COLUMNS)}) VALUES ({','.join('?' for _ in MARKER_COLUMNS)})",
+                               tuple(expected[column] for column in MARKER_COLUMNS))
+            db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            db.close()
+        fd = os.open(self.ledger_path, os.O_RDONLY)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        _fsync_dir(self.root)
+
+    def _marker_proof_locked(self, catalog: Mapping[str, Any], hour: str) -> tuple[dict[str, Any] | None, str | None]:
+        self._validated_segments(catalog)
+        segment = self._segment_record_for_hour(catalog, hour)
+        segment_hash = segment["covered_hours"][hour] if segment else None
+        active_path = _safe_relative(self.root, catalog["active_db"], "active database path")
+        active = _read_db_marker(active_path, hour)
+        if active is not None and segment_hash is not None:
+            raise RolloverError(f"hour is present in active database and segment: {hour}")
+        return active, segment_hash
+
+    def _used_bytes_locked(self, scratch_path: Path | None = None) -> int:
+        if scratch_path is not None:
+            scratch = Path(scratch_path).resolve(strict=False)
+            if not scratch.is_relative_to(self.root.resolve()):
+                raise RolloverError("scratch path escapes the rollover store")
+        catalog = self._catalog()
+        if (self._budget_static_files is None or self._budget_report_files is None
+                or self._budget_cache_catalog_identity != self._catalog_cache_identity):
+            self._refresh_budget_cache_locked(catalog)
+        assert self._budget_static_files is not None and self._budget_report_files is not None
+        total = sum(self._budget_static_files.values()) + sum(self._budget_report_files.values())
+        dynamic = [self.ledger_path, self.root / "last-hour-report.json",
+                   _safe_relative(self.root, catalog["active_db"], "active database path")]
+        for base in (self.ledger_path, _safe_relative(self.root, catalog["active_db"], "active database path")):
+            dynamic.extend(Path(f"{base}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
+        if scratch_path is not None:
+            dynamic.extend((scratch_path, gharchive_compact._scratch_receipt_path(scratch_path)))
+            dynamic.extend(Path(f"{scratch_path}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
+        for path in dynamic:
+            cached = self._budget_static_files.get(path, 0)
+            total -= cached
+            if path.is_symlink():
+                raise RolloverError(f"symlink in rollover store budget check: {path}")
+            if path.is_file():
+                total += path.stat().st_size
+        return total
+
+    def _refresh_budget_cache_locked(self, catalog: Mapping[str, Any]) -> None:
+        active = _safe_relative(self.root, catalog["active_db"], "active database path")
+        dynamic = {self.ledger_path, self.root / "last-hour-report.json", active}
+        for base in (self.ledger_path, active):
+            dynamic.update(Path(f"{base}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
+        static_files: dict[Path, int] = {}
+        report_files: dict[Path, int] = {}
+        reports_root = self.root / "hour-reports"
+        for directory, child_dirs, filenames in os.walk(self.root, followlinks=False):
+            base = Path(directory)
+            for child in list(child_dirs):
+                child_path = base / child
+                if child_path.is_symlink():
+                    raise RolloverError(f"symlink in rollover store budget walk: {child_path}")
+            for filename in filenames:
+                path = base / filename
+                if path.is_symlink():
+                    raise RolloverError(f"symlink in rollover store budget walk: {path}")
+                if path in dynamic or not path.is_file():
+                    continue
+                if path.is_relative_to(reports_root):
+                    report_files[path] = path.stat().st_size
+                else:
+                    static_files[path] = path.stat().st_size
+        self._budget_static_files = static_files
+        self._budget_report_files = report_files
+        self._budget_cache_catalog_identity = self._catalog_cache_identity
+
+    def _record_report_locked(self, report: Mapping[str, Any]) -> None:
+        path_value = report.get("report_path")
+        if not isinstance(path_value, str):
+            return
+        path = Path(path_value).resolve(strict=False)
+        reports_root = (self.root / "hour-reports").resolve()
+        if not path.is_relative_to(reports_root) or not path.is_file():
+            return
+        if self._budget_report_files is not None:
+            self._budget_report_files[path] = path.stat().st_size
+
+    def _drop_cached_scratch_locked(self, scratch_path: Path) -> None:
+        if self._budget_static_files is None:
+            return
+        for path in (scratch_path, gharchive_compact._scratch_receipt_path(scratch_path),
+                     *(Path(f"{scratch_path}{suffix}") for suffix in ("-wal", "-shm", "-journal"))):
+            self._budget_static_files.pop(path, None)
+
+    def _cleanup_replay_scratch_locked(self, prepared: Any) -> None:
+        """Remove only a scratch DB that still matches its prepared receipt."""
+        scratch_path = Path(prepared.scratch_path)
+        if not scratch_path.exists() or not prepared.scratch_sha256:
+            return
+        try:
+            gharchive_compact._validate_prepared_scratch(prepared)
+        except (OSError, sqlite3.Error, ValueError):
+            return
+        gharchive_compact._cleanup_scratch(scratch_path)
+        self._drop_cached_scratch_locked(scratch_path)
+
+    def _replay_report_bytes_needed(self, marker: Mapping[str, Any]) -> int:
+        """Return exact JSON bytes that marker replay would need to publish."""
+        hour = marker["source_hour"]
+        tag = hour.replace(":", "").replace("-", "")
+        base_path = self.root / "hour-reports" / f"{tag}-{marker['sha256'][:16]}-compact-v1.json"
+        ledger_locator = "../" + CATALOG_NAME
+        report: dict[str, Any] = {
+            "schema_version": 1,
+            "parser": "gh_ml.gharchive_compact",
+            "result": "complete",
+            "source_hour": hour,
+            "sha256": marker["sha256"],
+            "source_path": None,
+            "source_path_status": "not_recorded_in_hour_marker",
+            "reconstructed_from_compact_hour_marker": True,
+            "compressed_bytes": marker["compressed_bytes"],
+            "uncompressed_bytes": marker["uncompressed_bytes"],
+            "unique_events_within_hour": marker["unique_events"],
+            "malformed_events": marker["malformed_events"],
+            "repository_observations": marker["repository_observations"],
+            "committed_at": marker["committed_at"],
+            "ledger": ledger_locator,
+        }
+        if marker["parse_seconds"] is not None:
+            report["parse_wall_seconds"] = marker["parse_seconds"]
+        if marker["merge_seconds"] is not None:
+            report["merge_wall_seconds"] = marker["merge_seconds"]
+
+        target = base_path
+        if base_path.is_file():
+            try:
+                existing = json.loads(base_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = None
+            marker_fields = (
+                "schema_version", "parser", "result", "source_hour", "sha256",
+                "compressed_bytes", "uncompressed_bytes", "unique_events_within_hour",
+                "malformed_events", "repository_observations", "committed_at",
+                "parse_wall_seconds", "merge_wall_seconds",
+            )
+            if isinstance(existing, dict) and all(existing.get(key) == report.get(key) for key in marker_fields):
+                return 0
+            target = base_path.with_name(base_path.stem + "-recovered.json")
+        if target.is_file():
+            try:
+                existing = json.loads(target.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                existing = None
+            if existing == report:
+                return 0
+            raise RuntimeError(f"recovered parser report is inconsistent with compact hour marker: {target}")
+        return len((json.dumps(report, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
+
+    def _ledger_insert_reservation_locked(self) -> int:
+        """Bound one missing-marker insert and its rollback journal allocation."""
+        db = _read_ledger(self.ledger_path)
+        try:
+            page_size = int(db.execute("PRAGMA page_size").fetchone()[0])
+            if page_size < 512 or page_size > 65536:
+                raise RolloverError("persistent hour ledger reports an invalid SQLite page size")
+            # A single WITHOUT ROWID-style key insertion can touch a leaf,
+            # split/parent page, and rollback-journal header/copies. Keep a
+            # bounded allowance even when freelist pages make DB growth likely
+            # to be zero; normal already-mirrored replay reserves nothing.
+            return 8 * page_size + 4096
+        finally:
+            db.close()
+
+    def used_bytes(self, *, scratch_path: str | Path | None = None) -> int:
+        """Count owned store files without loading repository rows."""
+        with self._locked():
+            return self._used_bytes_locked(Path(scratch_path) if scratch_path is not None else None)
+
+    def _ensure_budget_locked(self, max_store_bytes: int, *, scratch_path: Path | None = None,
+                              transaction_headroom: int = 0, min_free_bytes: int = 0) -> int:
+        for name, value, minimum in (("max_store_bytes", max_store_bytes, 1),
+                                     ("transaction_headroom", transaction_headroom, 0),
+                                     ("min_free_bytes", min_free_bytes, 0)):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(f"{name} must be an integer >= {minimum}")
+        used = self._used_bytes_locked(scratch_path)
+        if used + transaction_headroom > max_store_bytes:
+            raise gharchive_compact.StoreCapReached(
+                f"shared compact store would exceed cap: {used}+{transaction_headroom}>{max_store_bytes}"
+            )
+        free = shutil.disk_usage(self.root).free
+        if free < min_free_bytes + transaction_headroom:
+            raise OSError(f"archive free space {free} is below required reserve {min_free_bytes + transaction_headroom}")
+        return used
+
+    def ensure_budget(self, max_store_bytes: int, *, scratch_path: str | Path | None = None,
+                      transaction_headroom: int = 0, min_free_bytes: int = 0) -> int:
+        """Check total owned bytes and free-space reserve under the store lock."""
+        with self._locked():
+            return self._ensure_budget_locked(
+                max_store_bytes, scratch_path=Path(scratch_path) if scratch_path is not None else None,
+                transaction_headroom=transaction_headroom, min_free_bytes=min_free_bytes,
+            )
+
+    def ensure_budget_locked(self, max_store_bytes: int, *, scratch_path: str | Path | None = None,
+                             transaction_headroom: int = 0, min_free_bytes: int = 0) -> int:
+        """Check the budget without reacquiring flock inside :meth:`writer`."""
+        return self._ensure_budget_locked(
+            max_store_bytes, scratch_path=Path(scratch_path) if scratch_path is not None else None,
+            transaction_headroom=transaction_headroom, min_free_bytes=min_free_bytes,
+        )
 
     def _catalog(self) -> dict[str, Any]:
         if self.catalog_path.is_symlink():
@@ -263,7 +533,77 @@ class RolloverStore:
     @property
     def active_db_path(self) -> Path:
         with self._locked():
-            return _safe_relative(self.root, self._catalog()["active_db"], "active database path")
+            return self.active_db_path_locked()
+
+    def catalog_snapshot_locked(self) -> dict[str, Any]:
+        """Return verified catalog metadata while the caller holds :meth:`writer`."""
+        catalog = self._catalog()
+        segments, coverage = self._validated_segments(catalog, force=True)
+        return {**catalog, "active_db_path": str(self.active_db_path_locked()),
+                "segments": [dict(record) for record in catalog["segments"]],
+                "segment_count": len(segments), "segment_covered_hours": len(coverage)}
+
+    def catalog_snapshot(self) -> dict[str, Any]:
+        with self._locked():
+            return self.catalog_snapshot_locked()
+
+    def hour_ledger_snapshot_locked(self) -> list[dict[str, Any]]:
+        """Return validated per-hour receipts under the held writer lock."""
+        self._validate_state_readonly_locked()
+        db = _read_ledger(self.ledger_path)
+        try:
+            return [dict(row) for row in db.execute(
+                f"SELECT {','.join(MARKER_COLUMNS)} FROM hour_markers ORDER BY source_hour")]
+        finally:
+            db.close()
+
+    def coverage_summary_locked(self) -> dict[str, Any]:
+        self._validate_state_readonly_locked()
+        db = _read_ledger(self.ledger_path)
+        try:
+            row = db.execute("""SELECT count(*) AS hour_count,
+                coalesce(sum(unique_events),0) AS unique_events,
+                coalesce(sum(malformed_events),0) AS malformed_events,
+                coalesce(sum(repository_observations),0) AS repository_observations,
+                min(source_hour) AS first_hour, max(source_hour) AS last_hour
+                FROM hour_markers""").fetchone()
+            return dict(row)
+        finally:
+            db.close()
+
+    def coverage_summary(self) -> dict[str, Any]:
+        with self._locked():
+            return self.coverage_summary_locked()
+
+    def _validate_state_readonly_locked(self) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        catalog = self._catalog()
+        active_path = _safe_relative(self.root, catalog["active_db"], "active database path")
+        active = _read_db_markers(active_path)
+        segments, segment_coverage = self._validated_segments(catalog, force=True)
+        if active and segments and min(active) <= segments[-1].end_hour:
+            raise RolloverError("active marker hours overlap or interleave catalog segments")
+        db = _read_ledger(self.ledger_path)
+        try:
+            ledger = {row["source_hour"]: dict(row) for row in db.execute(
+                f"SELECT {','.join(MARKER_COLUMNS)} FROM hour_markers ORDER BY source_hour")}
+        finally:
+            db.close()
+        if any(hour not in ledger for hour in active):
+            raise RolloverError("active database markers are missing from persistent ledger; reconcile before snapshot")
+        if any(hour in segment_coverage and hour in active for hour in ledger):
+            raise RolloverError("an hour is present in both active database and catalog segments")
+        for hour, marker in active.items():
+            if ledger.get(hour) != marker:
+                raise RolloverError(f"persistent marker fields conflict with active database for {hour}")
+        for hour, digest in segment_coverage.items():
+            if hour not in ledger:
+                raise RolloverError(f"persistent marker missing for catalog-covered segment hour {hour}")
+            if ledger[hour]["sha256"] != digest:
+                raise RolloverError(f"persistent marker hash conflicts with catalog segment for {hour}")
+        for hour in ledger:
+            if hour not in active and hour not in segment_coverage:
+                raise RolloverError(f"orphan persistent marker is not proven by active DB or catalog segment: {hour}")
+        return catalog, ledger
 
     def _validated_segments(self, catalog: Mapping[str, Any], *, force: bool = False) -> tuple[list[gharchive_segments.Segment], dict[str, str]]:
         if (not force and self._segments_cache_generation == catalog["generation"]
@@ -411,10 +751,12 @@ class RolloverStore:
                     "deep_verified": True}
 
     def read_marker(self, source_hour: str, expected_sha256: str | None = None) -> dict[str, Any] | None:
-        """Return the full durable hour receipt, reconciling one active marker.
+        """Return a proven hour receipt without mutating the persistent ledger.
 
         Lookup is indexed by hour and uses binary search over cached segment
-        intervals. Historical Parquet contents are not read on this path.
+        intervals. A missing active-hour ledger mirror is repaired only by the
+        budget-checked commit/recovery paths. Historical Parquet contents are
+        not read on this path.
         """
         hour = _hour(source_hour)
         expected_sha256 = _valid_hash(expected_sha256, hour) if expected_sha256 is not None else None
@@ -430,29 +772,172 @@ class RolloverStore:
             active_marker = _read_db_marker(active_path, hour)
             if active_marker is not None and segment_hash is not None:
                 raise RolloverError(f"hour is present in active database and segment: {hour}")
-            ledger = _open_ledger(self.ledger_path)
+            ledger = _read_ledger(self.ledger_path)
             try:
                 row = ledger.execute(f"SELECT {','.join(MARKER_COLUMNS)} FROM hour_markers WHERE source_hour=?", (hour,)).fetchone()
                 marker = dict(row) if row is not None else None
-                if marker is None and active_marker is not None:
-                    with ledger:
-                        ledger.execute(f"INSERT INTO hour_markers ({','.join(MARKER_COLUMNS)}) VALUES ({','.join('?' for _ in MARKER_COLUMNS)})",
-                                       tuple(active_marker[column] for column in MARKER_COLUMNS))
-                    marker = active_marker
-                proof_hash = active_marker["sha256"] if active_marker is not None else segment_hash
-                if marker is not None and proof_hash is None:
-                    raise RolloverError(f"orphan persistent marker is not proven by active DB or catalog segment: {hour}")
-                if marker is not None and marker["sha256"] != proof_hash:
-                    raise RolloverError(f"persistent marker hash conflicts with active DB or segment for {hour}")
-                if marker is not None and active_marker is not None and marker != active_marker:
-                    raise RolloverError(f"persistent marker fields conflict with active database for {hour}")
-                if marker is None and segment_hash is not None:
-                    raise RolloverError(f"persistent marker missing for catalog-covered segment hour {hour}")
             finally:
                 ledger.close()
+            if marker is None and active_marker is not None:
+                marker = active_marker
+            proof_hash = active_marker["sha256"] if active_marker is not None else segment_hash
+            if marker is not None and proof_hash is None:
+                raise RolloverError(f"orphan persistent marker is not proven by active DB or segment: {hour}")
+            if marker is not None and marker["sha256"] != proof_hash:
+                raise RolloverError(f"persistent marker hash conflicts with active DB or segment for {hour}")
+            if marker is not None and active_marker is not None and marker != active_marker:
+                raise RolloverError(f"persistent marker fields conflict with active database for {hour}")
+            if marker is None and segment_hash is not None:
+                raise RolloverError(f"persistent marker missing for catalog-covered segment hour {hour}")
         if marker is not None and expected_sha256 is not None and marker["sha256"] != expected_sha256:
             raise RuntimeError("a different hash is already committed for this UTC hour")
         return marker
+
+    def commit_hour(self, prepared: Any, *, budget_check: Callable[[], Any] | None = None,
+                    replay_budget_check: Callable[[], Any] | None = None) -> dict[str, Any]:
+        """Serialize one prepared hour against the current catalog epoch.
+
+        Parsing is expected to have completed outside the writer lock. The
+        active repository+hour transaction commits first; the full durable
+        marker is mirrored second. Replays proven by the ledger or active DB
+        never apply repository observations again.
+        """
+        if not isinstance(prepared, gharchive_compact.PreparedHour):
+            raise TypeError("prepared must be a gharchive_compact.PreparedHour")
+        if prepared.output_dir.expanduser().resolve() != self.root.resolve():
+            raise ValueError("prepared hour output_dir differs from rollover store root")
+        hour = _hour(prepared.source_hour)
+        source_hash = _valid_hash(prepared.sha256, hour)
+        if hour != prepared.source_hour:
+            raise ValueError("prepared source hour must use canonical UTC form")
+        with self._locked():
+            catalog = self._catalog()
+            active_marker, segment_hash = self._marker_proof_locked(catalog, hour)
+            ledger_marker = self._ledger_marker_locked(hour)
+
+            def check_replay_budget(*, ledger_insert: bool = False,
+                                    marker: Mapping[str, Any] | None = None) -> None:
+                # A replay never touches the repository database. Reserve only
+                # the report/ledger output that this branch may still write.
+                report_bytes = self._replay_report_bytes_needed(marker) if marker is not None else 0
+                ledger_bytes = self._ledger_insert_reservation_locked() if ledger_insert else 0
+                self._ensure_budget_locked(
+                    prepared.max_store_bytes, scratch_path=prepared.scratch_path,
+                    transaction_headroom=report_bytes + ledger_bytes,
+                    min_free_bytes=0 if replay_budget_check is not None else prepared.min_free_bytes,
+                )
+                if replay_budget_check is not None:
+                    replay_budget_check()
+
+            if active_marker is not None and active_marker["sha256"] != source_hash:
+                raise RuntimeError("a different hash is already committed for this UTC hour")
+            if ledger_marker is not None and ledger_marker["sha256"] != source_hash:
+                raise RuntimeError("a different hash is already committed for this UTC hour")
+            if segment_hash is not None and segment_hash != source_hash:
+                raise RuntimeError("a different hash is already committed for this UTC hour")
+            if ledger_marker is not None:
+                if segment_hash is None and active_marker is None:
+                    raise RolloverError(f"orphan persistent marker is not proven by active DB or segment: {hour}")
+                if active_marker is not None and active_marker != ledger_marker:
+                    raise RolloverError(f"persistent marker fields conflict with active database for {hour}")
+                check_replay_budget(marker=ledger_marker)
+                result = gharchive_compact.result_from_marker(
+                    self.root, ledger_marker, source_path=None, ledger_locator="../" + CATALOG_NAME,
+                )
+                self._record_report_locked(result)
+                self._cleanup_replay_scratch_locked(prepared)
+                result["database_bytes"] = _database_bytes(self.active_db_path_locked())
+                result["store_bytes"] = self._used_bytes_locked(prepared.scratch_path)
+                return result
+            if segment_hash is not None:
+                raise RolloverError(f"persistent marker missing for catalog-covered segment hour {hour}")
+            if active_marker is not None:
+                check_replay_budget(ledger_insert=True, marker=active_marker)
+                result = gharchive_compact.result_from_marker(
+                    self.root, active_marker, source_path=None, ledger_locator="../" + CATALOG_NAME,
+                )
+                self._trip("after_active_commit_before_ledger_mirror")
+                self._mirror_marker_locked(active_marker)
+                self._record_report_locked(result)
+                self._cleanup_replay_scratch_locked(prepared)
+                result["database_bytes"] = _database_bytes(self.active_db_path_locked())
+                result["store_bytes"] = self._used_bytes_locked()
+                return result
+
+            active_path = self.active_db_path_locked()
+
+            def checked_budget() -> None:
+                self._ensure_budget_locked(
+                    prepared.max_store_bytes, scratch_path=prepared.scratch_path,
+                    transaction_headroom=gharchive_compact.STORE_HEADROOM_BYTES,
+                    min_free_bytes=prepared.min_free_bytes,
+                )
+                if budget_check is not None:
+                    budget_check()
+
+            checked_budget()
+            result = gharchive_compact.commit_prepared_hour(
+                prepared, global_db_path=active_path, budget_check=checked_budget,
+                ledger_locator="../" + CATALOG_NAME,
+            )
+            committed = _read_db_marker(active_path, hour)
+            if committed is None or committed["sha256"] != source_hash:
+                raise RolloverError("compact writer returned without the expected committed hour marker")
+            self._trip("after_active_commit_before_ledger_mirror")
+            self._mirror_marker_locked(committed)
+            self._record_report_locked(result)
+            self._drop_cached_scratch_locked(prepared.scratch_path)
+            result["database_bytes"] = _database_bytes(active_path)
+            result["store_bytes"] = self._used_bytes_locked()
+            return result
+
+    def recover_hour_report(self, output_dir: str | Path, source_hour: str,
+                            expected_sha256: str, *,
+                            max_store_bytes: int = gharchive_compact.MAX_COMPACT_STORE_BYTES,
+                            min_free_bytes: int = 0) -> dict[str, Any]:
+        """Rebuild a generic immutable report from the proven full-marker ledger."""
+        if (isinstance(max_store_bytes, bool) or not isinstance(max_store_bytes, int) or max_store_bytes < 1
+                or isinstance(min_free_bytes, bool) or not isinstance(min_free_bytes, int) or min_free_bytes < 0):
+            raise ValueError("positive store cap and nonnegative free-space reserve are required")
+        output = Path(output_dir).expanduser().resolve()
+        if output != self.root.resolve():
+            raise ValueError("report output_dir must be the rollover store root")
+        hour = _hour(source_hour)
+        expected_hash = _valid_hash(expected_sha256, hour)
+        with self._locked():
+            catalog = self._catalog()
+            active_marker, segment_hash = self._marker_proof_locked(catalog, hour)
+            marker = self._ledger_marker_locked(hour)
+            missing_ledger = marker is None and active_marker is not None
+            if marker is None and active_marker is not None:
+                marker = active_marker
+            if marker is None:
+                if segment_hash is not None:
+                    raise RolloverError(f"persistent marker missing for catalog-covered segment hour {hour}")
+                raise KeyError(f"no durable GH Archive hour marker exists for {hour}")
+            if marker["sha256"] != expected_hash:
+                raise RuntimeError("a different hash is already committed for this UTC hour")
+            proof_hash = active_marker["sha256"] if active_marker is not None else segment_hash
+            if proof_hash is None or proof_hash != marker["sha256"]:
+                raise RolloverError(f"persistent marker is not proven by active DB or catalog segment: {hour}")
+            if active_marker is not None and active_marker != marker:
+                raise RolloverError(f"persistent marker fields conflict with active database for {hour}")
+            report_bytes = self._replay_report_bytes_needed(marker)
+            ledger_bytes = self._ledger_insert_reservation_locked() if missing_ledger else 0
+            self._ensure_budget_locked(
+                max_store_bytes, transaction_headroom=report_bytes + ledger_bytes,
+                min_free_bytes=min_free_bytes,
+            )
+            if missing_ledger:
+                self._mirror_marker_locked(active_marker)
+                marker = active_marker
+            result = gharchive_compact.result_from_marker(
+                output, marker, source_path=None, ledger_locator="../" + CATALOG_NAME,
+            )
+            self._record_report_locked(result)
+            result["database_bytes"] = _database_bytes(self.active_db_path_locked())
+            result["store_bytes"] = self._used_bytes_locked()
+            return result
 
     def rollover(self, exporter: Callable[..., gharchive_segments.Segment], *,
                  max_output_bytes: int, min_free_bytes: int) -> gharchive_segments.Segment | None:

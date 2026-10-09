@@ -17,6 +17,35 @@ from typing import Any
 
 BUNDLE_SCHEMA = "gh-ml-local-publication-bundle-v1"
 METADATA_SCHEMA = "gh-ml-publication-release-metadata-v1"
+_SOURCE_STATEMENTS = {
+    "bulk_ecosystems_2023_08_30": (
+        {"source": "ecosyste.ms 2023-08-30 repository snapshot",
+         "terms": "The dated open-data release page says CC-BY without a version; retain that exact release statement and snapshot attribution.",
+         "url": "https://repos.ecosyste.ms/open-data",
+         "scope": "Dated snapshot only; its listing does not identify a license version or settle rights in every included field. The current service footer is contextual information and does not change the dated snapshot's statement.",
+         "terms_context": {"statement": "The current service footer states CC BY-SA 4.0.",
+                           "url": "https://repos.ecosyste.ms/",
+                           "scope": "Current service statement only; not the license statement for this dated snapshot."}},
+    ),
+    "gharchive_post_snapshot": (
+        {"source": "GH Archive",
+         "terms": "The GH Archive repository states MIT for repository code/documentation and CC-BY-4.0 for website content; it says the event dataset is outside the repository and may contain third-party material.",
+         "url": "https://github.com/igrigorik/gharchive.org#licenses",
+         "scope": "The code and website notices do not license event records or establish rights in derived event aggregates."},
+    ),
+    "contemporary_collectors": (
+        {"source": "GitHub repository/API metadata",
+         "terms": "GitHub Terms govern API access and public repository functionality; no blanket license for this collected output is inferred. Repository-declared license values remain repository-specific.",
+         "url": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+         "scope": "Structured metadata observations only; not a grant over repository text or repository contents."},
+    ),
+    "pwc_sidecar": (
+        {"source": "Papers with Code sidecar",
+         "terms": "The pinned sidecar identifies CC-BY-SA-4.0 with attribution and modification details.",
+         "source_reference": "Retained PWC sidecar card and manifest.",
+         "scope": "Separate paper-link sidecar only; not a license for the combined registry."},
+    ),
+}
 _HEX = set("0123456789abcdef")
 
 
@@ -145,6 +174,7 @@ def verify_release_receipt(bundle_dir: str | Path) -> dict[str, Any]:
                 "evidence_manifest_sha256": evidence_sha,
                 "gates": dict(evidence_gates),
                 "readiness_gaps": list(verification.get("readiness_gaps", [])),
+                "source_bindings": verification.get("input_pins", {}).get("source_bindings"),
             }
     effective_gaps = sorted(key for key, passed in effective_gates.items() if not passed)
 
@@ -315,6 +345,60 @@ def _atomic_json(path: Path, data: Mapping[str, Any]) -> None:
             os.unlink(temp)
 
 
+def _included_source_statements(verified: Mapping[str, Any]) -> list[dict[str, Any]]:
+    fingerprints = verified["source_fingerprints"]
+    bindings = verified.get("evidence_attachment", {}).get("source_bindings")
+    labels_by_category: dict[str, list[str]] = {}
+    if isinstance(bindings, Mapping):
+        for label, category in bindings.items():
+            if label in fingerprints and category in _SOURCE_STATEMENTS:
+                labels_by_category.setdefault(category, []).append(label)
+    else:
+        for category in _SOURCE_STATEMENTS:
+            if category in fingerprints:
+                labels_by_category[category] = [category]
+
+    statements: list[dict[str, Any]] = []
+    classified: set[str] = set()
+    observation_sources = verified.get("observation_retention", {}).get("sources", {})
+    for category, labels in labels_by_category.items():
+        source_pins = {label: fingerprints[label] for label in sorted(labels)}
+        for template in _SOURCE_STATEMENTS[category]:
+            statements.append({**template, "status": "included", "source_category": category,
+                               "source_labels": sorted(labels), "source_fingerprints": source_pins})
+        classified.update(labels)
+        if category == "contemporary_collectors":
+            readme_present = False
+            for label in labels:
+                source_record = observation_sources.get(label, {})
+                for artifact in source_record.get("artifacts", []):
+                    schema = artifact.get("schema", "")
+                    if isinstance(schema, str) and "readme" in schema.casefold():
+                        readme_present = True
+            if readme_present:
+                statements.append({
+                    "source": "Repository README evidence",
+                    "terms": "README text, where present, is repository-provided and may have repository-specific terms.",
+                    "url": "https://github.com/",
+                    "scope": "Only included when a retained source schema identifies README fields; no population-wide text license is inferred.",
+                    "status": "included", "source_category": category,
+                    "source_labels": sorted(labels), "source_fingerprints": source_pins,
+                })
+
+    for label, fingerprint in sorted(fingerprints.items()):
+        if label in classified:
+            continue
+        statements.append({
+            "source": f"Included source: {label}",
+            "terms": "No source-specific license statement is inferred by this card; consult the pinned source manifest and source-specific notices.",
+            "source_reference": "Verified source fingerprint in this bundle's source-attribution record.",
+            "scope": "Provenance is recorded, but no license is inferred from the source label or fingerprint.",
+            "status": "included", "source_labels": [label],
+            "source_fingerprints": {label: fingerprint},
+        })
+    return statements
+
+
 def render_release_card(verified: Mapping[str, Any]) -> str:
     manifest = verified["manifest"]
     views = verified["views"]
@@ -356,12 +440,27 @@ def render_release_card(verified: Mapping[str, Any]) -> str:
         f"- `{label}`: {item.get('granularity')}; {item.get('row_count')} source rows; artifact set {'verified' if item.get('artifact_set_verified') else 'unverified'}."
         for label, item in sorted(observation_sources.items())
     ) or "- No source observation artifacts retained."
+    attribution_lines = "\n".join(
+        f"- {item['source']}: {item['scope']}"
+        for item in _included_source_statements(verified)
+    ) or "- No source statements are available."
+    has_gharchive = any(item.get("source_category") == "gharchive_post_snapshot"
+                        for item in _included_source_statements(verified))
+    event_coverage_note = (" Unresolved GH Archive acquisition hours remain visible gaps."
+                           if has_gharchive else "")
     corpus_audit = verified.get("corpus_audit", {"status": "missing"})
     corpus_audit_text = (f"Full-corpus route-stratified audit: `{corpus_audit.get('status')}`; "
                          f"sampled {corpus_audit.get('sample_rows', 'unknown')} rows from "
                          f"{corpus_audit.get('population_rows', 'unknown')} declared rows. "
                          "This audit is separate from pairwise novelty evaluation.")
-    return f"""# GitHub ML repository discovery bundle
+    return f"""---
+pretty_name: GitHub ML
+license: other
+---
+
+# GitHub ML repository discovery bundle
+
+**Data license and source scope:** `other` means this bundle contains mixed, source-specific terms; no blanket license is asserted for the combined data. It is metadata, not a license grant. This is a local review bundle and does not authorize or perform external publication. See [source-attribution.json](source-attribution.json) for the sources actually included and their recorded scope. Repository README text, when present, remains repository-provided material and is not relicensed by this bundle.
 
 This local bundle {release_state}. Its discovery and curation views are not an exhaustive census of GitHub repositories or ML work. The `inventory` is a deduplicated projection; `current` contains one latest merged metadata and assessment row for every inventory ID, regardless of selector status. `candidates` contains rows with `candidate_eligible=true` under the pinned candidate rule. Neither view is a claim that every row is an ML repository, and candidate eligibility does not establish scientific novelty, correctness, reproducibility, or quality. Declared readiness gaps: {gap_text}. Evidence attachment status: `{evidence_state}`.
 
@@ -387,9 +486,11 @@ Total current rows: **{views['current']['rows']}**. Candidate-eligible rows: **{
 
 ## Source attribution and coverage
 
-The machine-readable [source-attribution.json](source-attribution.json) records source labels and fingerprints from the verified bundle and summarizes the source statements in the project license notes. Confirm source inclusion against the retained manifests. Ecosyste.ms dated snapshot terms, current service terms, GH Archive event-data rights, GitHub metadata, and the separate Papers with Code sidecar must remain attributed according to their own source scope. GH Archive's code/documentation license does not grant a blanket license to event records. Repository-declared license values describe source repositories; they do not grant rights over repository contents.
+The machine-readable [source-attribution.json](source-attribution.json) records included source labels and fingerprints with source-scoped statements. These statements follow verified source bindings and retained manifests; they do not grant a license to the combined data. Repository-declared license values describe their source repositories and do not grant rights over repository contents.
 
-Coverage limitations are recorded in the verified evidence attachment when present. A missing attachment leaves source completeness unverified. Snapshot fields are historical. Event, publication, commit, observation, and ingestion times have distinct meanings; an observation time does not make old source metadata current. Missing and unknown values remain unknown, and unresolved GH Archive hours remain gaps.
+{attribution_lines}
+
+Coverage limitations are recorded in the verified evidence attachment when present. A missing attachment leaves source completeness unverified. Snapshot fields are historical. Event, publication, commit, observation, and ingestion times have distinct meanings; an observation time does not make old source metadata current. Missing and unknown values remain unknown.{event_coverage_note}
 
 ## Selection and annotation limits
 
@@ -448,34 +549,20 @@ def generate_release_metadata(bundle_dir: str | Path) -> dict[str, Any]:
         "schema": "gh-ml-source-attribution-v1",
         "source_fingerprints": verified["source_fingerprints"],
         "source_terms_policy": "Preserve exact source-scoped terms and attribution; no combined redistribution clearance is asserted.",
-        "source_statements": [
-            {"source": "ecosyste.ms 2023-08-30 repository snapshot",
-             "terms": "The dated open-data release page says CC-BY without a version; retain that exact release statement and snapshot attribution.",
-             "url": "https://repos.ecosyste.ms/open-data",
-             "scope": "Dated snapshot only; does not state current service terms."},
-            {"source": "current ecosyste.ms Repos service",
-             "terms": "The current service footer states CC BY-SA 4.0.",
-             "url": "https://repos.ecosyste.ms/",
-             "scope": "Current service statement; do not silently apply it to the older snapshot."},
-            {"source": "GH Archive",
-             "terms": "Repository code/documentation is MIT and website content is CC-BY-4.0; the event dataset is not licensed by those statements and may contain third-party material.",
-             "url": "https://github.com/igrigorik/gharchive.org#licenses",
-             "scope": "No blanket event-record license is inferred; raw event payload redistribution rights remain unresolved."},
-            {"source": "Papers with Code sidecar",
-             "terms": "Its pinned sidecar identifies CC-BY-SA-4.0 with attribution and modification details.",
-             "source_reference": "Retained PWC sidecar card and manifest, when present in this bundle.",
-             "scope": "Separate paper-link sidecar only; not a license for the combined registry."},
-            {"source": "GitHub repository metadata",
-             "terms": "Repository-declared license values are source provenance and are not a license granted by this registry.",
-             "url": "https://github.com/",
-             "scope": "Per-repository terms remain attached to the source repository."},
-        ],
-        "applicability": "These source statements describe scope-specific terms to preserve where a source is present; they do not declare that every named source is included. Confirm inclusion against source_fingerprints and retained source manifests.",
+        "source_statements": _included_source_statements(verified),
+        "applicability": "Every source statement is bound to included verified source labels and fingerprints. No absent source is represented as included, and no source statement implies a blanket license.",
         "rights_gate": "unresolved",
         "limitations": [
-            "GH Archive code/documentation terms do not establish rights to event records.",
-            "Repository license metadata is provenance, not a license granted by this registry.",
-            "Papers with Code sidecar terms remain separate from this compilation.",
+            "No blanket license is asserted for the combined data.",
+            *( ["GH Archive code/documentation terms do not establish rights to event records."]
+               if any(item.get("source_category") == "gharchive_post_snapshot"
+                      for item in _included_source_statements(verified)) else [] ),
+            *( ["Repository-declared license values remain repository-specific."]
+               if any(item.get("source_category") == "contemporary_collectors"
+                      for item in _included_source_statements(verified)) else [] ),
+            *( ["Papers with Code sidecar terms remain separate from this compilation."]
+               if any(item.get("source_category") == "pwc_sidecar"
+                      for item in _included_source_statements(verified)) else [] ),
         ],
     }
     _atomic_json(root / "schema.json", schema)
