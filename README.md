@@ -64,6 +64,16 @@ uv run gh-ml --help
 uv run gh-ml run --no-publish
 ```
 
+### Full test suite
+
+The complete suite exercises Parquet, scikit-learn triage, FAISS retrieval, and DuckDB publication paths. Install its lightweight test dependencies with `uv sync --locked --extra test`; this extra does not install sentence-transformers, Torch, or model weights. The tests use fake encoders and can run with model hubs offline:
+
+```sh
+xonsh --no-rc -c '$HF_HUB_OFFLINE = "1"; $TRANSFORMERS_OFFLINE = "1"; uv run --frozen pytest'
+```
+
+CI runs the same command on pushes to `main` and pull requests targeting `main`.
+
 `run` accepts `--repo`, `--config-dir`, `--output-dir`, `--max-requests`, `--since-days`, and `--no-publish`; use `uv run gh-ml run --help` for the exact defaults. `backfill` accepts `--repo`, `--config-dir`, `--output-dir`, `--start`, `--end`, `--max-requests`, and `--no-publish`. It searches repository creation dates, starting at `2008-01-01` by default, and splits dense date intervals when needed to get beneath GitHub’s per-search result cap. Each invocation respects `--max-requests`, writes per-query or per-query/date-partition coverage, and saves a resumable cursor. Run the same command again to continue until coverage reports the sweep complete. The default output is under `~/.local/share/modelomics-gh-ml/runs`; daily state is `state.json`, and backfill state is `backfill-state.json`.
 
 `historical-sample` accepts `--repo`, `--config-dir`, `--output-dir`, `--max-requests`, and `--no-publish`. It takes one ranked first-page search for each query/year lane from 2008 through a campaign end date fixed when the campaign starts. That end date remains unchanged across partial runs and later runs with an expanded catalog. Its v2 completion ledger preserves completed `(query ID, query text, year)` work across catalog additions and edits: new or changed queries are sampled for every year in the fixed campaign, while removed queries are dropped. A legacy v1 cursor is safely migrated by matching query signatures. The checkpoint is `state/historical-sample.json` on the Hub and `historical-sample-state.json` in local output. Completed ledger entries persist, so future catalog additions resume only their missing lanes. The request budget is spread round-robin across query groups (the scheduled budget remains 200 requests/day). These are ranked first-page samples, not complete repository records; they do not replace date-partitioned historical backfill or guarantee complete coverage.
