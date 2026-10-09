@@ -21,6 +21,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .storage_budget import DiskBudgetGuard, Reservation
+
 SCHEMA_VERSION = "gh-ml-local-publication-bundle-v1"
 MIN_FREE_BYTES = 300 * 1024**3
 DEFAULT_MEMORY_LIMIT = "8GB"
@@ -899,6 +901,12 @@ def materialize_publication_inventory(
 
     if not sources or set(sources) != set(source_fingerprints):
         raise ValueError("sources and fingerprints require matching non-empty labels")
+    expected_source_rows = dict(expected_rows or {})
+    if (set(expected_source_rows) - set(sources)
+            or any(not isinstance(label, str) or not label
+                   or isinstance(count, bool) or not isinstance(count, int) or count < 0
+                   for label, count in expected_source_rows.items())):
+        raise ValueError("expected_rows must contain nonnegative counts for known source labels")
     if threads < 1 or batch_size < 1:
         raise ValueError("threads and batch_size must be positive")
     output = Path(inventory_dir).expanduser().resolve()
@@ -917,7 +925,7 @@ def materialize_publication_inventory(
         "schema": "gh-ml-publication-inventory-progress-v1",
         "source_fingerprints": dict(sorted(source_fingerprints.items())),
         "source_paths": source_spec,
-        "expected_rows": dict(sorted((expected_rows or {}).items())),
+        "expected_rows": dict(sorted(expected_source_rows.items())),
         "partition_plan": {"outer_buckets": outer_buckets, "inner_buckets": inner_buckets,
                            "total_buckets": outer_buckets * inner_buckets},
         "merge_policy_version": merge_policy_version,
@@ -928,6 +936,21 @@ def materialize_publication_inventory(
                 or completed.get("partition_plan", {}).get("outer_buckets") != outer_buckets
                 or completed.get("partition_plan", {}).get("inner_buckets") != inner_buckets):
             raise ValueError("completed inventory is pinned to different inputs or partition settings")
+        source_records = completed.get("source_partition_manifest", {}).get("sources", {})
+        for label, paths in source_spec.items():
+            actual_paths = source_records.get(label, {}).get("paths")
+            if actual_paths != paths:
+                raise ValueError(
+                    f"completed inventory source paths differ for {label}; "
+                    "resume requires the original pinned source paths"
+                )
+        for label, expected_count in expected_source_rows.items():
+            actual_count = source_records.get(label, {}).get("rows")
+            if actual_count != expected_count:
+                raise ValueError(
+                    f"completed inventory source row count mismatch for {label}: "
+                    f"expected {expected_count}, got {actual_count}"
+                )
         return completed
     if output.exists() and any(output.iterdir()) and not progress_meta_path.is_file():
         raise FileExistsError(f"inventory has unreceipted files; refusing implicit cleanup: {output}")
@@ -940,11 +963,6 @@ def materialize_publication_inventory(
             raise ValueError("inventory resume inputs, source fingerprints, or partition settings changed")
     else:
         _atomic_json(progress_meta_path, progress_meta)
-    free = shutil.disk_usage(output.parent).free
-    required = (max(min_free_bytes, MIN_FREE_BYTES) + max_stage_bytes + max_temp_bytes
-                + max_output_bytes + OUTPUT_SAFETY_MARGIN_BYTES)
-    if free < required:
-        raise OSError(f"inventory preflight requires {required} bytes including reserve, staging, output and margin; available={free}")
     repository_root = output / "repositories"
     quarantine_root = output / "quarantine"
     repository_root.mkdir(parents=True, exist_ok=True)
@@ -1037,6 +1055,32 @@ def materialize_publication_inventory(
     }
     if existing_output_paths != declared_output_paths:
         raise ValueError("inventory contains an unreceipted partial or orphaned output file")
+    initial_output_paths = [progress_meta_path, *[output / part["path"]
+                                                  for part in repository_parts + quarantine_parts]]
+    if progress_sources_path.is_file():
+        initial_output_paths.append(progress_sources_path)
+    initial_output_paths.extend(
+        progress_receipt_root / f"{bucket_id.replace('/', '--')}.json"
+        for bucket_id in committed_by_bucket
+    )
+    initial_output_inodes: set[tuple[int, int]] = set()
+    initial_output_bytes = 0
+    for path in initial_output_paths:
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            continue
+        inode = (stat.st_dev, stat.st_ino)
+        if inode not in initial_output_inodes:
+            initial_output_inodes.add(inode)
+            initial_output_bytes += stat.st_size
+    free_floor = max(min_free_bytes, MIN_FREE_BYTES)
+    DiskBudgetGuard(disk_usage=shutil.disk_usage).check((
+        Reservation("inventory-stage", staging, max_stage_bytes),
+        Reservation("inventory-spill", spill, max_temp_bytes),
+        Reservation("inventory-output", output, max_output_bytes, initial_output_bytes,
+                    min_free_bytes=free_floor, margin_bytes=OUTPUT_SAFETY_MARGIN_BYTES),
+    ))
     declared_bucket_order = [f"outer-{outer:03d}/inner-{inner:03d}"
                              for outer in range(outer_buckets) for inner in range(inner_buckets)]
     if any(bucket_id not in declared_bucket_order for bucket_id in committed_by_bucket):
@@ -1051,15 +1095,11 @@ def materialize_publication_inventory(
             expected_rows=expected_rows, outer_buckets=outer_buckets,
             inner_buckets=inner_buckets, batch_rows=batch_size,
             max_stage_bytes=max_stage_bytes, max_output_bytes=max_output_bytes,
-            reserve_margin_bytes=OUTPUT_SAFETY_MARGIN_BYTES + max_temp_bytes,
+            reserve_margin_bytes=OUTPUT_SAFETY_MARGIN_BYTES,
+            output_dir=output, spill_dir=spill, max_spill_bytes=max_temp_bytes,
+            min_free_bytes=free_floor, initial_output_paths=initial_output_paths,
             _disk_usage=shutil.disk_usage,
         ) as partitioner:
-            prior_outputs = [output / part["path"] for part in repository_parts]
-            prior_outputs.extend(output / part["path"] for part in quarantine_parts)
-            startup_outputs = [progress_meta_path, *prior_outputs]
-            if progress_sources_path.is_file():
-                startup_outputs.append(progress_sources_path)
-            partitioner.check_resources(output_paths=startup_outputs)
             partition_started = time.perf_counter()
             for receipt in partitioner.iter_buckets():
                 if partition_seconds == 0.0:

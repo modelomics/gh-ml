@@ -13,6 +13,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+from .storage_budget import DiskBudgetGuard, Reservation, directory_bytes
+
 SCHEMA_VERSION = "gh-ml-publication-partitions-v1"
 MIN_FREE_BYTES = 300 * 1024**3
 SAFETY_MARGIN_BYTES = 2 * 1024**3
@@ -131,12 +133,17 @@ class PublicationPartitioner:
         max_stage_bytes: int = 10 * 1024**3,
         max_output_bytes: int = 80 * 1024**3,
         reserve_margin_bytes: int = SAFETY_MARGIN_BYTES,
+        output_dir: str | Path | None = None,
+        spill_dir: str | Path | None = None,
+        max_spill_bytes: int = 0,
+        min_free_bytes: int | None = None,
+        initial_output_paths: Sequence[str | Path] = (),
         _disk_usage=shutil.disk_usage,
     ) -> None:
         if not sources or set(sources) != set(source_fingerprints):
             raise ValueError("sources and fingerprints need identical non-empty keys")
         if min(outer_buckets, inner_buckets, batch_rows, max_stage_bytes,
-               max_output_bytes, reserve_margin_bytes) < 1:
+               max_output_bytes) < 1 or reserve_margin_bytes < 0:
             raise ValueError("bucket, batch, and disk limits must be positive")
         self.sources: dict[str, tuple[Path, ...]] = {}
         self._source_inodes: set[tuple[int, int]] = set()
@@ -170,12 +177,20 @@ class PublicationPartitioner:
         ):
             raise ValueError("expected_rows must contain non-negative counts for known sources")
         self.root = Path(staging_dir).expanduser().resolve()
+        self.output_root = Path(output_dir).expanduser().resolve() if output_dir is not None else self.root
+        self.spill_root = Path(spill_dir).expanduser().resolve() if spill_dir is not None else self.root
         self.outer_buckets, self.inner_buckets = outer_buckets, inner_buckets
         self.bucket_count = outer_buckets * inner_buckets
         self.batch_rows = batch_rows
+        if max_spill_bytes < 0:
+            raise ValueError("max_spill_bytes cannot be negative")
         self.max_stage_bytes, self.max_output_bytes = max_stage_bytes, max_output_bytes
+        self.max_spill_bytes = max_spill_bytes
         self.reserve_margin_bytes = reserve_margin_bytes
+        self.min_free_bytes = MIN_FREE_BYTES if min_free_bytes is None else min_free_bytes
         self._disk_usage = _disk_usage
+        self._budget_guard = DiskBudgetGuard(disk_usage=_disk_usage)
+        self._initial_output_paths = tuple(Path(path) for path in initial_output_paths)
         self._preflight_done = False
         self._known_sizes: dict[Path, int] = {}
         self._staged_bytes = 0
@@ -192,8 +207,22 @@ class PublicationPartitioner:
         if self.root.exists() and (not self.root.is_dir() or any(self.root.iterdir())):
             raise FileExistsError(f"staging directory must be empty: {self.root}")
         self.root.mkdir(parents=True, exist_ok=True)
+        self._register_output_paths(self._initial_output_paths)
         self.check_resources()
         return self
+
+    def _register_output_paths(self, output_paths: Sequence[str | Path]) -> None:
+        for raw_path in output_paths:
+            try:
+                stat = Path(raw_path).stat()
+            except FileNotFoundError:
+                continue
+            inode = (stat.st_dev, stat.st_ino)
+            if inode in self._source_inodes:
+                continue
+            previous = self._known_output_sizes.get(inode, 0)
+            self._output_bytes += stat.st_size - previous
+            self._known_output_sizes[inode] = stat.st_size
 
     def __exit__(self, *_: object) -> None:
         return None
@@ -226,27 +255,17 @@ class PublicationPartitioner:
         self._peak_stage_bytes = max(self._peak_stage_bytes, staged)
         if staged > self.max_stage_bytes:
             raise OSError(f"partition stage budget exceeded: {staged} > {self.max_stage_bytes}")
-        for raw_path in output_paths:
-            try:
-                stat = Path(raw_path).stat()
-            except FileNotFoundError:
-                continue
-            inode = (stat.st_dev, stat.st_ino)
-            if inode in self._source_inodes:
-                continue
-            previous = self._known_output_sizes.get(inode, 0)
-            self._output_bytes += stat.st_size - previous
-            self._known_output_sizes[inode] = stat.st_size
+        self._register_output_paths(output_paths)
         output_bytes = self._output_bytes
         if output_bytes > self.max_output_bytes:
             raise OSError(f"publication output budget exceeded: {output_bytes} > {self.max_output_bytes}")
-        stage_reservation = self.max_stage_bytes if not self._preflight_done else self.max_stage_bytes - staged
-        output_reservation = self.max_output_bytes if not self._preflight_done else self.max_output_bytes - output_bytes
-        usage = self._disk_usage(self.root)
-        required_free = (MIN_FREE_BYTES + self.reserve_margin_bytes
-                         + stage_reservation + output_reservation)
-        if usage.free < required_free:
-            raise OSError(f"disk reserve guard: available={usage.free}, required={required_free}")
+        spill_used = directory_bytes(self.spill_root) if self.max_spill_bytes else 0
+        self._budget_guard.check((
+            Reservation("stage", self.root, self.max_stage_bytes, staged),
+            Reservation("spill", self.spill_root, self.max_spill_bytes, spill_used),
+            Reservation("output", self.output_root, self.max_output_bytes, output_bytes,
+                        self.min_free_bytes, self.reserve_margin_bytes),
+        ))
         self._preflight_done = True
 
     def _track(self, path: Path) -> None:
