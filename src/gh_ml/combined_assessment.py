@@ -563,8 +563,8 @@ def _run_combined_assessment_locked(
             merged_digest.update(str(github_id).encode("ascii")); merged_digest.update(b"\n")
         merged_rows += len(ids)
         route_counts.update(counts)
-        schema_text = str(schema)
         os.replace(tmp, staged_part)
+        schema_text = str(pq.ParquetFile(staged_part).schema_arrow)
         written_ids = sorted(
             _positive_id(row.get("github_id"))
             for rows in _read_bucket(staged_part, batch_size) for row in rows

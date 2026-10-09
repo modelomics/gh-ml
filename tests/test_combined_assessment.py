@@ -31,7 +31,8 @@ def _inventory(tmp_path: Path, rows: list[dict]) -> Path:
         "files": {"repositories": {
             "kind": "parquet_shards", "rows": len(rows),
             "parts": [{"bucket_id": "outer-000/inner-000", "path": "repositories/outer-000/inner-000/part-000.parquet",
-                       "rows": len(rows), "sha256": digest}],
+                       "rows": len(rows), "sha256": digest,
+                       "schema": str(pq.ParquetFile(part_path).schema_arrow)}],
         }},
         "partition_plan": {"total_buckets": 1},
         "partition_receipts": [{"bucket_id": "outer-000/inner-000", "rows": len(rows)}],
@@ -172,3 +173,70 @@ def test_optional_frozen_novelty_is_pinned_without_claiming_verified_novelty(tmp
     assert row["original_content_status"] == "probable_original_content"
     assert row["scientific_novelty_status"] == "undetermined"
     assert result["novelty_assessment_inputs"][0]["input_sha256"] == hashlib.sha256(novelty.read_bytes()).hexdigest()
+
+
+def test_assessment_receipt_schema_round_trips_through_bundle_verifier(tmp_path: Path, monkeypatch) -> None:
+    from gh_ml.publication_bundle import verify_combined_assessment
+    from gh_ml.publication_partition import sorted_id_sha256
+
+    inventory = _inventory(tmp_path, [{
+        "github_id": 23, "name": "repo", "full_name": "org/repo",
+        "description": "A transformer model.", "topics": ["transformer"],
+        "language": "Python", "fork": False,
+    }])
+    inventory_manifest_path = inventory / "inventory-manifest.json"
+    inventory_manifest = json.loads(inventory_manifest_path.read_text())
+    inventory_manifest["merge_policy_version"] = "fixture-merge-v1"
+    inventory_manifest["partition_plan"] = {"outer_buckets": 1, "inner_buckets": 1,
+                                             "total_buckets": 1}
+    inventory_manifest["source_fingerprints"] = {"snapshot": "snapshot-v1"}
+    part_record = inventory_manifest["files"]["repositories"]["parts"][0]
+    part_path = inventory / part_record["path"]
+    id_digest = sorted_id_sha256(part_path)
+    part_record["sorted_id_sha256"] = id_digest
+    stage_sha = "b" * 64
+    bucket_id = part_record["bucket_id"]
+    inventory_manifest["partition_receipts"] = [{
+        "bucket_id": bucket_id, "rows": 1, "source_rows": 1,
+        "sha256": part_record["sha256"], "source_stage_sha256": stage_sha,
+        "sorted_id_sha256": id_digest,
+    }]
+    quarantine_path = inventory / "quarantine.parquet"
+    pq.write_table(pa.Table.from_batches([], schema=pa.schema([("github_id", pa.int64())])), quarantine_path)
+    inventory_manifest["files"]["quarantine"] = {
+        "path": "quarantine.parquet", "rows": 0,
+        "sha256": hashlib.sha256(quarantine_path.read_bytes()).hexdigest(),
+        "schema": str(pq.read_schema(quarantine_path)),
+    }
+    inventory_manifest["source_partition_manifest"] = {
+        "schema": "gh-ml-publication-partitions-v1", "complete": True,
+        "source_fingerprints": inventory_manifest["source_fingerprints"],
+        "sources": {"snapshot": {"fingerprint": "snapshot-v1", "paths": ["/snapshot.parquet"],
+                                  "shard_sha256": ["a" * 64], "rows": 1,
+                                  "valid_id_rows": 1, "invalid_id_rows": 0}},
+        "valid_id_rows": 1, "invalid_id_rows": 0,
+        "bucket_receipts": [{"bucket_id": bucket_id, "rows": 1, "sha256": stage_sha}],
+    }
+    inventory_manifest_path.write_text(json.dumps(inventory_manifest), encoding="utf-8")
+
+    class Model:
+        schema = "fixture-model-schema"
+        version = "fixture-model-v1"
+        fingerprint = "f" * 64
+
+        def predict(self, _row):
+            return {"predicted_label": "ml_relevant", "model_score": 0.9,
+                    "reason": "fixture", "artifact_version": self.version,
+                    "artifact_sha256": self.fingerprint}
+
+    model_path = tmp_path / "model.json"
+    model_path.write_text('{"schema":"fixture-model-schema"}\n', encoding="utf-8")
+    monkeypatch.setattr(bulk_triage, "_load_model", lambda _path: (Model.schema, Model()))
+    output = tmp_path / "assessment"
+    run_combined_assessment(inventory, output, model_path=model_path)
+
+    verified = verify_combined_assessment(inventory, output)
+    assert verified["bucket_count"] == 1
+    receipt = json.loads((output / "buckets" / bucket_id / "receipt.json").read_text())
+    physical_schema = str(pq.ParquetFile(output / receipt["assessment_path"]).schema_arrow)
+    assert receipt["schema"] == physical_schema

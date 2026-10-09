@@ -1,7 +1,7 @@
 # Learned novelty review heads: preregistered evaluation plan
 
-**Plan version:** `gh-ml-novelty-learned-head-v1`<br>
-**Status:** frozen before release of adjudicated training/validation labels<br>
+**Plan version:** `gh-ml-novelty-learned-head-v1`  
+**Status:** frozen before release of adjudicated training/validation labels  
 **Target:** assistant-reviewed repository content and unordered pair relations in the frozen README evidence bundle. This does not measure scientific novelty or completeness of prior-art search.
 
 ## Inputs and label boundary

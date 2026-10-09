@@ -32,6 +32,8 @@ SCRATCH_CACHE_KIB = 64 * 1024
 GLOBAL_CACHE_KIB = 128 * 1024
 DISK_HEADROOM_BYTES = 256 * 1024**2
 STORE_HEADROOM_BYTES = 256 * 1024**2
+SCRATCH_BATCH_EVENTS = 5_000
+SCRATCH_BATCH_BYTES = 8 * 1024**2
 
 
 class StoreCapReached(RuntimeError):
@@ -74,9 +76,10 @@ def _store_bytes(output_dir: Path, scratch_path: Path) -> int:
     return sum(path.stat().st_size for path in paths if path.exists())
 
 
-def _ensure_store_cap(output_dir: Path, scratch_path: Path, max_bytes: int) -> int:
+def _ensure_store_cap(output_dir: Path, scratch_path: Path, max_bytes: int, *,
+                      transaction_headroom: int = 0) -> int:
     used = _store_bytes(output_dir, scratch_path)
-    headroom = min(STORE_HEADROOM_BYTES, max(1, max_bytes // 100))
+    headroom = max(min(STORE_HEADROOM_BYTES, max(1, max_bytes // 100)), transaction_headroom)
     if used + headroom > max_bytes:
         raise StoreCapReached(f"compact ledger and scratch reached configured cap {max_bytes} bytes")
     return used
@@ -382,11 +385,12 @@ def _parse_hour(path: Path, scratch_path: Path, source_hour: str, sha256: str,
         with gzip.open(path, "rb") as stream:
             while True:
                 _ensure_free(scratch_path.parent, min_free_bytes)
-                _ensure_store_cap(scratch_path.parent.parent, scratch_path, max_store_bytes)
+                _ensure_store_cap(scratch_path.parent.parent, scratch_path, max_store_bytes,
+                                  transaction_headroom=3 * (SCRATCH_BATCH_BYTES + max_event_line_bytes))
                 with db:
                     batch_bytes = 0
-                    for _ in range(500):
-                        if batch_bytes >= 1024 * 1024:
+                    for _ in range(SCRATCH_BATCH_EVENTS):
+                        if batch_bytes >= SCRATCH_BATCH_BYTES:
                             break
                         remaining = max_uncompressed_bytes - uncompressed
                         line = stream.readline(min(max_event_line_bytes + 1, remaining + 1))
