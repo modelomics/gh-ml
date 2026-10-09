@@ -303,6 +303,8 @@ def catch_up(
     max_event_line_bytes: int = gharchive_compact.MAX_EVENT_LINE_BYTES,
     max_compact_store_bytes: int = gharchive_compact.MAX_COMPACT_STORE_BYTES,
     prefetch_hours: int = 0,
+    auto_rollover: bool = False,
+    rollover_target_bytes: int = 512 * 1024**2,
 ) -> dict[str, Any]:
     """Process sequential hours while retaining visible gaps and bounded retries.
 
@@ -313,7 +315,10 @@ def catch_up(
             (max_hours is not None and max_hours < 1) or (max_seconds is not None and max_seconds < 0) or min_free_bytes < 0 or
             rate_limit_bytes_per_second <= 0 or max_compressed_hour_bytes < 1 or
             max_uncompressed_hour_bytes < 1 or max_events_per_hour < 1 or max_event_line_bytes < 1 or
-            max_compact_store_bytes < 1 or prefetch_hours not in (0, 1)):
+            max_compact_store_bytes < 1 or prefetch_hours not in (0, 1) or
+            not isinstance(auto_rollover, bool) or
+            isinstance(rollover_target_bytes, bool) or not isinstance(rollover_target_bytes, int) or
+            rollover_target_bytes < 1):
         raise ValueError("attempt count must be positive and backoff non-negative")
     compact_mode = aggregate_fn is None
     if aggregate_fn is None:
@@ -324,6 +329,8 @@ def catch_up(
     end_dt = _hour(end) if end is not None else None
     manifest_path, receipts_path = run_dir / "manifest.json", run_dir / "receipts.jsonl"
     data = _manifest(run_dir, start_dt, end_dt)
+    data.pop("blocking_hour", None)
+    data.pop("blocking_reason", None)
     fixed_end = _hour(data["end"])
     raw_dir, aggregate_dir = run_dir / "raw", run_dir / "aggregate"
     raw_dir.mkdir(exist_ok=True)
@@ -353,14 +360,18 @@ def catch_up(
     _advance_watermark(data)
     scanned_before = _hour(data["scanned_through"]) if data.get("scanned_through") else start_dt - timedelta(hours=1)
     cursor = scanned_before + timedelta(hours=1)
-    work_hours = []
+    forward_hours = []
     while cursor <= fixed_end:
-        work_hours.append(cursor)
+        forward_hours.append(cursor)
         cursor += timedelta(hours=1)
-    # Retry gaps from earlier invocations after advancing the main scan, so a
-    # persistent 404 cannot consume every bounded invocation before new hours run.
-    work_hours.extend(_hour(hour) for hour, record in data["hours"].items()
-                       if _hour(hour) <= scanned_before and record.get("status") in ("gap", "verified", "aggregated"))
+    older_retries = [_hour(hour) for hour, record in data["hours"].items()
+                     if (_hour(hour) <= scanned_before and
+                         record.get("status") in ("gap", "verified", "aggregated") and
+                         not (record.get("status") == "gap" and record.get("retryable") is False))]
+    older_retries.sort()
+    # A catalog can close only chronological, noninterleaving intervals. Repair
+    # prior retryable gaps before advancing the active epoch beyond them.
+    work_hours = older_retries + forward_hours if rollover_store is not None else forward_hours + older_retries
     data["status"] = "running"
     _atomic_json(manifest_path, data)
     consecutive_provider_errors = 0
@@ -377,6 +388,79 @@ def catch_up(
         if prefetch_executor is not None:
             prefetch_executor.shutdown(wait=False, cancel_futures=True)
         return _summary(data, run_dir)
+
+    def stop_partial(status: str, *, hour: str | None = None, reason: str | None = None) -> dict[str, Any]:
+        data["status"] = status
+        if hour is not None:
+            data["blocking_hour"] = hour
+        if reason is not None:
+            data["blocking_reason"] = reason
+        _atomic_json(manifest_path, data)
+        return finish()
+
+    def maintain_catalog() -> bool:
+        """Run bounded opt-in rollover/carry work between committed hours."""
+        if rollover_store is None or not auto_rollover:
+            return True
+        if max_seconds is not None and time.monotonic() - invocation_started >= max_seconds:
+            return False
+        reservation = (max_compressed_hour_bytes
+                       if pending_prefetch is not None and not pending_prefetch[1].done() else 0)
+        required_free = min_free_bytes + reservation
+        rollover_store.cleanup_retired_artifacts(
+            max_store_bytes=max_compact_store_bytes, min_free_bytes=required_free)
+        if max_seconds is not None and time.monotonic() - invocation_started >= max_seconds:
+            return False
+        used = rollover_store.used_bytes()
+        rollover_store.ensure_budget(max_compact_store_bytes, min_free_bytes=required_free)
+        from . import gharchive_segment_export, gharchive_segments
+        swapped = None
+        active_bytes = rollover_store.active_epoch_bytes()
+        if active_bytes >= rollover_target_bytes:
+            remaining_store = max_compact_store_bytes - used
+            if remaining_store < 1:
+                raise gharchive_compact.StoreCapReached("no shared-store headroom remains for rollover output")
+            # Bound the reservation to a conservative estimate derived from the
+            # active DB, further limited by the actual shared-store headroom.
+            output_cap = min(remaining_store, max(64 * 1024**2, 2 * active_bytes))
+            swapped = rollover_store.rollover(
+                gharchive_segment_export.export_closed_sqlite,
+                max_output_bytes=output_cap, min_free_bytes=required_free,
+                max_store_bytes=max_compact_store_bytes)
+            if swapped is not None:
+                if max_seconds is not None and time.monotonic() - invocation_started >= max_seconds:
+                    return False
+                rollover_store.cleanup_retired_artifacts(
+                    max_store_bytes=max_compact_store_bytes, min_free_bytes=required_free)
+        # A carry writes one immutable replacement and temporarily retains both
+        # inputs, so perform at most two bounded carries in this maintenance turn.
+        for _ in range(2):
+            if max_seconds is not None and time.monotonic() - invocation_started >= max_seconds:
+                return False
+            snapshot = rollover_store.catalog_snapshot()
+            segments = snapshot["segments"]
+            pair = next((segments[index:index + 2] for index in range(len(segments) - 1)
+                         if segments[index]["level"] == segments[index + 1]["level"]), None)
+            if pair is None:
+                break
+            used = rollover_store.used_bytes()
+            remaining_store = max_compact_store_bytes - used
+            if remaining_store < 1:
+                raise gharchive_compact.StoreCapReached("no shared-store headroom remains for segment carry")
+            input_bytes = sum(item["parquet_identity"]["size"] for item in pair)
+            output_cap = min(remaining_store, max(64 * 1024**2, 2 * input_bytes))
+            merged = rollover_store.compact_adjacent_segments(
+                gharchive_segments.merge_segments,
+                max_store_bytes=max_compact_store_bytes,
+                max_output_bytes=output_cap, min_free_bytes=required_free,
+                memory_limit="512MB")
+            if merged is None:
+                break
+            if max_seconds is not None and time.monotonic() - invocation_started >= max_seconds:
+                return False
+            rollover_store.cleanup_retired_artifacts(
+                max_store_bytes=max_compact_store_bytes, min_free_bytes=required_free)
+        return True
 
     def schedule_prefetch(hour: datetime) -> None:
         nonlocal pending_prefetch
@@ -457,6 +541,64 @@ def catch_up(
         key, url = _key(cursor), _url(cursor)
         record = data["hours"].setdefault(key, {"url": url, "status": "pending", "attempts": []})
         stable = raw_dir / f"{cursor:%Y-%m-%d-%H}.json.gz"
+        if rollover_store is not None and cursor <= scanned_before and record.get("status") in (
+                "gap", "verified", "aggregated"):
+            try:
+                closed = rollover_store.closed_hour_status(key)
+                marker = rollover_store.read_marker(key)
+            except Exception as exc:
+                return stop_partial("requires_segment_repair", hour=key,
+                                    reason=f"could not verify closed segment coverage: {type(exc).__name__}: {exc}")
+            if marker is not None or (closed["closed"] and closed["covered"]):
+                try:
+                    if marker is None:
+                        raise gharchive_rollover.RolloverError("closed coverage has no proven hour marker")
+                    marker_hash = marker["sha256"]
+                    if record.get("sha256") not in (None, marker_hash):
+                        raise gharchive_rollover.RolloverError("manifest and closed marker hashes disagree")
+                    if stable.exists() and gharchive._file_hash(stable) != marker_hash:
+                        raise gharchive_rollover.RolloverError("retained raw hash conflicts with closed marker")
+                    report = rollover_store.recover_hour_report(
+                        aggregate_dir, key, marker_hash,
+                        max_store_bytes=max_compact_store_bytes,
+                        min_free_bytes=min_free_bytes)
+                    record.update(status="aggregated", sha256=marker_hash, parser_complete=True,
+                                  parser_report=report["report_path"],
+                                  parser_report_sha256=report["report_sha256"],
+                                  parser_report_kind="reconstructed_from_compact_hour_marker",
+                                  parser_processed_events=report["unique_events"],
+                                  parser_malformed_events=report["malformed_events"])
+                    _append_receipt(receipts_path, {"hour": key, "status": "parser_report_recovered",
+                                                    "sha256": marker_hash, "parser_report": report["report_path"],
+                                                    "parser_report_sha256": report["report_sha256"],
+                                                    "reconstructed_from": "aggregate/gharchive-catalog.json",
+                                                    "at": datetime.now(timezone.utc).isoformat()})
+                    _atomic_json(manifest_path, data)
+                    if stable.exists():
+                        stable.unlink()
+                        _fsync_dir(stable.parent)
+                    record.update(status="deleted", raw_deleted_at=datetime.now(timezone.utc).isoformat())
+                    _advance_watermark(data)
+                    _append_receipt(receipts_path, {"hour": key, "status": "deleted", "sha256": marker_hash,
+                                                    "parser_report": report["report_path"],
+                                                    "parser_report_sha256": report["report_sha256"],
+                                                    "recovered_from_closed_segment": True,
+                                                    "at": record["raw_deleted_at"]})
+                    _atomic_json(manifest_path, data)
+                    continue
+                except (KeyError, ValueError, RuntimeError, OSError, sqlite3.Error,
+                        gharchive_rollover.RolloverError, gharchive_compact.StoreCapReached) as exc:
+                    if isinstance(exc, gharchive_compact.StoreCapReached):
+                        recovery_status = "paused_compact_store_cap"
+                    elif isinstance(exc, OSError) and "below required" in str(exc):
+                        recovery_status = "paused_low_disk_space"
+                    else:
+                        recovery_status = "retryable_partial_report_recovery"
+                    return stop_partial(recovery_status, hour=key,
+                                        reason=f"closed marker recovery failed: {type(exc).__name__}: {exc}")
+            if closed["closed"]:
+                return stop_partial("requires_segment_repair", hour=key,
+                                    reason=f"retryable hour falls inside closed segment interval through {closed['closed_through']}")
         if record.get("status") == "aggregated" and stable.exists():
             # Recover report provenance before cleanup if a prior process stopped
             # after the compact SQLite commit but before writing its report file.
@@ -524,6 +666,10 @@ def catch_up(
 
         success = False
         for attempt_no in range(1, max_attempts_per_hour + 1):
+            if max_seconds is not None and time.monotonic() - invocation_started >= max_seconds:
+                record["status"] = "verified" if stable.is_file() and record.get("sha256") else "gap"
+                _atomic_json(manifest_path, data)
+                return stop_partial("running_partial", hour=key, reason="invocation deadline reached before next attempt")
             reuse_verified = (record.get("status") == "verified" and stable.is_file()
                               and gharchive._file_hash(stable) == record.get("sha256"))
             attempt_started = (prefetched.get("started_at") if attempt_no == 1 and isinstance(prefetched, dict)
@@ -550,11 +696,20 @@ def catch_up(
                     free_bytes = shutil.disk_usage(run_dir).free
                     if free_bytes < min_free_bytes:
                         raise OSError(f"archive free space {free_bytes} is below required reserve {min_free_bytes}")
-                    digest, size = _download(url, part, opener=opener, timeout=timeout_seconds,
+                    download_timeout = timeout_seconds
+                    deadline = None
+                    if max_seconds is not None:
+                        remaining = max_seconds - (time.monotonic() - invocation_started)
+                        if remaining <= 0:
+                            raise TimeoutError("invocation deadline reached before download")
+                        download_timeout = min(download_timeout, remaining)
+                        deadline = invocation_started + max_seconds
+                    digest, size = _download(url, part, opener=opener, timeout=download_timeout,
                                              rate_limit_bytes_per_second=rate_limit_bytes_per_second,
                                              min_free_bytes=min_free_bytes,
                                              max_compressed_bytes=max_compressed_hour_bytes,
-                                             max_uncompressed_bytes=max_uncompressed_hour_bytes, sleep=sleep)
+                                             max_uncompressed_bytes=max_uncompressed_hour_bytes, sleep=sleep,
+                                             deadline=deadline)
                     os.replace(part, stable)
                     _fsync_dir(stable.parent)
                 attempt.update(status="verified", http_status=200, compressed_bytes=size, sha256=digest,
@@ -684,7 +839,16 @@ def catch_up(
                     _atomic_json(manifest_path, data)
                     return finish()
                 if attempt_no < max_attempts_per_hour:
-                    sleep(base_backoff_seconds * (2 ** (attempt_no - 1)))
+                    backoff = base_backoff_seconds * (2 ** (attempt_no - 1))
+                    if max_seconds is None:
+                        sleep(backoff)
+                    else:
+                        remaining = max_seconds - (time.monotonic() - invocation_started)
+                        if remaining <= 0:
+                            break
+                        sleep(min(backoff, remaining))
+                        if time.monotonic() - invocation_started >= max_seconds:
+                            break
                 if is_provider_error:
                     consecutive_provider_errors += 1
                     if consecutive_provider_errors >= 5:
@@ -700,19 +864,50 @@ def catch_up(
                     # same public URL several times in one pass adds load without
                     # advancing useful coverage; a later invocation retries it.
                     break
-                if isinstance(exc, (ValueError, gzip.BadGzipFile, EOFError, zlib.error)):
+                if isinstance(exc, (ValueError, gzip.BadGzipFile, zlib.error)):
                     # Content/size validation failures need an operator decision or
                     # a later source retry; repeating this same body is wasteful.
                     break
+                if max_seconds is not None and time.monotonic() - invocation_started >= max_seconds:
+                    break
         if not success:
+            if rollover_store is not None:
+                try:
+                    committed = rollover_store.read_marker(key)
+                except (OSError, ValueError, gharchive_rollover.RolloverError):
+                    committed = None
+                if committed is not None and committed.get("sha256") == record.get("sha256"):
+                    record["status"] = "verified"
+                    data["scanned_through"] = key if cursor > scanned_before else data.get("scanned_through")
+                    _atomic_json(manifest_path, data)
+                    return stop_partial("running_partial", hour=key,
+                                        reason="active compact marker committed; resume through marker replay")
             record["status"] = "gap"
             if cursor > scanned_before:
                 data["scanned_through"] = key
                 scanned_before = cursor
+            if rollover_store is not None and record.get("retryable") is True:
+                return stop_partial("retryable_partial_unresolved_gap", hour=key,
+                                    reason=record.get("last_error", "source hour remains unavailable"))
             _atomic_json(manifest_path, data)
-            # An unavailable/corrupt hour remains a gap, but does not prevent
-            # acquisition of later hours. The contiguous watermark never crosses it.
+            # Legacy acquisition can continue past a gap. Catalog mode returned
+            # above because a retryable hole cannot be crossed by closed segments.
             continue
+
+        try:
+            maintenance_complete = maintain_catalog()
+        except Exception as exc:
+            if isinstance(exc, OSError) and "below required" in str(exc):
+                status = "paused_low_disk_space"
+            elif isinstance(exc, gharchive_compact.StoreCapReached):
+                status = "paused_compact_store_cap"
+            else:
+                status = "retryable_partial_maintenance_failure"
+            return stop_partial(status, hour=key,
+                                reason=f"catalog maintenance failed: {type(exc).__name__}: {exc}")
+        if not maintenance_complete:
+            return stop_partial("running_partial_maintenance_deadline", hour=key,
+                                reason="deadline reached between committed-hour maintenance steps")
 
     data["scanned_through"] = _key(max(scanned_before, fixed_end)) if scanned_before <= fixed_end else data.get("scanned_through")
     unresolved = any(hour.get("status") != "deleted" for hour in data["hours"].values())
@@ -852,6 +1047,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--max-seconds", type=float, help="stop this invocation after this many seconds")
     parser.add_argument("--prefetch-hours", type=int, choices=(0, 1), default=0,
                         help="overlap one future download with compact parse/commit (default: serial)")
+    parser.add_argument("--auto-rollover", action="store_true",
+                        help="roll over a catalog-backed active epoch at the configured byte target")
+    parser.add_argument("--rollover-target-bytes", type=int, default=512 * 1024**2,
+                        help="active SQLite epoch size that triggers opt-in rollover")
     parser.add_argument("--max-compressed-hour-bytes", type=int, default=gharchive_compact.MAX_COMPRESSED_BYTES)
     parser.add_argument("--max-uncompressed-hour-bytes", type=int, default=gharchive_compact.MAX_UNCOMPRESSED_BYTES)
     parser.add_argument("--max-events-per-hour", type=int, default=gharchive_compact.MAX_EVENTS_PER_HOUR)
@@ -880,7 +1079,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                           max_events_per_hour=args.max_events_per_hour,
                           max_event_line_bytes=args.max_event_line_bytes,
                           max_compact_store_bytes=args.max_compact_store_bytes,
-                          min_free_bytes=args.min_free_bytes)
+                           min_free_bytes=args.min_free_bytes,
+                           auto_rollover=args.auto_rollover,
+                           rollover_target_bytes=args.rollover_target_bytes)
     except Exception as exc:
         print(f"gharchive-acquire: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

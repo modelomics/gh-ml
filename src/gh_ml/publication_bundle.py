@@ -484,85 +484,12 @@ def materialize_combined_assessment_views(
             bucket_id = receipt["bucket_id"]
             source_path = Path(inventory_parts[bucket_id]["verified_path"])
             assessment_path = Path(receipt["verified_path"])
-            inv_cols = _columns(connection, source_path)
-            ass_cols = _columns(connection, assessment_path)
-
-            def col(alias: str, columns: set[str], name: str, cast: str | None = None,
-                    default: str = "NULL") -> str:
-                value = f"{alias}.{_quote(name)}" if name in columns else default
-                return f"try_cast({value} AS {cast})" if cast else value
-
-            def listcol(alias: str, columns: set[str], name: str) -> str:
-                return f"coalesce(try_cast({col(alias, columns, name)} AS VARCHAR[]), []::VARCHAR[])"
-
-            expressions = {
-                "all_domains": listcol("a", ass_cols, "domains"),
-                "all_methods": listcol("a", ass_cols, "methods"),
-                "all_novelty_signals": "[]::VARCHAR[]", "all_query_ids": "[]::VARCHAR[]",
-                "archived": col("i", inv_cols, "archived", "BOOLEAN"),
-                "candidate_status": col("a", ass_cols, "contribution_eligibility_status", default="'not_established'"),
-                "candidate_rule_version": col("a", ass_cols, "candidate_rule_version"),
-                "candidate_eligible": col("a", ass_cols, "candidate_eligible", "BOOLEAN"),
-                "candidate_reason": col("a", ass_cols, "candidate_reason"),
-                "candidate_evidence": listcol("a", ass_cols, "candidate_evidence"),
-                "created_at": col("i", inv_cols, "created_at"),
-                "description": col("i", inv_cols, "description"),
-                "domains": listcol("a", ass_cols, "domains"),
-                "evidence_signals": listcol("a", ass_cols, "metadata_evidence_signals"),
-                "evidence_tier": col("a", ass_cols, "metadata_evidence_tier"),
-                "evidence_version": col("a", ass_cols, "metadata_evidence_version"),
-                # A source freshness timestamp (e.g. updated_at) says when the
-                # source row describes the repository, not when we collected it.
-                # Preserve observation times only when the inventory explicitly
-                # carries observation-specific fields.
-                "first_observed_at": col("i", inv_cols, "first_observed_at", "VARCHAR"),
-                "fork": col("i", inv_cols, "fork", "BOOLEAN"),
-                "forks": col("i", inv_cols, "forks", "BIGINT"),
-                "github_id": col("i", inv_cols, "github_id", "BIGINT"),
-                "homepage": col("i", inv_cols, "homepage"),
-                "language": col("i", inv_cols, "language"),
-                "license": col("i", inv_cols, "license"),
-                "methods": listcol("a", ass_cols, "methods"),
-                "name": f"coalesce({col('i', inv_cols, 'full_name')}, {col('i', inv_cols, 'name')}, {col('a', ass_cols, 'name')})",
-                "novelty_signals": "[]::VARCHAR[]", "observation_count": col("i", inv_cols, "observation_count", "BIGINT"),
-                "observed_at": col("i", inv_cols, "observed_at", "VARCHAR"), "paper_ids": "[]::VARCHAR[]",
-                "pushed_at": col("i", inv_cols, "pushed_at"), "query_ids": "[]::VARCHAR[]",
-                "readme_blob_sha": col("a", ass_cols, "readme_blob_sha"),
-                "readme_checked_at": col("a", ass_cols, "readme_checked_at"),
-                "readme_evidence_version": col("a", ass_cols, "readme_evidence_version"),
-                "readme_etag": col("a", ass_cols, "readme_etag"),
-                "readme_sections": listcol("a", ass_cols, "readme_sections"),
-                "readme_signals": listcol("a", ass_cols, "readme_signals"),
-                "readme_status": col("a", ass_cols, "readme_status"),
-                "readme_observed_at": col("a", ass_cols, "readme_observed_at"),
-                "readme_repository_name_at_fetch": col("a", ass_cols, "readme_repository_name_at_fetch"),
-                "selection_reason": col("a", ass_cols, "selection_reason"),
-                "selection_signals": listcol("a", ass_cols, "selection_signals"),
-                "selection_status": col("a", ass_cols, "selection_status"),
-                "selection_version": col("a", ass_cols, "selection_version"),
-                "stars": col("i", inv_cols, "stars", "BIGINT"),
-                "topics": listcol("i", inv_cols, "topics"),
-                "updated_at": col("i", inv_cols, "updated_at"),
-                "url": col("i", inv_cols, "url"),
-                "extra_json": "CAST(to_json(struct_pack(" + ", ".join([
-                    f"triage_status := {col('a', ass_cols, 'triage_status')}",
-                    f"triage_reason := {col('a', ass_cols, 'triage_reason')}",
-                    f"metadata_fingerprint := {col('a', ass_cols, 'metadata_fingerprint')}",
-                    f"model_version := {col('a', ass_cols, 'model_version')}",
-                    f"model_sha256 := {col('a', ass_cols, 'model_sha256')}",
-                    f"model_score := {col('a', ass_cols, 'model_score', 'DOUBLE')}",
-                    f"model_predicted_label := {col('a', ass_cols, 'model_predicted_label')}",
-                    f"novelty_status := {col('a', ass_cols, 'novelty_status')}",
-                    f"original_content_status := {col('a', ass_cols, 'original_content_status')}",
-                    f"scientific_novelty_status := {col('a', ass_cols, 'scientific_novelty_status')}",
-                    f"contribution_eligibility_status := {col('a', ass_cols, 'contribution_eligibility_status')}",
-                ]) + ")) AS VARCHAR)",
-            }
+            projection, _ = _assessment_view_projection(
+                connection, source_path, assessment_path
+            )
             from_sql = (f"FROM read_parquet({_literal(source_path)}) i JOIN "
                         f"read_parquet({_literal(assessment_path)}) a USING (github_id)")
-            base_query = "SELECT " + ", ".join(
-                f"{expressions[name]} AS {_quote(name)}" for name in expressions
-            ) + " " + from_sql
+            base_query = projection + " " + from_sql
             current_path = current_root / (bucket_id.replace("/", "--") + ".parquet")
             candidate_path = candidate_root / (bucket_id.replace("/", "--") + ".parquet")
             connection.execute(f"COPY ({base_query} ORDER BY github_id) TO {_literal(current_path)} (FORMAT PARQUET, COMPRESSION ZSTD)")
@@ -1409,6 +1336,90 @@ def _columns(con: Any, paths: Path | Sequence[Path]) -> set[str]:
     return {row[0] for row in con.execute(
         f"DESCRIBE SELECT * FROM read_parquet({_parquet_list(paths)}, union_by_name=true)"
     ).fetchall()}
+
+
+def _assessment_view_projection(
+    con: Any, inventory_path: Path, assessment_path: Path,
+) -> tuple[str, tuple[str, ...]]:
+    """Return the canonical projection shared by materialized and logical views."""
+    inv_cols = _columns(con, inventory_path)
+    ass_cols = _columns(con, assessment_path)
+
+    def col(alias: str, columns: set[str], name: str, cast: str | None = None,
+            default: str = "NULL") -> str:
+        value = f"{alias}.{_quote(name)}" if name in columns else default
+        return f"try_cast({value} AS {cast})" if cast else value
+
+    def listcol(alias: str, columns: set[str], name: str) -> str:
+        return f"coalesce(try_cast({col(alias, columns, name)} AS VARCHAR[]), []::VARCHAR[])"
+
+    expressions = {
+        "all_domains": listcol("a", ass_cols, "domains"),
+        "all_methods": listcol("a", ass_cols, "methods"),
+        "all_novelty_signals": "[]::VARCHAR[]", "all_query_ids": "[]::VARCHAR[]",
+        "archived": col("i", inv_cols, "archived", "BOOLEAN"),
+        "candidate_status": col("a", ass_cols, "contribution_eligibility_status", default="'not_established'"),
+        "candidate_rule_version": col("a", ass_cols, "candidate_rule_version"),
+        "candidate_eligible": col("a", ass_cols, "candidate_eligible", "BOOLEAN"),
+        "candidate_reason": col("a", ass_cols, "candidate_reason"),
+        "candidate_evidence": listcol("a", ass_cols, "candidate_evidence"),
+        "created_at": col("i", inv_cols, "created_at"),
+        "description": col("i", inv_cols, "description"),
+        "domains": listcol("a", ass_cols, "domains"),
+        "evidence_signals": listcol("a", ass_cols, "metadata_evidence_signals"),
+        "evidence_tier": col("a", ass_cols, "metadata_evidence_tier"),
+        "evidence_version": col("a", ass_cols, "metadata_evidence_version"),
+        # Source freshness does not imply observation time.
+        "first_observed_at": col("i", inv_cols, "first_observed_at", "VARCHAR"),
+        "fork": col("i", inv_cols, "fork", "BOOLEAN"),
+        "forks": col("i", inv_cols, "forks", "BIGINT"),
+        "github_id": col("i", inv_cols, "github_id", "BIGINT"),
+        "homepage": col("i", inv_cols, "homepage"),
+        "language": col("i", inv_cols, "language"),
+        "license": col("i", inv_cols, "license"),
+        "methods": listcol("a", ass_cols, "methods"),
+        "name": f"coalesce({col('i', inv_cols, 'full_name')}, {col('i', inv_cols, 'name')}, {col('a', ass_cols, 'name')})",
+        "novelty_signals": "[]::VARCHAR[]",
+        "observation_count": col("i", inv_cols, "observation_count", "BIGINT"),
+        "observed_at": col("i", inv_cols, "observed_at", "VARCHAR"),
+        "paper_ids": "[]::VARCHAR[]",
+        "pushed_at": col("i", inv_cols, "pushed_at"),
+        "query_ids": "[]::VARCHAR[]",
+        "readme_blob_sha": col("a", ass_cols, "readme_blob_sha"),
+        "readme_checked_at": col("a", ass_cols, "readme_checked_at"),
+        "readme_evidence_version": col("a", ass_cols, "readme_evidence_version"),
+        "readme_etag": col("a", ass_cols, "readme_etag"),
+        "readme_sections": listcol("a", ass_cols, "readme_sections"),
+        "readme_signals": listcol("a", ass_cols, "readme_signals"),
+        "readme_status": col("a", ass_cols, "readme_status"),
+        "readme_observed_at": col("a", ass_cols, "readme_observed_at"),
+        "readme_repository_name_at_fetch": col("a", ass_cols, "readme_repository_name_at_fetch"),
+        "selection_reason": col("a", ass_cols, "selection_reason"),
+        "selection_signals": listcol("a", ass_cols, "selection_signals"),
+        "selection_status": col("a", ass_cols, "selection_status"),
+        "selection_version": col("a", ass_cols, "selection_version"),
+        "stars": col("i", inv_cols, "stars", "BIGINT"),
+        "topics": listcol("i", inv_cols, "topics"),
+        "updated_at": col("i", inv_cols, "updated_at"),
+        "url": col("i", inv_cols, "url"),
+        "extra_json": "CAST(to_json(struct_pack(" + ", ".join([
+            f"triage_status := {col('a', ass_cols, 'triage_status')}",
+            f"triage_reason := {col('a', ass_cols, 'triage_reason')}",
+            f"metadata_fingerprint := {col('a', ass_cols, 'metadata_fingerprint')}",
+            f"model_version := {col('a', ass_cols, 'model_version')}",
+            f"model_sha256 := {col('a', ass_cols, 'model_sha256')}",
+            f"model_score := {col('a', ass_cols, 'model_score', 'DOUBLE')}",
+            f"model_predicted_label := {col('a', ass_cols, 'model_predicted_label')}",
+            f"novelty_status := {col('a', ass_cols, 'novelty_status')}",
+            f"original_content_status := {col('a', ass_cols, 'original_content_status')}",
+            f"scientific_novelty_status := {col('a', ass_cols, 'scientific_novelty_status')}",
+            f"contribution_eligibility_status := {col('a', ass_cols, 'contribution_eligibility_status')}",
+        ]) + ")) AS VARCHAR)",
+    }
+    select = "SELECT " + ", ".join(
+        f"{expressions[name]} AS {_quote(name)}" for name in expressions
+    )
+    return select, tuple(expressions)
 
 
 def _sql_source(con: Any, paths: Path | Sequence[Path], label: str, *, legacy: bool = False) -> str:

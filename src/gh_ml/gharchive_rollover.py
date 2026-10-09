@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from . import gharchive_compact, gharchive_segments
 
-CATALOG_SCHEMA = "gharchive-rollover-catalog-v1"
+CATALOG_SCHEMA = "gharchive-rollover-catalog-v2"
 LEDGER_SCHEMA = "gharchive-hour-ledger-v1"
 CATALOG_NAME = "gharchive-catalog.json"
 LEDGER_NAME = "gharchive-hour-ledger.sqlite3"
@@ -29,6 +29,8 @@ MARKER_COLUMNS = (
     "source_hour", "sha256", "compressed_bytes", "uncompressed_bytes", "unique_events",
     "malformed_events", "repository_observations", "committed_at", "parse_seconds", "merge_seconds",
 )
+CATALOG_METADATA_RESERVE_BYTES = 64 * 1024
+EMPTY_EPOCH_RESERVE_BYTES = 1024 * 1024
 
 
 class RolloverError(RuntimeError):
@@ -101,10 +103,26 @@ def _valid_hash(value: Any, context: str) -> str:
     return value
 
 
+def _valid_identity(value: Any) -> bool:
+    return (isinstance(value, dict)
+            and all(not isinstance(value.get(key), bool) and isinstance(value.get(key), int)
+                    for key in ("device", "inode", "size", "mtime_ns"))
+            and value["device"] >= 0 and value["inode"] >= 0
+            and value["size"] >= 0 and value["mtime_ns"] >= 0)
+
+
 def _database_bytes(path: Path) -> int:
     return sum(candidate.stat().st_size for candidate in (
         path, Path(f"{path}-wal"), Path(f"{path}-shm"), Path(f"{path}-journal"),
     ) if candidate.is_file())
+
+
+def _file_identity(path: Path) -> dict[str, int]:
+    stat_result = path.stat(follow_symlinks=False)
+    if not path.is_file() or path.is_symlink():
+        raise RolloverError(f"unsafe owned artifact: {path}")
+    return {"device": stat_result.st_dev, "inode": stat_result.st_ino,
+            "size": stat_result.st_size, "mtime_ns": stat_result.st_mtime_ns}
 
 
 def _hour(value: Any) -> str:
@@ -208,6 +226,7 @@ def _read_db_marker(db_path: Path, source_hour: str) -> dict[str, Any] | None:
 def _segment_catalog_record(root: Path, segment: gharchive_segments.Segment, *, level: int) -> dict[str, Any]:
     manifest_path = segment.directory / gharchive_segments.MANIFEST_NAME
     parquet_stat = segment.parquet_path.stat()
+    manifest_stat = manifest_path.stat()
     return {
         "path": str(segment.directory.resolve().relative_to(root.resolve())),
         "manifest_sha256": _sha256(manifest_path),
@@ -215,9 +234,29 @@ def _segment_catalog_record(root: Path, segment: gharchive_segments.Segment, *, 
         "end_hour": segment.end_hour,
         "covered_hours": dict(sorted(segment.manifest["covered_hours"].items())),
         "level": level,
+        "manifest_identity": {"device": manifest_stat.st_dev, "inode": manifest_stat.st_ino,
+                              "size": manifest_stat.st_size, "mtime_ns": manifest_stat.st_mtime_ns},
         "parquet_identity": {"device": parquet_stat.st_dev, "inode": parquet_stat.st_ino,
                              "size": parquet_stat.st_size, "mtime_ns": parquet_stat.st_mtime_ns},
     }
+
+
+def _retired_epoch_record(root: Path, db_path: Path, epoch: int) -> dict[str, Any]:
+    db_path = db_path.resolve()
+    relative = str(db_path.relative_to(root.resolve()))
+    files = []
+    for role, suffix in (("db", ""), ("wal", "-wal"), ("shm", "-shm"), ("journal", "-journal")):
+        path = Path(f"{db_path}{suffix}")
+        if path.is_symlink():
+            raise RolloverError(f"unsafe active database sidecar: {path}")
+        if path.exists():
+            if not path.is_file():
+                raise RolloverError(f"unsafe active database sidecar: {path}")
+            files.append({"role": role, "path": str(path.relative_to(root.resolve())),
+                          "identity": _file_identity(path)})
+    if not any(item["role"] == "db" for item in files):
+        raise RolloverError(f"active database is missing before retirement: {db_path}")
+    return {"epoch": epoch, "db_path": relative, "files": files}
 
 
 @dataclass
@@ -331,7 +370,19 @@ class RolloverStore:
                    _safe_relative(self.root, catalog["active_db"], "active database path")]
         for base in (self.ledger_path, _safe_relative(self.root, catalog["active_db"], "active database path")):
             dynamic.extend(Path(f"{base}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
-        if scratch_path is not None:
+        scratch_root = self.root / "scratch"
+        scratch_paths = set()
+        if scratch_root.exists():
+            if scratch_root.is_symlink() or not scratch_root.is_dir():
+                raise RolloverError("scratch path must be an owned directory")
+            for path in scratch_root.iterdir():
+                if path.is_symlink():
+                    raise RolloverError(f"symlink in rollover store scratch directory: {path}")
+                if not path.is_file():
+                    raise RolloverError(f"unexpected directory in rollover store scratch directory: {path}")
+                scratch_paths.add(path)
+                total += path.stat().st_size
+        if scratch_path is not None and scratch_path.resolve(strict=False) not in scratch_paths:
             dynamic.extend((scratch_path, gharchive_compact._scratch_receipt_path(scratch_path)))
             dynamic.extend(Path(f"{scratch_path}{suffix}") for suffix in ("-wal", "-shm", "-journal"))
         for path in dynamic:
@@ -351,6 +402,7 @@ class RolloverStore:
         static_files: dict[Path, int] = {}
         report_files: dict[Path, int] = {}
         reports_root = self.root / "hour-reports"
+        scratch_root = self.root / "scratch"
         for directory, child_dirs, filenames in os.walk(self.root, followlinks=False):
             base = Path(directory)
             for child in list(child_dirs):
@@ -361,7 +413,7 @@ class RolloverStore:
                 path = base / filename
                 if path.is_symlink():
                     raise RolloverError(f"symlink in rollover store budget walk: {path}")
-                if path in dynamic or not path.is_file():
+                if path in dynamic or path.is_relative_to(scratch_root) or not path.is_file():
                     continue
                 if path.is_relative_to(reports_root):
                     report_files[path] = path.stat().st_size
@@ -491,6 +543,52 @@ class RolloverStore:
             raise OSError(f"archive free space {free} is below required reserve {min_free_bytes + transaction_headroom}")
         return used
 
+    def _invalidate_budget_cache_locked(self) -> None:
+        self._budget_cache_catalog_identity = None
+        self._budget_static_files = None
+        self._budget_report_files = None
+
+    @staticmethod
+    def _catalog_reserve_bytes(catalog: Mapping[str, Any], *, extra_covered_hours: int = 0,
+                               extra_records: int = 0) -> int:
+        covered = sum(len(record.get("covered_hours", {})) for record in catalog.get("segments", []))
+        retired = len(catalog.get("retired_epochs", [])) + len(catalog.get("retired_segments", []))
+        # Upper bound for pretty-printed hourly hash maps, record metadata, and
+        # atomic catalog replacement. The exact serialized size is checked
+        # again immediately before publication.
+        return (CATALOG_METADATA_RESERVE_BYTES + 160 * (covered + extra_covered_hours)
+                + 2048 * (len(catalog.get("segments", [])) + retired + extra_records))
+
+    def _maintenance_output_cap_locked(self, catalog: Mapping[str, Any], *, max_store_bytes: int,
+                                       max_output_bytes: int, min_free_bytes: int,
+                                       additional_reserve: int) -> int:
+        reserve = additional_reserve
+        used = self._used_bytes_locked()
+        available = max_store_bytes - used - reserve
+        effective_output = min(max_output_bytes, available)
+        if effective_output < 1:
+            raise gharchive_compact.StoreCapReached(
+                f"no room under total store cap after {used} used bytes and {reserve} reserved bytes"
+            )
+        self._ensure_budget_locked(
+            max_store_bytes, transaction_headroom=effective_output + reserve,
+            min_free_bytes=min_free_bytes,
+        )
+        return effective_output
+
+    def _publish_catalog_locked(self, value: Mapping[str, Any], *, max_store_bytes: int,
+                                min_free_bytes: int) -> None:
+        encoded = _canonical_bytes(value)
+        self._ensure_budget_locked(max_store_bytes, transaction_headroom=len(encoded),
+                                   min_free_bytes=min_free_bytes)
+        _atomic_json(self.catalog_path, value)
+        self._catalog_cache_identity = None
+        self._catalog_cache = None
+        self._segments_cache_generation = None
+        self._segments_cache_catalog_identity = None
+        self._segments_cache = None
+        self._invalidate_budget_cache_locked()
+
     def ensure_budget(self, max_store_bytes: int, *, scratch_path: str | Path | None = None,
                       transaction_headroom: int = 0, min_free_bytes: int = 0) -> int:
         """Check total owned bytes and free-space reserve under the store lock."""
@@ -522,11 +620,81 @@ class RolloverStore:
         if not isinstance(value, dict) or value.get("schema") != CATALOG_SCHEMA:
             raise RolloverError("unsupported rollover catalog schema")
         generation, epoch, segments = value.get("generation"), value.get("active_epoch"), value.get("segments")
+        retired_epochs, retired_segments = value.get("retired_epochs"), value.get("retired_segments")
         if (isinstance(generation, bool) or not isinstance(generation, int) or generation < 0
                 or isinstance(epoch, bool) or not isinstance(epoch, int) or epoch < 0
-                or not isinstance(segments, list)):
+                or not isinstance(segments, list) or not isinstance(retired_epochs, list)
+                or not isinstance(retired_segments, list)):
             raise RolloverError("malformed rollover catalog generation or segments")
         value["active_db"] = str(_safe_relative(self.root, value.get("active_db"), "active database path").relative_to(self.root.resolve()))
+        active_parts = Path(value["active_db"]).parts
+        if value["active_db"] != LEGACY_DB_NAME and (not active_parts or active_parts[0] != "epochs"):
+            raise RolloverError("active database path is outside owned database locations")
+        current_paths = {value["active_db"]}
+        for current in segments:
+            if not isinstance(current, dict):
+                raise RolloverError("malformed catalog segment entry")
+            current_path = str(_safe_relative(self.root, current.get("path"), "segment path").relative_to(self.root.resolve()))
+            if not Path(current_path).parts or Path(current_path).parts[0] != "segments":
+                raise RolloverError("catalog segment path is outside the owned segments directory")
+            if current_path in current_paths:
+                raise RolloverError("catalog references one path as both active data and segment")
+            current_paths.add(current_path)
+        retired_db_paths = set()
+        for record in retired_epochs:
+            if (not isinstance(record, dict) or isinstance(record.get("epoch"), bool)
+                    or not isinstance(record.get("epoch"), int) or record["epoch"] < 0
+                    or not isinstance(record.get("db_path"), str)
+                    or not isinstance(record.get("files"), list) or not record["files"]):
+                raise RolloverError("malformed retired epoch entry")
+            db_relative = str(_safe_relative(self.root, record["db_path"], "retired database path").relative_to(self.root.resolve()))
+            db_parts = Path(db_relative).parts
+            if db_relative != LEGACY_DB_NAME and (not db_parts or db_parts[0] != "epochs"):
+                raise RolloverError("retired database path is outside owned database locations")
+            if db_relative in current_paths:
+                raise RolloverError("catalog references an active database as retired")
+            if db_relative in retired_db_paths:
+                raise RolloverError("catalog repeats a retired database path")
+            retired_db_paths.add(db_relative)
+            paths = set()
+            roles = set()
+            suffix_for_role = {"db": "", "wal": "-wal", "shm": "-shm", "journal": "-journal"}
+            for item in record["files"]:
+                role = item.get("role") if isinstance(item, dict) else None
+                if (not isinstance(item, dict) or not isinstance(role, str) or role not in suffix_for_role
+                        or item.get("path") != db_relative + suffix_for_role.get(role, "")):
+                    raise RolloverError("malformed retired epoch file entry")
+                path = _safe_relative(self.root, item.get("path"), "retired epoch path")
+                if (str(path.relative_to(self.root.resolve())) in paths or role in roles
+                        or not _valid_identity(item.get("identity"))):
+                    raise RolloverError("malformed or duplicate retired epoch file identity")
+                paths.add(str(path.relative_to(self.root.resolve())))
+                roles.add(role)
+            if "db" not in roles:
+                raise RolloverError("retired epoch lacks its database identity")
+        retired_segment_paths = set()
+        for record in retired_segments:
+            if not isinstance(record, dict):
+                raise RolloverError("malformed retired segment entry")
+            _safe_relative(self.root, record.get("path"), "retired segment path")
+            _valid_hash(record.get("manifest_sha256"), "retired segment manifest")
+            if (not _valid_identity(record.get("manifest_identity"))
+                    or not _valid_identity(record.get("parquet_identity"))
+                    or not isinstance(record.get("covered_hours"), dict)
+                    or isinstance(record.get("level"), bool) or not isinstance(record.get("level"), int)
+                    or record["level"] < 0):
+                raise RolloverError("malformed retired segment identity")
+            relative = str(_safe_relative(self.root, record["path"], "retired segment path").relative_to(self.root.resolve()))
+            if not Path(relative).parts or Path(relative).parts[0] != "segments":
+                raise RolloverError("retired segment path is outside the owned segments directory")
+            if relative in current_paths:
+                raise RolloverError("catalog references an active segment as retired")
+            if relative in retired_segment_paths:
+                raise RolloverError("catalog repeats a retired segment path")
+            retired_segment_paths.add(relative)
+            coverage, start, end = gharchive_segments._validate_coverage(record["covered_hours"])
+            if record.get("start_hour") != start or record.get("end_hour") != end:
+                raise RolloverError("retired segment coverage bounds mismatch")
         self._catalog_cache_identity, self._catalog_cache = identity, value
         return value
 
@@ -534,6 +702,11 @@ class RolloverStore:
     def active_db_path(self) -> Path:
         with self._locked():
             return self.active_db_path_locked()
+
+    def active_epoch_bytes(self) -> int:
+        """Return active compact DB and SQLite sidecar bytes under the writer lock."""
+        with self._locked():
+            return _database_bytes(self.active_db_path_locked())
 
     def catalog_snapshot_locked(self) -> dict[str, Any]:
         """Return verified catalog metadata while the caller holds :meth:`writer`."""
@@ -546,6 +719,19 @@ class RolloverStore:
     def catalog_snapshot(self) -> dict[str, Any]:
         with self._locked():
             return self.catalog_snapshot_locked()
+
+    def closed_hour_status(self, source_hour: str) -> dict[str, Any]:
+        """Describe whether an hour is inside closed coverage or the open tail."""
+        hour = _hour(source_hour)
+        with self._locked():
+            catalog = self._catalog()
+            segments, coverage = self._validated_segments(catalog)
+            closed_through = max((segment.end_hour for segment in segments), default=None)
+            record = self._segment_record_for_hour(catalog, hour)
+            return {"hour": hour, "covered": hour in coverage,
+                    "closed": closed_through is not None and hour <= closed_through,
+                    "closed_through": closed_through,
+                    "segment_path": record["path"] if record is not None else None}
 
     def hour_ledger_snapshot_locked(self) -> list[dict[str, Any]]:
         """Return validated per-hour receipts under the held writer lock."""
@@ -632,12 +818,16 @@ class RolloverStore:
                     or manifest.get("parquet_file") != gharchive_segments.PARQUET_NAME):
                 raise RolloverError(f"unsupported catalog segment manifest: {path}")
             segment_coverage, start, end = gharchive_segments._validate_coverage(manifest.get("covered_hours"))
+            manifest_stat = manifest_path.stat()
+            manifest_identity = {"device": manifest_stat.st_dev, "inode": manifest_stat.st_ino,
+                                 "size": manifest_stat.st_size, "mtime_ns": manifest_stat.st_mtime_ns}
             parquet_stat = parquet_path.stat()
             identity = {"device": parquet_stat.st_dev, "inode": parquet_stat.st_ino,
                         "size": parquet_stat.st_size, "mtime_ns": parquet_stat.st_mtime_ns}
             if (record.get("start_hour") != start or record.get("end_hour") != end
                     or record.get("covered_hours") != segment_coverage
                     or manifest.get("covered_hours") != segment_coverage
+                    or record.get("manifest_identity") != manifest_identity
                     or manifest.get("parquet_bytes") != parquet_stat.st_size
                     or record.get("parquet_identity") != identity
                     or isinstance(record.get("level"), bool) or not isinstance(record.get("level"), int)
@@ -661,13 +851,69 @@ class RolloverStore:
         path = _safe_relative(self.root, record.get("path"), "segment path")
         manifest_path, parquet_path = path / gharchive_segments.MANIFEST_NAME, path / gharchive_segments.PARQUET_NAME
         if (not manifest_path.is_file() or manifest_path.is_symlink() or not parquet_path.is_file()
-                or parquet_path.is_symlink() or _sha256(manifest_path) != record.get("manifest_sha256")):
+                or parquet_path.is_symlink() or _sha256(manifest_path) != record.get("manifest_sha256")
+                or _file_identity(manifest_path) != record.get("manifest_identity")):
             raise RolloverError(f"catalog segment identity changed: {path}")
         stat_result = parquet_path.stat()
         identity = {"device": stat_result.st_dev, "inode": stat_result.st_ino,
                     "size": stat_result.st_size, "mtime_ns": stat_result.st_mtime_ns}
         if identity != record.get("parquet_identity"):
             raise RolloverError(f"catalog segment file identity changed: {path}")
+
+    def _check_retired_segment(self, record: Mapping[str, Any]) -> tuple[Path, list[Path]]:
+        directory = _safe_relative(self.root, record["path"], "retired segment path")
+        expected = {
+            gharchive_segments.MANIFEST_NAME: record["manifest_identity"],
+            gharchive_segments.PARQUET_NAME: record["parquet_identity"],
+        }
+        if directory.is_symlink():
+            raise RolloverError(f"retired segment directory cannot be a symlink: {directory}")
+        if not directory.exists():
+            return directory, []
+        if not directory.is_dir():
+            raise RolloverError(f"retired segment path is not a directory: {directory}")
+        children = list(directory.iterdir())
+        unknown = {child.name for child in children} - set(expected)
+        if unknown:
+            raise RolloverError(f"unknown files prevent retired segment cleanup: {sorted(unknown)}")
+        present = []
+        for name, identity in expected.items():
+            path = directory / name
+            if path.is_symlink():
+                raise RolloverError(f"symlink prevents retired segment cleanup: {path}")
+            if not path.exists():
+                continue
+            if not path.is_file() or _file_identity(path) != identity:
+                raise RolloverError(f"retired segment file identity changed: {path}")
+            if name == gharchive_segments.MANIFEST_NAME and _sha256(path) != record["manifest_sha256"]:
+                raise RolloverError(f"retired segment manifest changed: {path}")
+            present.append(path)
+        return directory, present
+
+    def _check_retired_epoch(self, record: Mapping[str, Any]) -> tuple[Path, list[Path]]:
+        db_relative = record["db_path"]
+        db_path = _safe_relative(self.root, db_relative, "retired database path")
+        files = record["files"]
+        expected_by_path = {item["path"]: item for item in files}
+        paths = []
+        for item in files:
+            path = _safe_relative(self.root, item["path"], "retired epoch file path")
+            if path.is_symlink():
+                raise RolloverError(f"symlink prevents retired epoch cleanup: {path}")
+            if not path.exists():
+                continue
+            if not path.is_file() or _file_identity(path) != item["identity"]:
+                raise RolloverError(f"retired epoch file identity changed: {path}")
+            paths.append(path)
+        parent = db_path.parent
+        if parent != self.root and parent.exists():
+            if parent.is_symlink() or not parent.is_dir():
+                raise RolloverError(f"unsafe retired epoch directory: {parent}")
+            allowed_names = {Path(path).name for path in expected_by_path}
+            unknown = {child.name for child in parent.iterdir()} - allowed_names
+            if unknown:
+                raise RolloverError(f"unknown files prevent retired epoch cleanup: {sorted(unknown)}")
+        return db_path, paths
 
     def _segment_record_for_hour(self, catalog: Mapping[str, Any], hour: str) -> Mapping[str, Any] | None:
         entries = catalog["segments"]
@@ -939,18 +1185,183 @@ class RolloverStore:
             result["store_bytes"] = self._used_bytes_locked()
             return result
 
-    def rollover(self, exporter: Callable[..., gharchive_segments.Segment], *,
-                 max_output_bytes: int, min_free_bytes: int) -> gharchive_segments.Segment | None:
-        if (isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int) or max_output_bytes < 1
+    def cleanup_retired_artifacts(self, *, max_store_bytes: int,
+                                  min_free_bytes: int) -> dict[str, int]:
+        """Delete only catalog-authorized retired files, resumably and no-follow."""
+        if (isinstance(max_store_bytes, bool) or not isinstance(max_store_bytes, int) or max_store_bytes < 1
                 or isinstance(min_free_bytes, bool) or not isinstance(min_free_bytes, int) or min_free_bytes < 0):
-            raise ValueError("positive output cap and nonnegative free-space reserve are required")
+            raise ValueError("positive store cap and nonnegative free-space reserve are required")
         with self._locked():
-            self._reconcile_locked()
+            self._validate_state_readonly_locked()
+            totals = {"epochs_removed": 0, "segments_removed": 0, "files_removed": 0}
+            while True:
+                catalog = self._catalog()
+                active_rel = catalog["active_db"]
+                active_segments = {record["path"] for record in catalog["segments"]}
+                if not catalog["retired_epochs"] and not catalog["retired_segments"]:
+                    return totals
+                free = shutil.disk_usage(self.root).free
+                if free < min_free_bytes:
+                    raise OSError(f"archive free space {free} is below required reserve {min_free_bytes}")
+
+                if catalog["retired_epochs"]:
+                    retired = catalog["retired_epochs"][0]
+                    if retired["db_path"] == active_rel:
+                        raise RolloverError("cannot clean an active database listed as retired")
+                    db_path, files = self._check_retired_epoch(retired)
+                    known_paths = {item["path"] for item in retired["files"]}
+                    if any(path.relative_to(self.root).as_posix() in active_segments for path in files):
+                        raise RolloverError("cannot clean a database referenced as a segment")
+                    for path in files:
+                        path.unlink()
+                        totals["files_removed"] += 1
+                        _fsync_dir(path.parent)
+                        self._invalidate_budget_cache_locked()
+                        self._trip("after_retired_epoch_file_unlink")
+                    parent = db_path.parent
+                    if parent != self.root and parent.exists():
+                        if any(child.name not in {Path(value).name for value in known_paths}
+                               for child in parent.iterdir()):
+                            raise RolloverError(f"unknown files prevent retired epoch directory cleanup: {parent}")
+                        try:
+                            parent.rmdir()
+                        except OSError as exc:
+                            raise RolloverError(f"retired epoch directory is not empty: {parent}") from exc
+                        _fsync_dir(parent.parent)
+                    new_catalog = {**catalog, "generation": catalog["generation"] + 1,
+                                   "retired_epochs": catalog["retired_epochs"][1:]}
+                    self._trip("before_retired_record_remove")
+                    self._invalidate_budget_cache_locked()
+                    self._publish_catalog_locked(new_catalog, max_store_bytes=max_store_bytes,
+                                                 min_free_bytes=min_free_bytes)
+                    self._trip("after_retired_record_remove")
+                    totals["epochs_removed"] += 1
+                    continue
+
+                retired = catalog["retired_segments"][0]
+                relative = retired["path"]
+                if relative in active_segments or relative == active_rel:
+                    raise RolloverError("cannot clean a segment still referenced by the active catalog")
+                directory, files = self._check_retired_segment(retired)
+                for path in files:
+                    path.unlink()
+                    totals["files_removed"] += 1
+                    _fsync_dir(path.parent)
+                    self._invalidate_budget_cache_locked()
+                    self._trip("after_retired_segment_file_unlink")
+                if directory.exists():
+                    try:
+                        directory.rmdir()
+                    except OSError as exc:
+                        raise RolloverError(f"retired segment directory is not empty: {directory}") from exc
+                    _fsync_dir(directory.parent)
+                new_catalog = {**catalog, "generation": catalog["generation"] + 1,
+                               "retired_segments": catalog["retired_segments"][1:]}
+                self._trip("before_retired_record_remove")
+                self._invalidate_budget_cache_locked()
+                self._publish_catalog_locked(new_catalog, max_store_bytes=max_store_bytes,
+                                             min_free_bytes=min_free_bytes)
+                self._trip("after_retired_record_remove")
+                totals["segments_removed"] += 1
+
+    def compact_adjacent_segments(self, merger: Callable[..., Any], *,
+                                  max_store_bytes: int, max_output_bytes: int,
+                                  min_free_bytes: int,
+                                  memory_limit: str = "512MB") -> gharchive_segments.Segment | None:
+        """Carry the leftmost adjacent same-level pair into one verified parent."""
+        if (isinstance(max_store_bytes, bool) or not isinstance(max_store_bytes, int) or max_store_bytes < 1
+                or isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int) or max_output_bytes < 1
+                or isinstance(min_free_bytes, bool) or not isinstance(min_free_bytes, int) or min_free_bytes < 0
+                or not isinstance(memory_limit, str) or not memory_limit):
+            raise ValueError("positive store/output caps, nonnegative free-space reserve, and memory limit are required")
+        with self._locked():
+            catalog, ledger = self._validate_state_readonly_locked()
+            segments = catalog["segments"]
+            pair_index = next((index for index in range(len(segments) - 1)
+                               if segments[index]["level"] == segments[index + 1]["level"]), None)
+            if pair_index is None:
+                return None
+            left, right = segments[pair_index:pair_index + 2]
+            expected_coverage = {**left["covered_hours"], **right["covered_hours"]}
+            for hour, digest in expected_coverage.items():
+                if hour not in ledger or ledger[hour]["sha256"] != digest:
+                    raise RolloverError(f"carry input coverage conflicts with durable hour marker: {hour}")
+            reserve = self._catalog_reserve_bytes(
+                catalog, extra_covered_hours=len(expected_coverage), extra_records=3)
+            effective_output_bytes = self._maintenance_output_cap_locked(
+                catalog, max_store_bytes=max_store_bytes, max_output_bytes=max_output_bytes,
+                min_free_bytes=min_free_bytes, additional_reserve=reserve)
+            segment_parent = self.root / "segments"
+            if segment_parent.is_symlink():
+                raise RolloverError("segments directory cannot be a symlink")
+            segment_parent.mkdir(parents=True, exist_ok=True)
+            start, end = left["start_hour"], right["end_hour"]
+            base = int(catalog["generation"]) + 1
+            suffix = 0
+            while True:
+                destination = segment_parent / f"carry-{base:08d}-{suffix:04d}-{start[:13].replace(':', '').replace('-', '')}-{end[:13].replace(':', '').replace('-', '')}"
+                if not destination.exists():
+                    break
+                suffix += 1
+            inputs = [self.root / left["path"], self.root / right["path"]]
+            try:
+                merger(inputs, destination, memory_limit=memory_limit,
+                       max_output_bytes=effective_output_bytes, min_free_bytes=min_free_bytes)
+            finally:
+                self._invalidate_budget_cache_locked()
+            self._trip("after_carry_export")
+            verified = gharchive_segments.verify_segment(destination)
+            if dict(verified.manifest["covered_hours"]) != expected_coverage:
+                raise RolloverError("merged segment does not exactly preserve child hour coverage")
+            self._trip("after_carry_verify")
+            parent_record = _segment_catalog_record(self.root, verified, level=left["level"] + 1)
+            new_segments = [*segments[:pair_index], parent_record, *segments[pair_index + 2:]]
+            new_catalog = {**catalog, "generation": catalog["generation"] + 1,
+                           "segments": new_segments,
+                           "retired_segments": [*catalog["retired_segments"], dict(left), dict(right)]}
+            self._invalidate_budget_cache_locked()
+            self._publish_catalog_locked(new_catalog, max_store_bytes=max_store_bytes,
+                                         min_free_bytes=min_free_bytes)
+            self._trip("after_carry_catalog_swap")
+            return verified
+
+    def rollover(self, exporter: Callable[..., gharchive_segments.Segment], *,
+                 max_output_bytes: int, min_free_bytes: int,
+                 max_store_bytes: int = gharchive_compact.MAX_COMPACT_STORE_BYTES) -> gharchive_segments.Segment | None:
+        if (isinstance(max_output_bytes, bool) or not isinstance(max_output_bytes, int) or max_output_bytes < 1
+                or isinstance(min_free_bytes, bool) or not isinstance(min_free_bytes, int) or min_free_bytes < 0
+                or isinstance(max_store_bytes, bool) or not isinstance(max_store_bytes, int) or max_store_bytes < 1):
+            raise ValueError("positive output/store caps and nonnegative free-space reserve are required")
+        with self._locked():
             catalog = self._catalog()
             active_path = _safe_relative(self.root, catalog["active_db"], "active database path")
             active_markers = _read_db_markers(active_path)
             if not active_markers:
                 return None
+            old_segments, _old_coverage = self._validated_segments(catalog)
+            if old_segments and min(active_markers) <= old_segments[-1].end_hour:
+                raise RolloverError("active hour coverage would overlap or interleave prior segments")
+            ledger = _read_ledger(self.ledger_path)
+            try:
+                ledger_markers = {row["source_hour"]: dict(row) for row in ledger.execute(
+                    f"SELECT {','.join(MARKER_COLUMNS)} FROM hour_markers")}
+            finally:
+                ledger.close()
+            missing_markers = [hour for hour in active_markers if hour not in ledger_markers]
+            for hour, marker in active_markers.items():
+                if hour in ledger_markers and ledger_markers[hour] != marker:
+                    raise RolloverError(f"persistent marker fields conflict with active database for {hour}")
+            repair_reserve = (len(missing_markers) * self._ledger_insert_reservation_locked()
+                              if missing_markers else 0)
+            metadata_reserve = (self._catalog_reserve_bytes(
+                catalog, extra_covered_hours=len(active_markers), extra_records=2)
+                + EMPTY_EPOCH_RESERVE_BYTES + repair_reserve)
+            effective_output_bytes = self._maintenance_output_cap_locked(
+                catalog, max_store_bytes=max_store_bytes, max_output_bytes=max_output_bytes,
+                min_free_bytes=min_free_bytes, additional_reserve=metadata_reserve)
+            # Reconciliation may mirror an active-hour marker. The preceding
+            # reservation includes every such insert and output/metadata space.
+            self._reconcile_locked()
             db = sqlite3.connect(active_path, timeout=30)
             try:
                 result = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
@@ -971,12 +1382,6 @@ class RolloverStore:
             self._trip("after_checkpoint")
             ordered_hours = sorted(active_markers)
             start, end = ordered_hours[0], ordered_hours[-1]
-            old_segments, _old_coverage = self._validated_segments(catalog)
-            if old_segments and start <= old_segments[-1].end_hour:
-                raise RolloverError("active hour coverage overlaps or interleaves prior segments")
-            free = shutil.disk_usage(self.root).free
-            if free < min_free_bytes + max_output_bytes:
-                raise OSError(f"free space {free} is below required segment budget {min_free_bytes + max_output_bytes}")
             segment_parent = self.root / "segments"
             segment_parent.mkdir(parents=True, exist_ok=True)
             if segment_parent.is_symlink():
@@ -988,8 +1393,11 @@ class RolloverStore:
                 if not destination.exists():
                     break
                 suffix += 1
-            exported = exporter(active_path, destination,
-                                max_output_bytes=max_output_bytes, min_free_bytes=min_free_bytes)
+            try:
+                exported = exporter(active_path, destination,
+                                    max_output_bytes=effective_output_bytes, min_free_bytes=min_free_bytes)
+            finally:
+                self._invalidate_budget_cache_locked()
             self._trip("after_export")
             if not isinstance(exported, gharchive_segments.Segment):
                 raise RolloverError("exporter must return a verified gharchive_segments.Segment")
@@ -1002,6 +1410,7 @@ class RolloverStore:
                     or dict(exported.manifest) != dict(verified_segment.manifest)):
                 raise RolloverError("exported segment does not exactly cover active committed hours")
             record = _segment_catalog_record(self.root, verified_segment, level=0)
+            self._invalidate_budget_cache_locked()
             # The persistent ledger stores every compact marker field. Commit it
             # before catalog publication; until the swap, the old active DB
             # proves these rows.
@@ -1020,7 +1429,6 @@ class RolloverStore:
             self._trip("after_ledger_mirror")
             new_epoch = int(catalog["active_epoch"]) + 1
             epoch_dir = self.root / "epochs"
-            epoch_dir.mkdir(parents=True, exist_ok=True)
             if epoch_dir.is_symlink():
                 raise RolloverError("epochs directory cannot be a symlink")
             while True:
@@ -1029,6 +1437,19 @@ class RolloverStore:
                 if not new_dir.exists() and not new_db.exists() and not Path(f"{new_db}-wal").exists():
                     break
                 new_epoch += 1
+            retired_epoch = _retired_epoch_record(self.root, active_path, catalog["active_epoch"])
+            new_catalog = {**catalog, "generation": catalog["generation"] + 1,
+                           "active_epoch": new_epoch,
+                           "active_db": str(new_db.relative_to(self.root)),
+                           "segments": [*catalog["segments"], record],
+                           "retired_epochs": [*catalog["retired_epochs"], retired_epoch]}
+            # Reserve the fresh database and exact atomic catalog temporary
+            # before making either artifact.
+            self._ensure_budget_locked(
+                max_store_bytes, transaction_headroom=EMPTY_EPOCH_RESERVE_BYTES + len(_canonical_bytes(new_catalog)),
+                min_free_bytes=min_free_bytes,
+            )
+            epoch_dir.mkdir(parents=True, exist_ok=True)
             new_dir.mkdir()
             fresh = gharchive_compact._global_db(new_db)
             try:
@@ -1040,13 +1461,12 @@ class RolloverStore:
                     sidecar.unlink()
             _fsync_dir(new_dir)
             _fsync_dir(epoch_dir)
+            self._invalidate_budget_cache_locked()
             self._trip("after_epoch_create")
-            new_catalog = {**catalog, "generation": catalog["generation"] + 1,
-                           "active_epoch": new_epoch,
-                           "active_db": str(new_db.relative_to(self.root)),
-                           "segments": [*catalog["segments"], record]}
             self._trip("before_catalog_swap")
-            _atomic_json(self.catalog_path, new_catalog)
+            self._invalidate_budget_cache_locked()
+            self._publish_catalog_locked(new_catalog, max_store_bytes=max_store_bytes,
+                                         min_free_bytes=min_free_bytes)
             self._trip("after_catalog_swap")
             return verified_segment
 
@@ -1085,7 +1505,8 @@ def open_store(store_root: str | Path, *, failpoint: Callable[[str], None] | Non
                         sidecar.unlink()
                 _fsync_dir(active_db.parent)
             catalog = {"schema": CATALOG_SCHEMA, "generation": 0, "active_epoch": active_epoch,
-                       "active_db": str(active_db.relative_to(root)), "segments": []}
+                       "active_db": str(active_db.relative_to(root)), "segments": [],
+                       "retired_epochs": [], "retired_segments": []}
             _atomic_json(catalog_path, catalog, no_replace=True)
         else:
             store._catalog()
