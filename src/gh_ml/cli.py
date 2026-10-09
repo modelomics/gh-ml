@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -244,6 +246,56 @@ def _parser() -> argparse.ArgumentParser:
     readme.add_argument("--no-publish", action="store_true", help="write local compact results without publishing to Hugging Face")
     readme.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
     readme.add_argument("--hf-token-env", default="HF_TOKEN", help="environment variable holding Hugging Face token")
+    graphql = subparsers.add_parser(
+        "readme-graphql",
+        help="collect bounded, resumable local README evidence through GitHub GraphQL",
+    )
+    graphql.add_argument("--input", type=Path, action="append", default=[],
+                         help="repository inventory JSONL or Parquet; repeat to stream multiple inputs (omit to resume)")
+    graphql.add_argument("--input-revision", action="append", default=[],
+                         help="optional stable revision for the corresponding --input; repeat in matching order")
+    graphql.add_argument("--state-db", type=Path, required=True,
+                         help="persistent SQLite state path outside the source repository")
+    graphql.add_argument("--output-dir", type=Path, required=True,
+                         help="directory for local evidence JSONL and run receipts, outside the source repository")
+    graphql.add_argument("--batch-size", type=int, default=25, help="GraphQL repositories per batch (1–50)")
+    graphql.add_argument("--max-seconds", type=int, default=3300,
+                         help="whole-invocation time budget including input and output work (0–604800; default 3300)")
+    graphql.add_argument("--max-repositories", type=int, default=10_000, help="maximum repository attempts per invocation")
+    graphql.add_argument("--max-batches", type=int, default=1000, help="maximum GraphQL batches per invocation")
+    graphql.add_argument("--min-free-gib", type=float, default=300,
+                         help="minimum free space on /mnt/archive before starting (default 300 GiB)")
+    graphql.add_argument("--triage-model", type=Path,
+                         help="optional validated metadata relevance model JSON artifact (experimental; default disabled)")
+    graphql.add_argument("--deferred-audit-rate", type=float, default=0.05,
+                         help="per-epoch sampling probability for deferred README audits (default 0.05)")
+    graphql.add_argument("--audit-seed", default="gh-ml-metadata-triage-v1",
+                         help="stable seed for reproducible rotating deferred audit samples")
+    graphql.add_argument("--max-triage-repositories", type=int, default=10_000,
+                         help="maximum stored repositories to rescore/rotate per invocation")
+    graphql.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    graphql.add_argument("--github-pool-token-env", action="append", default=[],
+                         help="additional GitHub token environment variable for account-aware pooling; repeatable")
+    ecosystems_import = subparsers.add_parser(
+        "ecosystems-import", help="import bounded public repository metadata from ecosyste.ms into resumable local state",
+    )
+    ecosystems_import.add_argument("--state-db", type=Path, required=True, help="persistent SQLite state path")
+    ecosystems_import.add_argument("--output-dir", type=Path, required=True, help="directory for local JSONL and run receipts")
+    ecosystems_import.add_argument("--max-pages", type=int, default=1,
+                                   help="maximum ecosyste.ms inventory pages (0..604800; 0 skips primary listing)")
+    ecosystems_import.add_argument("--per-page", type=int, default=1000, help="repositories per page (1..1000)")
+    ecosystems_import.add_argument("--max-github-requests", type=int, default=100,
+                                   help="maximum logical GitHub repository fallback attempts (HTTP retries and pool validation are additional)")
+    ecosystems_import.add_argument("--max-seconds", type=int, default=3300, help="whole-run budget (0..604800 seconds)")
+    ecosystems_import.add_argument("--input", type=Path, action="append", default=[],
+                                   help="optional discovery JSONL input; repeat to read multiple files")
+    ecosystems_import.add_argument("--updated-after", help="optional ecosyste.ms updated_after query bound")
+    ecosystems_import.add_argument("--min-free-gib", type=float, default=300,
+                                   help="minimum free space on /mnt/archive (default 300 GiB)")
+    ecosystems_import.add_argument("--github-token-env", action="append", default=[],
+                                   help="GitHub token environment variable for fallback; repeatable")
+    ecosystems_import.add_argument("--no-github-fallback", action="store_true",
+                                   help="run primary-source import without GitHub metadata fallback")
     return parser
 
 
@@ -291,6 +343,121 @@ def _census(args: argparse.Namespace) -> int:
     print(f"Census checkpoint: {args.output_dir / 'checkpoint.json'}")
     print(f"Next GitHub ID cursor: {checkpoint.get('next_since')}")
     return 0
+
+
+def _ecosystems_import(args: argparse.Namespace, *, ecosystems_client_factory: Any = None,
+                       github_client_factory: Any = None, collector: Any = None) -> int:
+    """Import a bounded ecosyste.ms batch, optionally enriching via GitHub."""
+    from .ecosystems import EcosystemsClient
+    from .ecosystems_collection import run_import
+
+    if not 0 <= args.max_pages <= 604800:
+        raise ValueError("--max-pages must be from 0 through 604800")
+    if not 1 <= args.per_page <= 1000:
+        raise ValueError("--per-page must be from 1 through 1000")
+    if args.max_github_requests < 0:
+        raise ValueError("--max-github-requests must be nonnegative")
+    if not 0 <= args.max_seconds <= 604800:
+        raise ValueError("--max-seconds must be from 0 through 604800")
+    if not isinstance(args.min_free_gib, (int, float)) or not 0 <= args.min_free_gib < float("inf"):
+        raise ValueError("--min-free-gib must be a finite nonnegative number")
+    if args.updated_after is not None and not args.updated_after.strip():
+        raise ValueError("--updated-after must be non-empty when supplied")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    state_path = args.state_db.expanduser().resolve()
+    output_path = args.output_dir.expanduser().resolve()
+    for label, candidate in (("--state-db", state_path), ("--output-dir", output_path)):
+        if candidate == repo_root or repo_root in candidate.parents:
+            raise ValueError(f"{label} must be outside the source repository")
+    if not state_path.suffix:
+        raise ValueError("--state-db must name a SQLite database file")
+    inputs = [path.expanduser().resolve() for path in args.input]
+    missing = next((path for path in inputs if not path.is_file()), None)
+    if missing is not None:
+        raise ValueError(f"discovery input does not exist or is not a file: {missing}")
+    archive = Path("/mnt/archive").resolve()
+    uses_archive = any(path == archive or archive in path.parents for path in (state_path, output_path))
+    if uses_archive and args.min_free_gib < 300:
+        raise ValueError("--min-free-gib must be at least 300 to preserve the archive reserve")
+    reserve_bytes = int(args.min_free_gib * 1024**3) if uses_archive else 0
+    if uses_archive:
+        for candidate in (state_path.parent, output_path):
+            if candidate != archive and archive not in candidate.parents:
+                continue
+            existing = candidate
+            while not existing.exists() and existing != existing.parent:
+                existing = existing.parent
+            stats = os.statvfs(existing)
+            if stats.f_bavail * stats.f_frsize < reserve_bytes:
+                raise OSError(f"insufficient free space to preserve the {args.min_free_gib:g} GiB archive reserve")
+
+    started = time.monotonic()
+    deadline = started + args.max_seconds
+    token_env_names = args.github_token_env or ["GITHUB_TOKEN"]
+    github_client = None
+    pool_summary = None
+    fallback_enabled = not args.no_github_fallback and args.max_github_requests > 0
+    if fallback_enabled:
+        token = next((os.environ[name] for name in token_env_names if os.environ.get(name)), None)
+        if token is None:
+            token = _github_token(token_env_names[0])
+        if token:
+            if github_client_factory is not None:
+                github_client = github_client_factory(token=token)
+            else:
+                from .github_tokens import build_pooled_client
+
+                github_client = build_pooled_client(token_env_names, fallback_token=token, deadline=deadline)
+    if collector is None:
+        collector = run_import
+    client = (ecosystems_client_factory or EcosystemsClient)()
+    report = collector(
+        state_db=state_path, output_dir=output_path,
+        ecosystems_client=client, github_client=github_client,
+        max_pages=args.max_pages, per_page=args.per_page,
+        max_github_requests=args.max_github_requests, deadline=deadline,
+        discovery_paths=inputs, updated_after=args.updated_after, min_free_gib=args.min_free_gib,
+    )
+    token_pool = getattr(github_client, "token_pool", None)
+    if token_pool is not None and callable(getattr(token_pool, "summary", None)):
+        pool_summary = token_pool.summary()
+    request_accounting = {
+        "github_budget_unit": "github_client.get_repository invocations",
+        "github_budget_limit": args.max_github_requests,
+        "report_github_count": "report.api_requests.github counts logical get_repository attempts",
+        "actual_http_requests": "not counted; GitHub transport retries can issue more HTTP requests",
+        "pool_validation": "GET /user account validation requests are additional and excluded from the budget",
+    }
+    if isinstance(report, dict):
+        report["github_request_accounting"] = request_accounting
+        if pool_summary is not None:
+            report["token_pool"] = pool_summary
+        receipt_path = report.get("receipt_path")
+        if isinstance(receipt_path, str):
+            path = Path(receipt_path)
+            if path.is_file():
+                try:
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    receipt = None
+                if isinstance(receipt, dict):
+                    receipt["github_request_accounting"] = request_accounting
+                    if pool_summary is not None:
+                        receipt["token_pool"] = pool_summary
+                    _write_json(path, receipt)
+    summary = {
+        "command": "ecosystems-import",
+        "report": report,
+        "state_db": str(state_path),
+        "output_dir": str(output_path),
+        "token_pool": pool_summary,
+        "github_request_accounting": request_accounting,
+    }
+    print(json.dumps(summary, sort_keys=True, default=str))
+    partial = (not isinstance(report, dict) or report.get("status") != "complete"
+               or report.get("deferred", 0) > 0 or report.get("remaining_queue", 0) > 0)
+    return 2 if partial else 0
 
 
 def _census_daily(args: argparse.Namespace, *, api: Any = None, downloader: Any = None,
@@ -824,6 +991,330 @@ def _readme_enrich(args: argparse.Namespace, *, api: Any = None, downloader: Any
     return 2 if coverage.get("rate_limited") else 0
 
 
+def _graphql_rows(path: Path, digest: Any, cursor: Any = None) -> Any:
+    """Yield rows with a seekable after-row cursor and hash only bytes read."""
+    suffix = path.suffix.casefold()
+    if suffix in {".jsonl", ".ndjson"}:
+        if cursor is not None and (isinstance(cursor, bool) or not isinstance(cursor, int) or cursor < 0):
+            raise ValueError("saved JSONL input cursor is invalid")
+        with path.open("rb") as stream:
+            if cursor:
+                stream.seek(cursor)
+            for raw in stream:
+                offset = stream.tell()
+                digest.update(raw)
+                if not raw.strip():
+                    yield ({"_blank_input_line": True}, offset)
+                    continue
+                try:
+                    value = json.loads(raw)
+                except (UnicodeError, json.JSONDecodeError):
+                    value = None
+                else:
+                    pass
+                if not isinstance(value, dict):
+                    value = None
+                yield (value if isinstance(value, dict) else {"_invalid_input_row": True}, offset)
+        return
+    if suffix == ".parquet":
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as exc:
+            raise ValueError("Parquet input requires `uv sync --extra parquet`") from exc
+        if cursor is None:
+            start_group = start_row = 0
+        elif isinstance(cursor, dict) and all(isinstance(cursor.get(key), int) and not isinstance(cursor.get(key), bool)
+                                               for key in ("row_group", "row_offset")):
+            start_group, start_row = cursor["row_group"], cursor["row_offset"]
+            if start_group < 0 or start_row < 0:
+                raise ValueError("saved Parquet input cursor is invalid")
+        else:
+            raise ValueError("saved Parquet input cursor is invalid")
+        source = pq.ParquetFile(path)
+        if start_group > source.metadata.num_row_groups:
+            raise ValueError("saved Parquet input cursor exceeds the file")
+        for group_index in range(start_group, source.metadata.num_row_groups):
+            group_rows = source.metadata.row_group(group_index).num_rows
+            group_start_row = start_row if group_index == start_group else 0
+            if group_start_row > group_rows:
+                raise ValueError("saved Parquet row cursor exceeds its row group")
+            row_index = 0
+            for batch in source.iter_batches(batch_size=256, row_groups=[group_index]):
+                for value in batch.to_pylist():
+                    if row_index < group_start_row:
+                        row_index += 1
+                        continue
+                    digest.update(json.dumps(value, ensure_ascii=False, allow_nan=False,
+                                             sort_keys=True, separators=(",", ":")).encode("utf-8"))
+                    digest.update(b"\n")
+                    row_index += 1
+                    if row_index == group_rows:
+                        cursor_after = {"row_group": group_index + 1, "row_offset": 0}
+                    else:
+                        cursor_after = {"row_group": group_index, "row_offset": row_index}
+                    yield value, cursor_after
+        return
+    raise ValueError(f"unsupported GraphQL inventory format: {path} (expected .jsonl, .ndjson, or .parquet)")
+
+
+def _load_graphql_triage_model(path: Path) -> tuple[str, Any]:
+    """Dispatch a validated triage artifact by schema without importing unused backends."""
+    with path.open(encoding="utf-8") as handle:
+        artifact = json.load(handle)
+    if not isinstance(artifact, dict) or not isinstance(artifact.get("schema"), str):
+        raise ValueError("triage artifact must be a JSON object with a schema")
+    schema = artifact["schema"]
+    loaders = {
+        "gh-ml-metadata-triage-v1": (".metadata_triage", "load_model"),
+        "gh-ml-lexical-triage-v1": (".lexical_triage", "load_model"),
+        "gh-ml-semantic-triage-v1": (".semantic_triage", "load_model"),
+    }
+    selected = loaders.get(schema)
+    if selected is None:
+        raise ValueError(f"unsupported GraphQL triage artifact schema: {schema}")
+    from importlib import import_module
+    module_name, loader_name = selected
+    module = import_module(module_name, package=__package__)
+    model = getattr(module, loader_name)(str(path))
+    if getattr(model, "schema", schema) != schema:
+        raise ValueError("triage model loader schema does not match the artifact")
+    return schema, model
+
+
+def _predict_graphql_rows(rows: Any, model: Any, *, deadline: float, batch_size: int = 64) -> Any:
+    """Score bounded input batches while preserving each resumable cursor."""
+    from .graphql_evidence import predict_triage_batch
+
+    iterator = iter(rows)
+    exhausted = False
+    while not exhausted:
+        batch = []
+        for _ in range(batch_size):
+            if time.monotonic() >= deadline:
+                raise TimeoutError("metadata triage exceeded the input time budget")
+            try:
+                item = next(iterator)
+            except StopIteration:
+                exhausted = True
+                break
+            if not isinstance(item, tuple) or len(item) != 2 or not isinstance(item[0], dict):
+                raise ValueError("GraphQL input rows must contain a row and resumable cursor")
+            batch.append(item)
+        if not batch:
+            if exhausted:
+                return
+            raise TimeoutError("metadata triage exceeded the input time budget")
+        predictions = predict_triage_batch(model, [row for row, _cursor in batch], deadline=deadline)
+        for (row, cursor), prediction in zip(batch, predictions, strict=True):
+            yield row, cursor, prediction
+
+
+def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
+                    collection: Any = None, store_factory: Any = None) -> int:
+    """Stream repository inventories into durable local GraphQL README collection."""
+    from .graphql_evidence import EvidenceStore, export_run, run_collection
+    from .graphql_readme import fetch_readme_batch
+
+    if not 1 <= args.batch_size <= 50:
+        raise ValueError("--batch-size must be from 1 through 50")
+    if not 0 <= args.max_seconds <= 604800:
+        raise ValueError("--max-seconds must be from 0 through 604800")
+    if args.max_repositories < 0 or args.max_batches < 0:
+        raise ValueError("--max-repositories and --max-batches must be nonnegative")
+    audit_rate = getattr(args, "deferred_audit_rate", 0.05)
+    max_triage_repositories = getattr(args, "max_triage_repositories", 10_000)
+    audit_seed = getattr(args, "audit_seed", "gh-ml-metadata-triage-v1")
+    if not isinstance(audit_rate, (int, float)) or not 0 <= audit_rate <= 1:
+        raise ValueError("--deferred-audit-rate must be between 0 and 1")
+    if max_triage_repositories < 0 or not isinstance(audit_seed, str) or not audit_seed:
+        raise ValueError("--max-triage-repositories must be nonnegative and --audit-seed nonempty")
+    if not (args.min_free_gib >= 0 and args.min_free_gib < float("inf")):
+        raise ValueError("--min-free-gib must be a finite nonnegative number")
+    repo_root = Path(__file__).resolve().parents[2]
+    state_path = args.state_db.expanduser().resolve()
+    output_path = args.output_dir.expanduser().resolve()
+    for label, candidate in (("--state-db", state_path), ("--output-dir", output_path)):
+        if candidate == repo_root or repo_root in candidate.parents:
+            raise ValueError(f"{label} must be outside the source repository")
+    if not state_path.suffix:
+        raise ValueError("--state-db must name a SQLite database file")
+    inputs = [path.expanduser().resolve() for path in args.input]
+    input_revisions = getattr(args, "input_revision", [])
+    if input_revisions and len(input_revisions) != len(inputs):
+        raise ValueError("provide one --input-revision for each --input, in the same order")
+    if any(not path.is_file() for path in inputs):
+        missing = next(path for path in inputs if not path.is_file())
+        raise ValueError(f"GraphQL input does not exist or is not a file: {missing}")
+
+    archive = Path("/mnt/archive").resolve()
+    uses_archive = any(path == archive or archive in path.parents for path in (state_path, output_path))
+    if uses_archive and args.min_free_gib < 300:
+        raise ValueError("--min-free-gib must be at least 300 to preserve the archive reserve")
+    reserve_bytes = int(args.min_free_gib * 1024**3) if uses_archive else 0
+    started = time.monotonic()
+    deadline = started + args.max_seconds
+    now = _utc_now()
+    output_path.mkdir(parents=True, exist_ok=True)
+    if uses_archive:
+        for candidate in (state_path.parent, output_path):
+            if candidate != archive and archive not in candidate.parents:
+                continue
+            existing = candidate
+            while not existing.exists() and existing != existing.parent:
+                existing = existing.parent
+            stats = os.statvfs(existing)
+            if stats.f_bavail * stats.f_frsize < reserve_bytes:
+                raise OSError(f"insufficient free space to preserve the {args.min_free_gib:g} GiB archive reserve")
+    run_id = _run_id(now)
+    store_type = store_factory or EvidenceStore
+    pool_env_names = getattr(args, "github_pool_token_env", [])
+    if pool_env_names:
+        from .github_tokens import build_pooled_client
+
+        client = build_pooled_client(
+            pool_env_names, fallback_token=_github_token(args.github_token_env), deadline=deadline,
+        )
+    else:
+        client = (client_factory or GitHubClient)(token=_github_token(args.github_token_env))
+    model_path = getattr(args, "triage_model", None)
+    triage_model = None
+    triage_schema = None
+    if model_path is not None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("whole-invocation deadline expired before triage model initialization")
+        triage_schema, triage_model = _load_graphql_triage_model(model_path.expanduser().resolve())
+    source_receipts: list[dict[str, Any]] = []
+    ingestion_counts: dict[str, int] = {key: 0 for key in ("seen", "inserted", "updated", "changed", "unchanged", "invalid")}
+    ingestion_complete = True
+    triage_counts: dict[str, Any] = {"enabled": triage_model is not None, "rescored": 0, "remaining_to_rescore": 0,
+                                     "audit_rotated": 0, "audit_selected_this_epoch": 0}
+    with store_type(state_path, min_free_bytes=reserve_bytes) as store:
+        if triage_model is not None:
+            triage_budget = max(0.0, deadline - time.monotonic())
+            rescored = store.retriage_existing(
+                triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
+                max_repositories=max_triage_repositories, max_seconds=triage_budget,
+                now=now,
+            )
+            triage_counts.update({"rescored": rescored["scored"], "remaining_to_rescore": rescored["remaining"]})
+            triage_budget = max(0.0, deadline - time.monotonic())
+            rotated = store.rotate_deferred_audit(
+                triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
+                max_repositories=max_triage_repositories, max_seconds=triage_budget, now=now,
+            )
+            triage_counts.update({"audit_rotated": rotated["updated"],
+                                  "audit_selected_this_epoch": rotated["selected"],
+                                  "audit_unrotated": rotated["remaining"]})
+        for input_index, input_path in enumerate(inputs):
+            if time.monotonic() >= deadline:
+                ingestion_complete = False
+                break
+            stat = input_path.stat()
+            explicit_revision = input_revisions[input_index] if input_revisions else ""
+            source_revision = f"stat-v1:{stat.st_size}:{stat.st_mtime_ns}:{explicit_revision}"
+            identity_hash = hashlib.sha256(f"{input_path}\0{source_revision}".encode("utf-8")).hexdigest()
+            existing_source = store.db.execute(
+                "SELECT complete,rows_seen FROM ingestion_sources WHERE source=? AND source_revision=?",
+                (str(input_path), source_revision),
+            ).fetchone()
+            if existing_source is not None and existing_source["complete"]:
+                source_receipts.append({"path": str(input_path), "source_revision": source_revision,
+                                        "source_identity_sha256": identity_hash, "rows_seen": 0,
+                                        "complete": True, "already_scanned": True})
+                continue
+            digest = hashlib.sha256()
+            cursor = store.ingest_cursor(str(input_path), source_revision)
+            rows = _graphql_rows(input_path, digest, cursor=cursor)
+            if triage_model is not None:
+                rows = _predict_graphql_rows(rows, triage_model, deadline=deadline)
+            counts = store.ingest(
+                rows, source=str(input_path), source_revision=source_revision,
+                commit_every=500, max_seconds=max(0.0, deadline - time.monotonic()), resume=True,
+                triage_model=triage_model, audit_rate=audit_rate, audit_seed=audit_seed,
+            )
+            for key, value in counts.items():
+                ingestion_counts[key] = ingestion_counts.get(key, 0) + value
+            completed = bool(counts.get("complete"))
+            source_receipts.append({"path": str(input_path), "source_revision": source_revision,
+                                    "source_identity_sha256": identity_hash,
+                                    "read_row_stream_sha256": digest.hexdigest(), "rows_seen": counts.get("seen", 0),
+                                    "complete": completed, "resume_offset": counts.get("offset", 0)})
+            if not completed:
+                ingestion_complete = False
+                break
+
+        remaining_seconds = max(0.0, deadline - time.monotonic())
+        runner = collection or run_collection
+        def cache_aware_fetcher(fetch_client: Any, targets: Any, **kwargs: Any) -> Any:
+            return fetch_readme_batch(fetch_client, targets, cache_lookup=store.lookup_blob_text, **kwargs)
+
+        summary = runner(
+            store, client, batch_size=args.batch_size, max_seconds=remaining_seconds,
+            max_repositories=args.max_repositories, max_batches=args.max_batches,
+            run_id=run_id, fetcher=cache_aware_fetcher,
+            triage_model=triage_model, audit_epoch=now.strftime("%Y-%m"),
+        )
+        evidence_path = output_path / f"evidence-{run_id}.jsonl"
+        export_complete = True
+        try:
+            completed_run_ids = summary.get("completed_run_ids", [summary["run_id"]])
+            if not isinstance(completed_run_ids, list):
+                completed_run_ids = [summary["run_id"]]
+            exported = export_run(store, completed_run_ids, evidence_path, deadline=deadline)
+        except TimeoutError:
+            exported = 0
+            export_complete = False
+        pending = summary.get("target_count", store.pending_count())
+        if triage_model is not None:
+            triage_counts.update({
+                "model_version": triage_model.version,
+                "schema": triage_schema,
+                "model_fingerprint": triage_model.fingerprint,
+                "experimental": True,
+                "defer_threshold": triage_model.defer_threshold,
+                "scope": store.triage_scope_counts(triage_model.fingerprint),
+            })
+    if not inputs:
+        input_scope = "resume-pending-only"
+    elif ingestion_complete:
+        input_scope = "supplied-inputs-scanned"
+    else:
+        input_scope = "supplied-inputs-partially-scanned"
+    if not ingestion_complete:
+        stop_reason = "input_time_budget_exhausted"
+    elif not export_complete:
+        stop_reason = "export_time_budget_exhausted"
+    elif summary.get("stop_reason"):
+        stop_reason = summary["stop_reason"]
+    elif pending:
+        stop_reason = "pending_work_deferred"
+    else:
+        stop_reason = "queue_drained"
+    receipt = {
+        "schema_version": 1, "run_id": summary.get("run_id", run_id), "started_at": now.isoformat(),
+        "elapsed_seconds": round(time.monotonic() - started, 3), "input_scope": input_scope,
+        "selection_scope": "unfiltered_input",
+        "inputs": source_receipts, "ingestion": ingestion_counts,
+        "metadata_triage": triage_counts,
+        "collection": summary, "pending_repositories": pending,
+        "exported_evidence_records": exported, "evidence_jsonl": str(evidence_path),
+        "export_complete": export_complete,
+        "input_scans_complete": bool(source_receipts) and all(item["complete"] for item in source_receipts),
+        "state_db": str(state_path), "stop_reason": stop_reason,
+        "source_complete": False,
+    }
+    receipt_path = output_path / f"receipt-{run_id}.json"
+    _write_json(receipt_path, receipt)
+    print(f"GraphQL README collection inspected {summary.get('repositories_inspected', summary.get('attempted', 0))} repositories, "
+          f"downloaded {summary.get('unique_blobs_downloaded', 0)} unique READMEs ({summary.get('download_bytes', 0)} bytes), "
+          f"used {summary.get('requests', 0)} GraphQL requests and {summary.get('cache_hits', 0)} cached blobs; "
+          f"{pending} are currently due, {summary.get('failed', 0)} failed, and "
+          f"{summary.get('deferred', 0)} deferred ({stop_reason}).")
+    print(f"Local evidence: {evidence_path}")
+    print(f"Run receipt: {receipt_path}")
+    return 0
+
+
 def _run(args: argparse.Namespace) -> int:
     return _collect(args, mode="daily")
 
@@ -1193,6 +1684,8 @@ def main(argv: list[str] | None = None) -> int:
             return _historical_sample(args)
         if args.command == "pwc-import":
             return _pwc_import(args)
+        if args.command == "ecosystems-import":
+            return _ecosystems_import(args)
         if args.command == "current-view":
             return _current_view(args)
         if args.command == "census":
@@ -1207,6 +1700,8 @@ def main(argv: list[str] | None = None) -> int:
             return _publish_current_view(args)
         if args.command == "readme-enrich":
             return _readme_enrich(args)
+        if args.command == "readme-graphql":
+            return _readme_graphql(args)
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

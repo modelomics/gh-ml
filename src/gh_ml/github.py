@@ -103,7 +103,8 @@ class GitHubClient:
         self._progress_callback = callback
 
     def graphql(
-        self, query: str, variables: Mapping[str, Any] | None = None
+        self, query: str, variables: Mapping[str, Any] | None = None, *,
+        deadline: float | None = None,
     ) -> tuple[Any, Any]:
         """Send a GraphQL query with optional JSON variables.
 
@@ -118,7 +119,7 @@ class GitHubClient:
                 json.dumps(variables)
             except (TypeError, ValueError):
                 raise ValueError("variables must contain JSON-serializable values") from None
-        return self._graphql_request(query, variables)
+        return self._graphql_request(query, variables, deadline=deadline)
 
     def search_repositories(
         self, query: str, page: int = 1, per_page: int = 100
@@ -318,7 +319,8 @@ class GitHubClient:
         return RepositoryBatchResult(tuple(repositories), tuple(item_errors))
 
     def _graphql_request(
-        self, query: str, variables: Mapping[str, Any] | None = None
+        self, query: str, variables: Mapping[str, Any] | None = None, *,
+        deadline: float | None = None,
     ) -> tuple[Any, Any]:
         payload = {"query": query}
         if variables is not None:
@@ -337,8 +339,12 @@ class GitHubClient:
         )
         last_error: GitHubAPIError | None = None
         for attempt in range(_MAX_ATTEMPTS):
+            remaining = deadline - time.monotonic() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise GitHubAPIError(None, "deadline exceeded")
             try:
-                with self._opener(request, timeout=self.timeout) as response:
+                timeout = min(self.timeout, remaining) if remaining is not None else self.timeout
+                with self._opener(request, timeout=timeout) as response:
                     body = response.read()
                     status = getattr(response, "status", 200)
                     headers = getattr(response, "headers", {})
@@ -357,7 +363,11 @@ class GitHubClient:
                     last_error = GitHubAPIError(403, "GraphQL rate limit exceeded")
                     if attempt + 1 == _MAX_ATTEMPTS:
                         break
-                    self._sleep(_retry_delay(headers, attempt))
+                    delay = _retry_delay(headers, attempt)
+                    remaining = deadline - time.monotonic() if deadline is not None else None
+                    if remaining is not None and delay >= remaining:
+                        raise GitHubAPIError(None, "deadline exceeded")
+                    self._sleep(delay)
                     continue
                 return payload, headers
             except HTTPError as exc:
@@ -368,12 +378,20 @@ class GitHubClient:
                 last_error = GitHubAPIError(status, _safe_http_message(exc))
                 if attempt + 1 == _MAX_ATTEMPTS:
                     break
-                self._sleep(_retry_delay(headers, attempt))
+                delay = _retry_delay(headers, attempt)
+                remaining = deadline - time.monotonic() if deadline is not None else None
+                if remaining is not None and delay >= remaining:
+                    raise GitHubAPIError(None, "deadline exceeded") from None
+                self._sleep(delay)
             except (TimeoutError, URLError, OSError) as exc:
                 last_error = GitHubAPIError(None, type(exc).__name__)
                 if attempt + 1 == _MAX_ATTEMPTS:
                     break
-                self._sleep(min(2**attempt, _MAX_RETRY_SLEEP))
+                delay = min(2**attempt, _MAX_RETRY_SLEEP)
+                remaining = deadline - time.monotonic() if deadline is not None else None
+                if remaining is not None and delay >= remaining:
+                    raise GitHubAPIError(None, "deadline exceeded") from None
+                self._sleep(delay)
         assert last_error is not None
         raise last_error
 

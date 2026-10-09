@@ -30,6 +30,17 @@ configs:
 
 # GitHub ML
 
+## Data license and source scope
+
+The card metadata value `license: other` means this registry contains mixed,
+source-specific terms; no blanket license is asserted for the combined data.
+It is metadata, not a license grant. This card describes a local review
+artifact and does not authorize or perform external publication. Repository
+README text and descriptions, when included, remain repository-provided
+material and are not relicensed by this project. Attribute only sources that
+actually contributed to the generated bundle; consult its `source-attribution.json`
+for verified source labels, fingerprints, terms statements, and scope.
+
 A continually refreshed registry of GitHub repositories across ML fields. The curated `current` view applies `ml-contribution-v5` and seeks projects that present a distinct contribution to an ML model, method, or technique. The broader `candidates` view includes current-view rows and repositories with heuristic evidence of probable original ML content, as well as established qualified review cases. Candidate eligibility is independent of strict selection status: a row screened out of `current` may still qualify for `candidates` based on its description or available compact README evidence. Broad Search, topic, census, and paper-link discovery is retained as raw provenance; Search observations take precedence during projection.
 
 Both views use text heuristics, not verification. Repository self-description cannot establish actual originality, correctness, reproducibility, or scientific quality. Candidate evidence can describe original implementations, concrete adaptations or fine-tunes, substantive applications or experiments, original datasets or benchmarks, and original ML tooling. A bare paper link, generic ML mention, or query match is not enough. Pure forks, mirrors, resource lists, tutorials, and unrelated utilities remain outside the candidate view; substantive work within a course or reproduction project can qualify. The complete append-only retrieval history remains available in the opt-in `observations` configuration for audit. Metadata can be incomplete or stale, and the registry is not a comprehensive census of ML work. See the [probable ML content guide](../docs/probable-content.md) for the evidence categories and limitations.

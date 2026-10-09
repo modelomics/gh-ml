@@ -52,7 +52,7 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
              "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": [], "candidate_rule_version": "ml-candidate-v4",
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v5",
          "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence",
          "candidate_evidence": []},
         {**_row(20, "2026-09-24T12:00:00Z", stars=50, extra={"kept": True},
@@ -66,7 +66,7 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
          "evidence_version": "gh-ml-relevance-v1", "evidence_tier": "no_text_signal",
              "evidence_signals": [], "selection_version": current_view.SELECTION_VERSION,
          "selection_status": "review", "selection_reason": "insufficient-repository-evidence",
-         "selection_signals": [], "candidate_rule_version": "ml-candidate-v4",
+         "selection_signals": [], "candidate_rule_version": "ml-candidate-v5",
          "candidate_eligible": False, "candidate_reason": "insufficient-repository-evidence",
          "candidate_evidence": []},
     ]
@@ -74,7 +74,7 @@ def test_newest_observation_wins_over_later_old_backfill_and_output_is_sorted(tm
     assert report["current_view_count"] == 2
     assert report["version"] == current_view.CURRENT_VIEW_PROJECTION_VERSION == 8
     manifest = json.loads((tmp_path / "view.jsonl.manifest.json").read_text())
-    assert manifest["candidate_rule_version"] == "ml-candidate-v4"
+    assert manifest["candidate_rule_version"] == "ml-candidate-v5"
     assert "queryless absent or false" in manifest["selection"]
     assert manifest["input_files"][1]["observations"] == 2
     assert repeat.read_bytes() == output.read_bytes()
