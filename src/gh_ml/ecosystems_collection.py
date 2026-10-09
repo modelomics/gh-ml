@@ -160,8 +160,10 @@ def _git_metadata(raw: dict[str, Any], *, observed_at: str) -> dict[str, Any]:
         "forks": raw.get("forks_count") if _nonnegative_int(raw.get("forks_count")) else None,
         "created_at": _timestamp_text(raw.get("created_at")),
         "pushed_at": None if raw.get("pushed_at") is None else _timestamp_text(raw.get("pushed_at")),
-        "updated_at": source_updated_at, "last_synced_at": source_updated_at,
-        "source_last_synced_at": source_updated_at, "observed_at": _timestamp_text(observed_at) or observed_at,
+        # GitHub's updated_at is repository event time, not when this response
+        # was observed. GitHub provides no separate source-sync timestamp.
+        "updated_at": source_updated_at, "last_synced_at": None,
+        "source_last_synced_at": None, "observed_at": _timestamp_text(observed_at) or observed_at,
         "metadata_source": "github", "source_record_id": None,
         "archived": raw.get("archived") if isinstance(raw.get("archived"), bool) else None,
         "fork": raw.get("fork") if isinstance(raw.get("fork"), bool) else None,
@@ -175,11 +177,11 @@ def _git_metadata(raw: dict[str, Any], *, observed_at: str) -> dict[str, Any]:
                        or key == "created_at" and values[key] is not None
                        or key == "pushed_at" and (raw.get(key) is None or values[key] is not None)))
         if key == "last_synced_at":
-            known_value = source_updated_at is not None
+            known_value = False
         if known_value:
             known.append(key)
         provenance[key] = {"source": "github", "observed_at": values["observed_at"],
-                           "source_last_synced_at": source_updated_at, "known": bool(known_value)}
+                           "source_last_synced_at": None, "known": bool(known_value)}
     values["known_fields"] = known
     values["missing_required_fields"] = [field for field in _FIELDS if field not in known]
     values["field_provenance"] = provenance
@@ -424,7 +426,13 @@ def _iter_unresolved(db: sqlite3.Connection, *, deadline: float | None,
 
 def _is_incomplete(row: dict[str, Any]) -> bool:
     # Null description and language, and empty topic lists, are known values.
-    return bool(row.get("missing_required_fields")) or _timestamp(row.get("source_last_synced_at")) is None
+    missing = set(row.get("missing_required_fields") or ())
+    if row.get("metadata_source") == "github":
+        # GitHub has no provider sync clock. Do not repeatedly enqueue a
+        # complete fallback row solely because last_synced_at is unavailable.
+        missing.discard("last_synced_at")
+        return bool(missing)
+    return bool(missing) or _timestamp(row.get("source_last_synced_at")) is None
 
 
 def run_import(*, state_db: Path, output_dir: Path, ecosystems_client: Any,
