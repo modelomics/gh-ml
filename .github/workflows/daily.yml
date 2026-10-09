@@ -111,7 +111,7 @@ jobs:
         env:
           HF_HUB_OFFLINE: "1"
           TRANSFORMERS_OFFLINE: "1"
-        run: uv run --frozen pytest
+        run: uv run --frozen python -m pytest
       - name: Verify Hugging Face publishing credentials
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}

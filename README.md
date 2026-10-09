@@ -69,7 +69,7 @@ uv run gh-ml run --no-publish
 The complete suite exercises Parquet, scikit-learn triage, FAISS retrieval, and DuckDB publication paths. Install its lightweight test dependencies with `uv sync --locked --extra test`; this extra does not install sentence-transformers, Torch, or model weights. The tests use fake encoders and can run with model hubs offline:
 
 ```sh
-xonsh --no-rc -c '$HF_HUB_OFFLINE = "1"; $TRANSFORMERS_OFFLINE = "1"; uv run --frozen pytest'
+xonsh --no-rc -c '$HF_HUB_OFFLINE = "1"; $TRANSFORMERS_OFFLINE = "1"; uv run --frozen python -m pytest'
 ```
 
 CI runs the same command on pushes to `main` and pull requests targeting `main`.

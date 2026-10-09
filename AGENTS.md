@@ -6,4 +6,4 @@ outputs outside the source repository. Store the maintained registry on the
 Modelomics Hugging Face organization and keep this repository focused on the
 collection and publishing code.
 
-Set up the full test environment with `uv sync --locked --extra test`. Run the offline suite with `xonsh --no-rc -c '$HF_HUB_OFFLINE = "1"; $TRANSFORMERS_OFFLINE = "1"; uv run --frozen pytest'`.
+Set up the full test environment with `uv sync --locked --extra test`. Run the offline suite with `xonsh --no-rc -c '$HF_HUB_OFFLINE = "1"; $TRANSFORMERS_OFFLINE = "1"; uv run --frozen python -m pytest'`.
