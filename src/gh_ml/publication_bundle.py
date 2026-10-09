@@ -14,6 +14,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -588,6 +589,30 @@ def assemble_verified_publication_bundle(
     """
     inventory = verify_publication_inventory(inventory_dir)
     assessment = verify_combined_assessment(inventory_dir, assessment_dir)
+    selection_status_counts: Counter[str] = Counter()
+    candidate_eligible_count = 0
+    assessment_rows = 0
+    _, pq = _arrow()
+    for receipt in assessment["verified_buckets"]:
+        parquet = pq.ParquetFile(Path(receipt["verified_path"]))
+        columns = set(parquet.schema_arrow.names)
+        if not {"selection_status", "candidate_eligible"} <= columns:
+            raise ValueError("assessment shard lacks selection status or candidate eligibility fields")
+        for batch in parquet.iter_batches(
+            columns=["selection_status", "candidate_eligible"], batch_size=DEFAULT_BATCH_SIZE
+        ):
+            values = batch.to_pydict()
+            for status in values["selection_status"]:
+                selection_status_counts[status if status in {"include", "review", "exclude"}
+                                        else "unknown"] += 1
+            candidate_eligible_count += sum(value is True for value in values["candidate_eligible"])
+            assessment_rows += len(values["selection_status"])
+    normalized_selection_counts = {
+        name: selection_status_counts.get(name, 0)
+        for name in ("include", "review", "exclude", "unknown")
+    }
+    if assessment_rows != inventory["inventory_rows"] or sum(normalized_selection_counts.values()) != inventory["inventory_rows"]:
+        raise ValueError("selection status counts do not cover the complete inventory")
     output = Path(output_dir).expanduser().resolve()
     if output.exists() and any(output.iterdir()):
         raise FileExistsError(f"bundle output directory must be empty: {output}")
@@ -627,6 +652,21 @@ def assemble_verified_publication_bundle(
         inventory_root, assessment_root, output / "views", memory_limit=memory_limit,
         max_output_bytes=max_output_bytes, allow_fixture_reserve=allow_fixture_reserve,
     )
+    # The materializer's receipts are relative to output/views because that
+    # manifest is stored alongside those shards. The bundle manifest lives one
+    # directory higher, so make its shard paths bundle-root-relative for
+    # consumers such as publication_metadata.verify_release_receipt.
+    views = dict(views)
+    for view_name in ("current", "candidates"):
+        view = dict(views[view_name])
+        view["parts"] = [
+            {**part, "path": (Path("views") / part["path"]).as_posix()}
+            for part in view["parts"]
+        ]
+        views[view_name] = view
+    if (views["current"]["rows"] != inventory["inventory_rows"]
+            or views["candidates"]["rows"] != candidate_eligible_count):
+        raise ValueError("rebuilt view counts do not match verified assessment scope counts")
     allocated: dict[tuple[int, int], int] = {}
     for path in output.rglob("*"):
         if path.is_file():
@@ -664,7 +704,13 @@ def assemble_verified_publication_bundle(
         },
         "assessment_coverage": {"bucket_count": assessment["bucket_count"],
                                  "missing_bucket_ids": assessment["missing_bucket_ids"],
-                                 "route_counts": assessment.get("route_counts", {})},
+                                 "route_counts": assessment.get("route_counts", {}),
+                                 "selection_status_counts": normalized_selection_counts,
+                                 "candidate_eligible_count": candidate_eligible_count},
+        "view_semantics": {
+            "current": "One latest merged metadata and assessment row per inventory repository ID; includes all inventory IDs independent of selector status.",
+            "candidates": "Repositories with candidate_eligible=true under the pinned candidate rule; this is the probable-content discovery subset, not a scientific novelty claim.",
+        },
         "views": views,
         "retained_artifacts": copied,
         "limitations": [

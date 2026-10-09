@@ -7,6 +7,7 @@ Run state belongs in an external run directory, never in the source tree.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import Future, ThreadPoolExecutor
 import gzip
 import hashlib
 import json
@@ -156,7 +157,7 @@ def _manifest(run_dir: Path, start: datetime, end: datetime | None) -> dict[str,
 def _download(url: str, destination: Path, *, opener: Callable[..., Any], timeout: float,
               rate_limit_bytes_per_second: float, min_free_bytes: int,
               max_compressed_bytes: int, max_uncompressed_bytes: int,
-              sleep: Callable[[float], None]) -> tuple[str, int]:
+              sleep: Callable[[float], None], deadline: float | None = None) -> tuple[str, int]:
     digest = hashlib.sha256()
     size = 0
     download_started = time.monotonic()
@@ -166,6 +167,8 @@ def _download(url: str, destination: Path, *, opener: Callable[..., Any], timeou
         if status != 200:
             raise urllib.error.HTTPError(url, status, "non-200 response", getattr(response, "headers", None), None)
         while True:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("download exceeded invocation deadline")
             chunk = response.read(1024 * 1024)
             if not chunk:
                 break
@@ -179,7 +182,13 @@ def _download(url: str, destination: Path, *, opener: Callable[..., Any], timeou
             minimum_elapsed = size / rate_limit_bytes_per_second
             elapsed = time.monotonic() - download_started
             if minimum_elapsed > elapsed:
-                sleep(minimum_elapsed - elapsed)
+                delay = minimum_elapsed - elapsed
+                if deadline is not None:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("download exceeded invocation deadline")
+                    delay = min(delay, remaining)
+                sleep(delay)
         out.flush()
         os.fsync(out.fileno())
     # Reading through EOF validates gzip members, CRC and trailer before promotion.
@@ -194,6 +203,73 @@ def _download(url: str, destination: Path, *, opener: Callable[..., Any], timeou
             if uncompressed_size > max_uncompressed_bytes:
                 raise ValueError(f"uncompressed hour exceeds configured limit {max_uncompressed_bytes}")
     return digest.hexdigest(), size
+
+
+def _prefetch_path(raw_dir: Path, hour: datetime) -> tuple[Path, Path]:
+    stable = raw_dir / f"{hour:%Y-%m-%d-%H}.json.gz"
+    return stable.with_name(stable.name + ".prefetch.part"), stable.with_name(stable.name + ".prefetch.json")
+
+
+def _prefetch_download(hour: datetime, raw_dir: Path, *, opener: Callable[..., Any], timeout: float,
+                       rate_limit_bytes_per_second: float, min_free_bytes: int,
+                       max_compressed_bytes: int, max_uncompressed_bytes: int,
+                       sleep: Callable[[float], None], deadline: float | None = None) -> dict[str, Any]:
+    """Download and verify one future hour without touching the shared run state."""
+    part, receipt_path = _prefetch_path(raw_dir, hour)
+    part.unlink(missing_ok=True)
+    receipt_path.unlink(missing_ok=True)
+    started_at = datetime.now(timezone.utc).isoformat()
+    digest, size = _download(_url(hour), part, opener=opener, timeout=timeout,
+                             rate_limit_bytes_per_second=rate_limit_bytes_per_second,
+                             min_free_bytes=min_free_bytes, max_compressed_bytes=max_compressed_bytes,
+                             max_uncompressed_bytes=max_uncompressed_bytes, sleep=sleep, deadline=deadline)
+    result = {"schema_version": 1, "hour": _key(hour), "path": str(part), "sha256": digest,
+              "compressed_bytes": size, "gzip_verified": True, "started_at": started_at,
+              "completed_at": datetime.now(timezone.utc).isoformat()}
+    # This per-hour receipt is owned by this worker. The coordinator alone updates
+    # manifest.json and receipts.jsonl.
+    _atomic_json(receipt_path, result)
+    return result
+
+
+def _read_prefetch(raw_dir: Path, hour: datetime) -> dict[str, Any] | None:
+    part, receipt_path = _prefetch_path(raw_dir, hour)
+    stable = raw_dir / f"{hour:%Y-%m-%d-%H}.json.gz"
+    if not receipt_path.is_file():
+        # A partial file without its atomically-published completion receipt is
+        # never trusted after interruption.
+        part.unlink(missing_ok=True)
+        return None
+    try:
+        result = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if not isinstance(result, dict):
+            raise ValueError("prefetch receipt root must be a JSON object")
+        candidate = part if part.is_file() else stable
+        if (result.get("schema_version") != 1 or result.get("hour") != _key(hour) or
+                result.get("path") != str(part) or result.get("gzip_verified") is not True or
+                result.get("compressed_bytes") != candidate.stat().st_size or
+                result.get("sha256") != gharchive._file_hash(candidate)):
+            raise ValueError("prefetch receipt does not match its downloaded file")
+        return result
+    except (OSError, ValueError, json.JSONDecodeError):
+        part.unlink(missing_ok=True)
+        receipt_path.unlink(missing_ok=True)
+        return None
+
+
+def _promote_prefetch(raw_dir: Path, hour: datetime, result: dict[str, Any]) -> Path:
+    part, receipt_path = _prefetch_path(raw_dir, hour)
+    stable = raw_dir / f"{hour:%Y-%m-%d-%H}.json.gz"
+    if result.get("path") != str(part):
+        raise ValueError("prefetched raw failed coordinator hash verification")
+    if (part.is_file() and part.stat().st_size == result.get("compressed_bytes") and
+            gharchive._file_hash(part) == result.get("sha256")):
+        os.replace(part, stable)
+        _fsync_dir(stable.parent)
+    elif (not stable.is_file() or stable.stat().st_size != result.get("compressed_bytes") or
+          gharchive._file_hash(stable) != result.get("sha256")):
+        raise ValueError("prefetched raw failed coordinator hash verification")
+    return stable
 
 
 def _advance_watermark(data: dict[str, Any]) -> None:
@@ -226,6 +302,7 @@ def catch_up(
     max_events_per_hour: int = gharchive_compact.MAX_EVENTS_PER_HOUR,
     max_event_line_bytes: int = gharchive_compact.MAX_EVENT_LINE_BYTES,
     max_compact_store_bytes: int = gharchive_compact.MAX_COMPACT_STORE_BYTES,
+    prefetch_hours: int = 0,
 ) -> dict[str, Any]:
     """Process sequential hours while retaining visible gaps and bounded retries.
 
@@ -236,7 +313,7 @@ def catch_up(
             (max_hours is not None and max_hours < 1) or (max_seconds is not None and max_seconds < 0) or min_free_bytes < 0 or
             rate_limit_bytes_per_second <= 0 or max_compressed_hour_bytes < 1 or
             max_uncompressed_hour_bytes < 1 or max_events_per_hour < 1 or max_event_line_bytes < 1 or
-            max_compact_store_bytes < 1):
+            max_compact_store_bytes < 1 or prefetch_hours not in (0, 1)):
         raise ValueError("attempt count must be positive and backoff non-negative")
     compact_mode = aggregate_fn is None
     if aggregate_fn is None:
@@ -268,12 +345,86 @@ def catch_up(
     handled_hours = 0
     invocation_started = time.monotonic()
 
-    for cursor in work_hours:
+    # A single network-only worker may fetch one future hour. Manifest and shared
+    # receipts remain coordinator-owned; the worker publishes only its per-hour
+    # completion receipt after gzip validation.
+    prefetch_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="gharchive-prefetch") if prefetch_hours else None
+    pending_prefetch: tuple[datetime, Future[dict[str, Any]]] | None = None
+
+    def finish() -> dict[str, Any]:
+        if prefetch_executor is not None:
+            prefetch_executor.shutdown(wait=False, cancel_futures=True)
+        return _summary(data, run_dir)
+
+    def schedule_prefetch(hour: datetime) -> None:
+        nonlocal pending_prefetch
+        if prefetch_executor is None or pending_prefetch is not None or not compact_mode:
+            return
+        next_record = data["hours"].get(_key(hour), {})
+        stable = raw_dir / f"{hour:%Y-%m-%d-%H}.json.gz"
+        if next_record.get("status") in ("deleted", "aggregated") or stable.is_file():
+            return
+        # Reserve the maximum possible compressed output while it is in flight.
+        # Parsing gets this reservation added to its floor check, so scratch writes
+        # and the downloader cannot each spend the same free-space headroom.
+        reservation = max_compressed_hour_bytes
+        if shutil.disk_usage(run_dir).free < min_free_bytes + reservation:
+            return
+        timeout = timeout_seconds
+        if max_seconds is not None:
+            remaining = max_seconds - (time.monotonic() - invocation_started)
+            if remaining <= 0:
+                return
+            timeout = min(timeout, remaining)
+        part, receipt_path = _prefetch_path(raw_dir, hour)
+        if _read_prefetch(raw_dir, hour) is not None:
+            return
+        part.unlink(missing_ok=True)
+        receipt_path.unlink(missing_ok=True)
+        future = prefetch_executor.submit(
+            _prefetch_download, hour, raw_dir, opener=opener, timeout=timeout,
+            rate_limit_bytes_per_second=rate_limit_bytes_per_second,
+            min_free_bytes=min_free_bytes, max_compressed_bytes=max_compressed_hour_bytes,
+            max_uncompressed_bytes=max_uncompressed_hour_bytes, sleep=sleep,
+            deadline=(invocation_started + max_seconds) if max_seconds is not None else None)
+        pending_prefetch = (hour, future)
+
+    def collect_prefetch(hour: datetime) -> dict[str, Any] | BaseException | None:
+        nonlocal pending_prefetch
+        if pending_prefetch is not None and pending_prefetch[0] == hour:
+            future = pending_prefetch[1]
+            if max_seconds is not None:
+                remaining = max_seconds - (time.monotonic() - invocation_started)
+                if remaining <= 0 and not future.done():
+                    return None
+                try:
+                    result = future.result(timeout=max(0.0, remaining))
+                except TimeoutError:
+                    if not future.done():
+                        return None
+                    try:
+                        result = future.result()
+                    except BaseException as exc:
+                        result = exc
+            else:
+                try:
+                    result = future.result()
+                except BaseException as exc:
+                    result = exc
+            pending_prefetch = None
+            if isinstance(result, BaseException):
+                part, receipt_path = _prefetch_path(raw_dir, hour)
+                part.unlink(missing_ok=True)
+                receipt_path.unlink(missing_ok=True)
+            return result
+        return _read_prefetch(raw_dir, hour)
+
+    for work_index, cursor in enumerate(work_hours):
         if ((max_hours is not None and handled_hours >= max_hours) or
                 (max_seconds is not None and time.monotonic() - invocation_started >= max_seconds)):
             data["status"] = "running_partial"
             _atomic_json(manifest_path, data)
-            return _summary(data, run_dir)
+            return finish()
         key, url = _key(cursor), _url(cursor)
         record = data["hours"].setdefault(key, {"url": url, "status": "pending", "attempts": []})
         stable = raw_dir / f"{cursor:%Y-%m-%d-%H}.json.gz"
@@ -328,11 +479,21 @@ def catch_up(
             continue
         handled_hours += 1
 
+        prefetched = collect_prefetch(cursor) if prefetch_hours else None
+        if pending_prefetch is not None and pending_prefetch[0] == cursor and prefetched is None:
+            # The invocation deadline arrived before the in-flight socket completed.
+            # Leave its bounded worker and per-hour receipt available for resume.
+            data["status"] = "running_partial"
+            _atomic_json(manifest_path, data)
+            return finish()
+
         success = False
         for attempt_no in range(1, max_attempts_per_hour + 1):
             reuse_verified = (record.get("status") == "verified" and stable.is_file()
                               and gharchive._file_hash(stable) == record.get("sha256"))
-            attempt = {"number": len(record["attempts"]) + 1, "started_at": datetime.now(timezone.utc).isoformat(),
+            attempt_started = (prefetched.get("started_at") if attempt_no == 1 and isinstance(prefetched, dict)
+                               else datetime.now(timezone.utc).isoformat())
+            attempt = {"number": len(record["attempts"]) + 1, "started_at": attempt_started,
                        "url": url, "status": "reusing_verified_raw" if reuse_verified else "downloading"}
             record["status"] = "downloading"
             record["attempts"].append(attempt)
@@ -342,6 +503,14 @@ def catch_up(
             try:
                 if reuse_verified:
                     digest, size = record["sha256"], stable.stat().st_size
+                elif attempt_no == 1 and isinstance(prefetched, BaseException):
+                    raise prefetched
+                elif attempt_no == 1 and isinstance(prefetched, dict):
+                    stable = _promote_prefetch(raw_dir, cursor, prefetched)
+                    digest, size = prefetched["sha256"], prefetched["compressed_bytes"]
+                    attempt["completed_at"] = prefetched.get("completed_at")
+                    attempt["prefetched"] = True
+                    part = stable.with_suffix(stable.suffix + ".part")
                 else:
                     free_bytes = shutil.disk_usage(run_dir).free
                     if free_bytes < min_free_bytes:
@@ -359,14 +528,25 @@ def catch_up(
                 record.update(status="verified", sha256=digest, compressed_bytes=size, gzip_verified=True)
                 _append_receipt(receipts_path, {"hour": key, **attempt})
                 _atomic_json(manifest_path, data)
+                if attempt.get("prefetched"):
+                    _, prefetch_receipt = _prefetch_path(raw_dir, cursor)
+                    prefetch_receipt.unlink(missing_ok=True)
+                    _fsync_dir(raw_dir)
                 if compact_mode:
-                    report = aggregate_fn(stable, aggregate_dir, source_hour=key, expected_sha256=digest,
-                                          max_compressed_bytes=max_compressed_hour_bytes,
-                                          max_uncompressed_bytes=max_uncompressed_hour_bytes,
-                                          max_events=max_events_per_hour,
-                                          max_event_line_bytes=max_event_line_bytes,
-                                          max_store_bytes=max_compact_store_bytes,
-                                          min_free_bytes=min_free_bytes)
+                    next_hour = work_hours[work_index + 1] if work_index + 1 < len(work_hours) else None
+                    if next_hour is not None:
+                        schedule_prefetch(next_hour)
+                    reservation = (max_compressed_hour_bytes
+                                   if pending_prefetch is not None and not pending_prefetch[1].done() else 0)
+                    prepared = gharchive_compact.prepare_hour(
+                        stable, aggregate_dir, source_hour=key, expected_sha256=digest,
+                        max_compressed_bytes=max_compressed_hour_bytes,
+                        max_uncompressed_bytes=max_uncompressed_hour_bytes,
+                        max_events=max_events_per_hour,
+                        max_event_line_bytes=max_event_line_bytes,
+                        max_store_bytes=max_compact_store_bytes,
+                        min_free_bytes=min_free_bytes + reservation)
+                    report = gharchive_compact.commit_prepared_hour(prepared)
                     input_match = report if report.get("hour") == key and report.get("sha256") == digest else None
                 elif aggregate_fn is gharchive.aggregate_archives:
                     report = aggregate_fn([stable], aggregate_dir, export=False)
@@ -438,12 +618,12 @@ def catch_up(
                     record["status"] = "verified" if stable.exists() and record.get("sha256") else "pending"
                     data["status"] = "paused_low_disk_space"
                     _atomic_json(manifest_path, data)
-                    return _summary(data, run_dir)
+                    return finish()
                 if isinstance(exc, gharchive_compact.StoreCapReached):
                     record["status"] = "verified" if stable.exists() and record.get("sha256") else "pending"
                     data["status"] = "paused_compact_store_cap"
                     _atomic_json(manifest_path, data)
-                    return _summary(data, run_dir)
+                    return finish()
                 if attempt_no < max_attempts_per_hour:
                     sleep(base_backoff_seconds * (2 ** (attempt_no - 1)))
                 if is_provider_error:
@@ -453,7 +633,7 @@ def catch_up(
                         safe_cursor = max(scanned_before, cursor - timedelta(hours=1))
                         data["scanned_through"] = _key(safe_cursor) if safe_cursor >= start_dt else None
                         _atomic_json(manifest_path, data)
-                        return _summary(data, run_dir)
+                        return finish()
                 else:
                     consecutive_provider_errors = 0
                 if http_status == 404:
@@ -492,7 +672,7 @@ def catch_up(
             "scanned_through": data["scanned_through"]})
         data["aggregate_report"] = final_report
     _atomic_json(manifest_path, data)
-    return _summary(data, run_dir)
+    return finish()
 
 
 def _summary(data: dict[str, Any], run_dir: Path) -> dict[str, Any]:
@@ -577,6 +757,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--base-backoff-seconds", type=float, default=30.0)
     parser.add_argument("--max-hours", type=int, help="stop after this many non-complete hours in this invocation")
     parser.add_argument("--max-seconds", type=float, help="stop this invocation after this many seconds")
+    parser.add_argument("--prefetch-hours", type=int, choices=(0, 1), default=0,
+                        help="overlap one future download with compact parse/commit (default: serial)")
     parser.add_argument("--max-compressed-hour-bytes", type=int, default=gharchive_compact.MAX_COMPRESSED_BYTES)
     parser.add_argument("--max-uncompressed-hour-bytes", type=int, default=gharchive_compact.MAX_UNCOMPRESSED_BYTES)
     parser.add_argument("--max-events-per-hour", type=int, default=gharchive_compact.MAX_EVENTS_PER_HOUR)
@@ -595,7 +777,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         report = catch_up(args.run_dir, start=args.start, end=args.end,
                           max_attempts_per_hour=args.max_attempts_per_hour,
                           base_backoff_seconds=args.base_backoff_seconds, max_hours=args.max_hours,
-                          max_seconds=args.max_seconds,
+                          max_seconds=args.max_seconds, prefetch_hours=args.prefetch_hours,
                           max_compressed_hour_bytes=args.max_compressed_hour_bytes,
                           max_uncompressed_hour_bytes=args.max_uncompressed_hour_bytes,
                           max_events_per_hour=args.max_events_per_hour,

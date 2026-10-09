@@ -3,6 +3,8 @@ import io
 import json
 import sqlite3
 import shutil
+import threading
+import time
 from collections import namedtuple
 from pathlib import Path
 import urllib.error
@@ -338,5 +340,171 @@ def test_compact_store_cap_pauses_and_retains_verified_raw(tmp_path):
     record = manifest["hours"]["2023-08-29T00:00:00Z"]
     assert record["status"] == "verified"
     assert record.get("parser_report") is None
-    with sqlite3.connect(run / "aggregate" / "gharchive-compact.sqlite3") as db:
-        assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
+    # Preparation must not initialize the global ledger when its cap check
+    # rejects the hour; if a ledger exists, the relevant invariant is no commit.
+    ledger = run / "aggregate" / "gharchive-compact.sqlite3"
+    if ledger.exists():
+        with sqlite3.connect(ledger) as db:
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+            if "hours" in tables:
+                assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
+                assert db.execute("SELECT count(*) FROM repositories").fetchone()[0] == 0
+
+
+def _event_hour(hour):
+    event = {"id": f"e-{hour}", "type": "PushEvent", "created_at": f"2023-08-29T{hour:02d}:20:00Z",
+             "repo": {"id": 42 + hour, "name": f"owner/repo-{hour}"}, "payload": {}}
+    return gzip.compress(json.dumps(event).encode() + b"\n")
+
+
+def test_prefetch_overlaps_prepare_and_keeps_single_ordered_writer(tmp_path, monkeypatch):
+    from gh_ml import gharchive_compact
+
+    bodies = {hour: _event_hour(hour) for hour in range(3)}
+    next_download_started = threading.Event()
+    original_prepare = gharchive_compact.prepare_hour
+    original_commit = gharchive_compact.commit_prepared_hour
+    commits = []
+    active_commits = 0
+    maximum_active_commits = 0
+    commit_lock = threading.Lock()
+
+    def opener(request, timeout):
+        hour = int(request.full_url.rsplit("-", 1)[1].split(".", 1)[0])
+        if hour == 1:
+            next_download_started.set()
+        return Response(bodies[hour])
+
+    def observed_prepare(path, output, **kwargs):
+        prepared = original_prepare(path, output, **kwargs)
+        if kwargs["source_hour"].endswith("T00:00:00Z"):
+            assert next_download_started.wait(5), "next raw download did not overlap current prepare"
+        return prepared
+
+    def observed_commit(prepared):
+        nonlocal active_commits, maximum_active_commits
+        with commit_lock:
+            active_commits += 1
+            maximum_active_commits = max(maximum_active_commits, active_commits)
+        try:
+            commits.append(prepared.source_hour)
+            return original_commit(prepared)
+        finally:
+            with commit_lock:
+                active_commits -= 1
+
+    monkeypatch.setattr(gharchive_compact, "prepare_hour", observed_prepare)
+    monkeypatch.setattr(gharchive_compact, "commit_prepared_hour", observed_commit)
+    result = acquire.catch_up(tmp_path / "run", start="2023-08-29T00:00:00Z",
+                             end="2023-08-29T02:00:00Z", opener=opener, min_free_bytes=0,
+                             rate_limit_bytes_per_second=10**9, max_compressed_hour_bytes=1024**2,
+                             max_uncompressed_hour_bytes=1024**2, prefetch_hours=1)
+
+    assert result["status"] == "complete_through_fixed_end"
+    assert commits == [f"2023-08-29T{hour:02d}:00:00Z" for hour in range(3)]
+    assert maximum_active_commits == 1
+    manifest = json.loads((tmp_path / "run" / "manifest.json").read_text())
+    assert manifest["hours"]["2023-08-29T01:00:00Z"]["attempts"][0]["prefetched"] is True
+    assert manifest["hours"]["2023-08-29T02:00:00Z"]["attempts"][0]["prefetched"] is True
+
+
+def test_prefetch_404_is_recorded_as_gap_and_retryable_on_resume(tmp_path):
+    bodies = {0: _event_hour(0), 1: _event_hour(1)}
+
+    def missing_once(request, timeout):
+        if request.full_url.endswith("2023-08-29-1.json.gz"):
+            raise urllib.error.HTTPError(request.full_url, 404, "missing", {}, None)
+        return Response(bodies[0])
+
+    run = tmp_path / "run"
+    first = acquire.catch_up(run, start="2023-08-29T00:00:00Z", end="2023-08-29T01:00:00Z",
+                            opener=missing_once, max_attempts_per_hour=1, min_free_bytes=0,
+                            rate_limit_bytes_per_second=10**9, max_compressed_hour_bytes=1024**2,
+                            max_uncompressed_hour_bytes=1024**2, prefetch_hours=1)
+    assert first["status"] == "complete_with_gaps"
+    manifest = json.loads((run / "manifest.json").read_text())
+    assert manifest["hours"]["2023-08-29T01:00:00Z"]["status"] == "gap"
+    assert manifest["hours"]["2023-08-29T01:00:00Z"]["attempts"][0]["http_status"] == 404
+
+    def available(request, timeout):
+        return Response(bodies[1])
+
+    resumed = acquire.catch_up(run, start="2023-08-29T00:00:00Z", opener=available,
+                               max_attempts_per_hour=1, min_free_bytes=0,
+                               rate_limit_bytes_per_second=10**9, max_compressed_hour_bytes=1024**2,
+                               max_uncompressed_hour_bytes=1024**2, prefetch_hours=1)
+    assert resumed["status"] == "complete_through_fixed_end"
+
+
+def test_prefetched_next_hour_survives_current_parse_failure(tmp_path, monkeypatch):
+    from gh_ml import gharchive_compact
+
+    original_prepare = gharchive_compact.prepare_hour
+    next_download_started = threading.Event()
+
+    def opener(request, timeout):
+        hour = int(request.full_url.rsplit("-", 1)[1].split(".", 1)[0])
+        if hour == 1:
+            next_download_started.set()
+        return Response(_event_hour(hour))
+
+    def fail_first_prepare(path, output, **kwargs):
+        if kwargs["source_hour"].endswith("T00:00:00Z"):
+            assert next_download_started.wait(5)
+            raise RuntimeError("simulated parser failure")
+        return original_prepare(path, output, **kwargs)
+
+    monkeypatch.setattr(gharchive_compact, "prepare_hour", fail_first_prepare)
+    run = tmp_path / "run"
+    result = acquire.catch_up(run, start="2023-08-29T00:00:00Z", end="2023-08-29T01:00:00Z",
+                             opener=opener, max_attempts_per_hour=1, min_free_bytes=0,
+                             rate_limit_bytes_per_second=10**9, max_compressed_hour_bytes=1024**2,
+                             max_uncompressed_hour_bytes=1024**2, prefetch_hours=1)
+    assert result["status"] == "complete_with_gaps"
+    manifest = json.loads((run / "manifest.json").read_text())
+    assert manifest["hours"]["2023-08-29T00:00:00Z"]["status"] == "gap"
+    preserved = run / "raw" / "2023-08-29-00.json.gz"
+    assert acquire.gharchive._file_hash(preserved) == manifest["hours"]["2023-08-29T00:00:00Z"]["sha256"]
+    assert manifest["hours"]["2023-08-29T01:00:00Z"]["status"] == "deleted"
+    assert preserved.is_file()
+    assert not (run / "raw" / "2023-08-29-01.json.gz").exists()
+
+
+def test_deadline_return_keeps_completed_prefetch_receipt_for_resume(tmp_path, monkeypatch):
+    from gh_ml import gharchive_compact
+
+    original_prepare = gharchive_compact.prepare_hour
+    next_download_started = threading.Event()
+    request_hours = []
+
+    def opener(request, timeout):
+        hour = int(request.full_url.rsplit("-", 1)[1].split(".", 1)[0])
+        request_hours.append(hour)
+        if hour == 1:
+            next_download_started.set()
+        return Response(_event_hour(hour))
+
+    def slow_first_prepare(path, output, **kwargs):
+        prepared = original_prepare(path, output, **kwargs)
+        if kwargs["source_hour"].endswith("T00:00:00Z"):
+            assert next_download_started.wait(5)
+            time.sleep(0.02)
+        return prepared
+
+    monkeypatch.setattr(gharchive_compact, "prepare_hour", slow_first_prepare)
+    run = tmp_path / "run"
+    partial = acquire.catch_up(run, start="2023-08-29T00:00:00Z", end="2023-08-29T01:00:00Z",
+                              opener=opener, max_seconds=0.01, min_free_bytes=0,
+                              rate_limit_bytes_per_second=10**9, max_compressed_hour_bytes=1024**2,
+                              max_uncompressed_hour_bytes=1024**2, prefetch_hours=1)
+    assert partial["status"] == "running_partial"
+    part, receipt = acquire._prefetch_path(run / "raw", acquire._hour("2023-08-29T01:00:00Z"))
+    assert part.is_file() and receipt.is_file()
+
+    resumed = acquire.catch_up(run, start="2023-08-29T00:00:00Z", opener=opener,
+                               min_free_bytes=0, rate_limit_bytes_per_second=10**9,
+                               max_compressed_hour_bytes=1024**2, max_uncompressed_hour_bytes=1024**2,
+                               prefetch_hours=1)
+    assert resumed["status"] == "complete_through_fixed_end"
+    assert request_hours.count(1) == 1, "resume should consume the durable prefetched raw"
+    assert not part.exists() and not receipt.exists()

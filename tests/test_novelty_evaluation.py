@@ -146,3 +146,32 @@ def test_rejects_repository_leakage_from_fit_splits(tmp_path):
     _write_json(receipt, receipt_doc)
     with pytest.raises(ValueError, match="repository leakage"):
         evaluate_heldout(model_dir, roster, annotations, predictions, receipt)
+
+
+def test_jsonl_annotations_require_authorized_hash_and_parse_rows(tmp_path):
+    model_dir, roster, annotations, predictions, receipt = _fixture(tmp_path)
+    rows = json.loads(annotations.read_text())
+    jsonl = tmp_path / "annotations.jsonl"
+    jsonl.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    expected_hash = hashlib.sha256(jsonl.read_bytes()).hexdigest()
+
+    result = evaluate_heldout(
+        model_dir, roster, jsonl, predictions, receipt,
+        expected_annotations_sha256=expected_hash,
+    )
+
+    assert result["annotation_file_sha256"] == expected_hash
+    assert result["evaluator_version"] == "gh-ml-novelty-evaluator-v1"
+    assert result["evaluator_source_sha256"]
+    assert result["evaluator_test_source_sha256"]
+
+
+def test_jsonl_hash_is_checked_before_parsing(tmp_path):
+    model_dir, roster, _annotations, predictions, receipt = _fixture(tmp_path)
+    jsonl = tmp_path / "annotations.jsonl"
+    jsonl.write_text("this is not json\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="authorized frozen input"):
+        evaluate_heldout(
+            model_dir, roster, jsonl, predictions, receipt,
+            expected_annotations_sha256="0" * 64,
+        )

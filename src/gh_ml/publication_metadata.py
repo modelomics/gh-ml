@@ -166,10 +166,44 @@ def verify_release_receipt(bundle_dir: str | Path) -> dict[str, Any]:
         raise ValueError("current view count exceeds the deduplicated inventory")
     if verified_views["candidates"]["rows"] > inventory_rows:
         raise ValueError("candidate view count exceeds the deduplicated inventory")
+    if verified_views["current"]["rows"] != inventory_rows:
+        raise ValueError("current view must contain one row per inventory ID")
+    coverage = manifest.get("assessment_coverage")
+    status_counts = coverage.get("selection_status_counts") if isinstance(coverage, Mapping) else None
+    status_names = ("include", "review", "exclude", "unknown")
+    if not isinstance(status_counts, Mapping):
+        raise ValueError("bundle lacks selection status count receipts")
+    checked_status_counts = {}
+    for status in status_names:
+        count = status_counts.get(status)
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            raise ValueError(f"selection_status_counts.{status} must be explicit and non-negative")
+        checked_status_counts[status] = count
+    if sum(checked_status_counts.values()) != verified_views["current"]["rows"]:
+        raise ValueError("selection status counts do not reconcile with current view")
+    eligible_count = coverage.get("candidate_eligible_count")
+    if (isinstance(eligible_count, bool) or not isinstance(eligible_count, int)
+            or eligible_count < 0 or eligible_count != verified_views["candidates"]["rows"]):
+        raise ValueError("candidate_eligible_count does not reconcile with candidates view")
+    semantics = manifest.get("view_semantics")
+    if not isinstance(semantics, Mapping):
+        raise ValueError("bundle is missing view semantics")
+    current_semantics = semantics.get("current")
+    candidate_semantics = semantics.get("candidates")
+    if (not isinstance(current_semantics, str) or "inventory" not in current_semantics.casefold()
+            or "independent" not in current_semantics.casefold()):
+        raise ValueError("current view semantics must describe all inventory IDs independent of selector status")
+    if (not isinstance(candidate_semantics, str)
+            or "candidate_eligible=true" not in candidate_semantics.casefold()):
+        raise ValueError("candidate view semantics must state candidate_eligible=true")
     return {"root": root, "manifest": manifest, "views": verified_views,
             "source_fingerprints": dict(sorted(source_fingerprints.items())),
             "inventory_rows": inventory_rows,
             "inventory_parts": verified_inventory_parts,
+            "selection_status_counts": checked_status_counts,
+            "candidate_eligible_count": eligible_count,
+            "view_semantics": {"current": current_semantics,
+                               "candidates": candidate_semantics},
             "publishable": manifest["publishable"], "readiness_gaps": expected_gaps}
 
 
@@ -208,12 +242,16 @@ def render_release_card(verified: Mapping[str, Any]) -> str:
         f"| {name} | {counts[name]} | [schema and shard receipts](schema.json) |"
         for name in ("inventory", "observations", "candidates", "current")
     )
+    status_lines = "\n".join(
+        f"| {status} | {count} |"
+        for status, count in verified["selection_status_counts"].items()
+    )
     gap_text = (", ".join(f"`{item}`" for item in verified["readiness_gaps"])
                 if verified["readiness_gaps"] else "none")
     release_state = "passes all declared bundle gates" if verified["publishable"] else "is incomplete"
     return f"""# GitHub ML repository discovery bundle
 
-This local bundle {release_state}. Its discovery and curation views are not an exhaustive census of GitHub repositories or ML work. The `inventory` is a deduplicated projection, `observations` are a distinct raw history and are not materialized as a separate view here, `candidates` is the broader probable-content discovery view, and `current` is the stricter selected view. Inclusion in any view does not prove scientific novelty, correctness, reproducibility, or quality. Declared readiness gaps: {gap_text}.
+This local bundle {release_state}. Its discovery and curation views are not an exhaustive census of GitHub repositories or ML work. The `inventory` is a deduplicated projection; raw `observations` are a distinct history and are not materialized as a separate view here. `current` contains one latest merged metadata and assessment row for every inventory ID, regardless of selector status. `candidates` contains rows with `candidate_eligible=true` under the pinned candidate rule. Neither view is a claim that every row is an ML repository, and candidate eligibility does not establish scientific novelty, correctness, reproducibility, or quality. Declared readiness gaps: {gap_text}.
 
 ## Verified contents
 
@@ -222,6 +260,14 @@ This local bundle {release_state}. Its discovery and curation views are not an e
 {view_lines}
 
 The verified inventory contains **{verified['inventory_rows']}** deduplicated repository records. This is not a raw observation-history view: source observation history and raw inventories are distinct inputs, and no observation count is inferred here. The separately receipted `quarantine.parquet` records invalid IDs and collisions and is not counted as a view. Row totals come from hash-verified bundle shard receipts; they are not hardcoded pilot counts.
+
+### Current selector statuses
+
+| Status | Rows |
+| --- | ---: |
+{status_lines}
+
+Total current rows: **{views['current']['rows']}**. Candidate-eligible rows: **{verified['candidate_eligible_count']}**; this equals the candidates view count.
 
 ## Source attribution and coverage
 
@@ -255,6 +301,11 @@ def generate_release_metadata(bundle_dir: str | Path) -> dict[str, Any]:
         "bundle_status": {"publishable": verified["publishable"],
                            "readiness_gaps": verified["readiness_gaps"]},
         "views": verified["views"],
+        "view_semantics": verified["view_semantics"],
+        "assessment_coverage": {
+            "selection_status_counts": verified["selection_status_counts"],
+            "candidate_eligible_count": verified["candidate_eligible_count"],
+        },
         "inventory": {"rows": verified["inventory_rows"],
                        "parts": verified["inventory_parts"],
                        "description": "Deduplicated repository inventory; not a raw observation ledger."},

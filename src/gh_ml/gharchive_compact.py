@@ -15,6 +15,7 @@ import shutil
 import sqlite3
 import tempfile
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -38,6 +39,27 @@ SCRATCH_BATCH_BYTES = 8 * 1024**2
 
 class StoreCapReached(RuntimeError):
     """The compact ledger plus scratch files reached its configured size cap."""
+
+
+@dataclass(frozen=True)
+class PreparedHour:
+    """Immutable identity and counters for one verified, parsed hour."""
+
+    source_path: Path
+    output_dir: Path
+    scratch_path: Path
+    source_hour: str
+    sha256: str
+    compressed_bytes: int
+    uncompressed_bytes: int
+    unique_events: int
+    malformed_events: int
+    repository_observations: int
+    parse_seconds: float
+    scratch_sha256: str | None
+    max_store_bytes: int
+    min_free_bytes: int
+    already_committed: bool = False
 
 
 def _global_upsert_sql() -> tuple[list[str], str]:
@@ -345,7 +367,8 @@ def _event_repositories(event: dict[str, Any]) -> list[tuple[int, Any, str]]:
 def _parse_hour(path: Path, scratch_path: Path, source_hour: str, sha256: str,
                 *, max_compressed_bytes: int, max_uncompressed_bytes: int,
                 max_events: int, max_event_line_bytes: int, min_free_bytes: int,
-                max_store_bytes: int) -> dict[str, Any]:
+                max_store_bytes: int,
+                expected_scratch_sha256: str | None = None) -> dict[str, Any]:
     size = path.stat().st_size
     if size > max_compressed_bytes:
         raise ValueError(f"compressed hour exceeds limit ({size} > {max_compressed_bytes})")
@@ -358,7 +381,10 @@ def _parse_hour(path: Path, scratch_path: Path, source_hour: str, sha256: str,
         try:
             with sqlite3.connect(scratch_path) as old:
                 meta = dict(old.execute("SELECT key,value FROM scratch_meta"))
-            reuse = meta.get("complete") == "1" and meta.get("source_hour") == source_hour and meta.get("sha256") == sha256
+            reuse = (meta.get("complete") == "1" and meta.get("source_hour") == source_hour
+                     and meta.get("sha256") == sha256 and meta.get("source_path") == str(path.resolve())
+                     and expected_scratch_sha256 is not None
+                     and gharchive._file_hash(scratch_path) == expected_scratch_sha256)
         except sqlite3.Error:
             reuse = False
         if not reuse:
@@ -437,7 +463,8 @@ def _parse_hour(path: Path, scratch_path: Path, source_hour: str, sha256: str,
         repo_observations = db.execute("SELECT count(*) FROM repositories").fetchone()[0]
         parse_seconds = round(time.monotonic() - parse_started, 3)
         with db:
-            for key, value in {"source_hour": source_hour, "sha256": sha256, "complete": "1",
+            for key, value in {"source_hour": source_hour, "sha256": sha256,
+                               "source_path": str(path.resolve()), "complete": "1",
                                "uncompressed_bytes": str(uncompressed), "unique_events": str(unique_events),
                                "malformed_events": str(malformed),
                                "parse_seconds": str(parse_seconds)}.items():
@@ -472,11 +499,254 @@ def _merge_repository(global_db: sqlite3.Connection, row: sqlite3.Row, source_ho
 def _cleanup_scratch(path: Path) -> None:
     for suffix in ("", "-journal", "-wal", "-shm"):
         Path(str(path) + suffix).unlink(missing_ok=True)
+    _scratch_receipt_path(path).unlink(missing_ok=True)
     descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+def _scratch_path_for(output_dir: Path, source_hour: str) -> Path:
+    return output_dir / "scratch" / f"{source_hour.replace(':', '').replace('-', '')}.sqlite3"
+
+
+def _scratch_receipt_path(scratch_path: Path) -> Path:
+    return Path(f"{scratch_path}.receipt.json")
+
+
+def _load_scratch_receipt(scratch_path: Path, source_path: Path, source_hour: str,
+                          sha256: str, compressed_bytes: int) -> str | None:
+    """Return a trusted prior scratch hash only when its immutable input matches."""
+    receipt_path = _scratch_receipt_path(scratch_path)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(receipt, dict):
+        return None
+    scratch_hash = receipt.get("scratch_sha256")
+    if (receipt.get("version") != 1
+            or receipt.get("source_path") != str(source_path)
+            or receipt.get("source_hour") != source_hour
+            or receipt.get("sha256") != sha256
+            or receipt.get("compressed_bytes") != compressed_bytes
+            or not isinstance(scratch_hash, str)
+            or len(scratch_hash) != 64
+            or any(char not in "0123456789abcdef" for char in scratch_hash)):
+        return None
+    return scratch_hash
+
+
+def _read_existing_marker(global_path: Path, source_hour: str) -> dict[str, Any] | None:
+    """Read a checkpointed marker without locks, writes, or SQLite sidecars."""
+    if not global_path.exists():
+        return None
+    # Immutable read-only mode ignores WAL files; never use it when one exists.
+    # Parsing then committing is safe and preserves the marker check at commit.
+    if Path(f"{global_path}-wal").exists():
+        return None
+    uri = f"{global_path.as_uri()}?mode=ro&immutable=1"
+    db = None
+    try:
+        db = sqlite3.connect(uri, uri=True)
+        db.row_factory = sqlite3.Row
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='hours'").fetchone() is None:
+            return None
+        row = db.execute("SELECT * FROM hours WHERE source_hour=?", (source_hour,)).fetchone()
+        marker = dict(row) if row is not None else None
+        if Path(f"{global_path}-wal").exists():
+            return None
+        return marker
+    finally:
+        if db is not None:
+            db.close()
+
+
+def prepare_hour(path: Path, output_dir: Path, *, source_hour: str,
+                 expected_sha256: str | None = None,
+                 max_compressed_bytes: int = MAX_COMPRESSED_BYTES,
+                 max_uncompressed_bytes: int = MAX_UNCOMPRESSED_BYTES,
+                 max_events: int = MAX_EVENTS_PER_HOUR,
+                 max_event_line_bytes: int = MAX_EVENT_LINE_BYTES,
+                 max_store_bytes: int = MAX_COMPACT_STORE_BYTES,
+                 min_free_bytes: int = 300 * 1024**3) -> PreparedHour:
+    """Validate and parse an hour into durable scratch without writing the ledger."""
+    path = Path(path).expanduser().resolve()
+    output_dir = Path(output_dir).expanduser().resolve()
+    source_hour = _hour_string(source_hour)
+    if max_store_bytes < 1:
+        raise ValueError("compact store byte cap must be positive")
+    if path.stat().st_size > max_compressed_bytes:
+        raise ValueError(f"compressed hour exceeds limit ({path.stat().st_size} > {max_compressed_bytes})")
+    digest = gharchive._file_hash(path)
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("input SHA256 differs from acquisition receipt")
+    compressed_bytes = path.stat().st_size
+    global_path = output_dir / "gharchive-compact.sqlite3"
+    scratch_dir = output_dir / "scratch"
+    scratch_path = _scratch_path_for(output_dir, source_hour)
+    existing = _read_existing_marker(global_path, source_hour)
+    if existing is not None:
+        if existing["sha256"] != digest:
+            raise RuntimeError("a different hash is already committed for this UTC hour")
+        return PreparedHour(path, output_dir, scratch_path, source_hour, digest, compressed_bytes,
+                            int(existing["uncompressed_bytes"]), int(existing["unique_events"]),
+                            int(existing["malformed_events"]), int(existing["repository_observations"]),
+                            float(existing.get("parse_seconds") or 0), None,
+                            max_store_bytes, min_free_bytes, True)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    scratch_dir.mkdir(exist_ok=True)
+    _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
+    expected_scratch_sha256 = _load_scratch_receipt(
+        scratch_path, path, source_hour, digest, compressed_bytes,
+    )
+    parsed = _parse_hour(path, scratch_path, source_hour, digest,
+                         max_compressed_bytes=max_compressed_bytes,
+                         max_uncompressed_bytes=max_uncompressed_bytes, max_events=max_events,
+                         max_event_line_bytes=max_event_line_bytes,
+                         min_free_bytes=min_free_bytes, max_store_bytes=max_store_bytes,
+                         expected_scratch_sha256=expected_scratch_sha256)
+    scratch_sha256 = gharchive._file_hash(scratch_path)
+    _atomic_json(_scratch_receipt_path(scratch_path), {
+        "version": 1,
+        "source_path": str(path),
+        "source_hour": source_hour,
+        "sha256": digest,
+        "compressed_bytes": compressed_bytes,
+        "scratch_sha256": scratch_sha256,
+    })
+    _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
+    return PreparedHour(path, output_dir, scratch_path, source_hour, digest, compressed_bytes,
+                        parsed["uncompressed_bytes"], parsed["unique_events"],
+                        parsed["malformed_events"], parsed["repository_observations"],
+                        parsed["parse_seconds"], scratch_sha256, max_store_bytes, min_free_bytes)
+
+
+def _validate_prepared_scratch(prepared: PreparedHour) -> dict[str, Any]:
+    output_dir = prepared.output_dir.resolve()
+    expected_scratch = _scratch_path_for(output_dir, prepared.source_hour).resolve()
+    scratch_path = prepared.scratch_path.resolve()
+    if scratch_path != expected_scratch or scratch_path.parent.parent != output_dir:
+        raise ValueError("prepared scratch path is not canonical for its output directory and hour")
+    if not scratch_path.is_file():
+        raise FileNotFoundError(f"prepared scratch database is missing: {scratch_path}")
+    durable_scratch_sha256 = _load_scratch_receipt(
+        scratch_path, prepared.source_path, prepared.source_hour,
+        prepared.sha256, prepared.compressed_bytes,
+    )
+    if durable_scratch_sha256 != prepared.scratch_sha256:
+        raise ValueError("prepared scratch hash does not match its durable receipt")
+    if not prepared.scratch_sha256 or gharchive._file_hash(scratch_path) != prepared.scratch_sha256:
+        raise ValueError("prepared scratch hash does not match its immutable receipt")
+    scratch = sqlite3.connect(scratch_path)
+    try:
+        scratch.row_factory = sqlite3.Row
+        meta = dict(scratch.execute("SELECT key,value FROM scratch_meta"))
+        repository_observations = scratch.execute("SELECT count(*) FROM repositories").fetchone()[0]
+        unique_events = scratch.execute("SELECT count(*) FROM seen_events").fetchone()[0]
+    finally:
+        scratch.close()
+    expected_meta = {
+        "source_hour": prepared.source_hour,
+        "sha256": prepared.sha256,
+        "source_path": str(prepared.source_path),
+        "complete": "1",
+        "uncompressed_bytes": str(prepared.uncompressed_bytes),
+        "unique_events": str(prepared.unique_events),
+        "malformed_events": str(prepared.malformed_events),
+    }
+    if any(meta.get(key) != value for key, value in expected_meta.items()):
+        raise ValueError("prepared scratch metadata does not match its immutable receipt")
+    if meta.get("parse_seconds") != str(prepared.parse_seconds):
+        raise ValueError("prepared scratch parse timing does not match its immutable receipt")
+    if repository_observations != prepared.repository_observations or unique_events != prepared.unique_events:
+        raise ValueError("prepared scratch counts do not match its immutable receipt")
+    return {"uncompressed_bytes": prepared.uncompressed_bytes,
+            "unique_events": prepared.unique_events, "malformed_events": prepared.malformed_events,
+            "repository_observations": prepared.repository_observations,
+            "parse_seconds": prepared.parse_seconds}
+
+
+def commit_prepared_hour(prepared: PreparedHour) -> dict[str, Any]:
+    """Commit one validated prepared hour through the single global writer."""
+    if not isinstance(prepared, PreparedHour):
+        raise TypeError("prepared must be a PreparedHour receipt")
+    started = time.monotonic()
+    output_dir = prepared.output_dir.expanduser().resolve()
+    source_hour = _hour_string(prepared.source_hour)
+    if source_hour != prepared.source_hour:
+        raise ValueError("prepared source hour is not normalized")
+    expected_scratch = _scratch_path_for(output_dir, source_hour).resolve()
+    if prepared.scratch_path.expanduser().resolve() != expected_scratch:
+        raise ValueError("prepared scratch path is not canonical for its output directory and hour")
+    global_db = _global_db(output_dir / "gharchive-compact.sqlite3")
+    scratch_path = expected_scratch
+    try:
+        _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+        raw_path = prepared.source_path.expanduser().resolve()
+        if raw_path != prepared.source_path or not raw_path.is_file():
+            raise ValueError("prepared raw source path is missing or noncanonical")
+        if raw_path.stat().st_size != prepared.compressed_bytes:
+            raise ValueError("prepared raw source size changed before commit")
+        if gharchive._file_hash(raw_path) != prepared.sha256:
+            raise ValueError("prepared raw source hash changed before commit")
+        existing = global_db.execute("SELECT * FROM hours WHERE source_hour=?", (source_hour,)).fetchone()
+        if existing:
+            if existing["sha256"] != prepared.sha256:
+                raise RuntimeError("a different hash is already committed for this UTC hour")
+            report = _materialize_hour_report(output_dir, existing, source_path=str(prepared.source_path),
+                                              reconstructed=True)
+            if scratch_path.exists() and prepared.scratch_sha256:
+                try:
+                    _validate_prepared_scratch(prepared)
+                except (OSError, sqlite3.Error, ValueError):
+                    pass
+                else:
+                    _cleanup_scratch(scratch_path)
+            return {"status": "complete", "hour": source_hour, "already_committed": True,
+                    "repository_observations": existing["repository_observations"], **report,
+                    "database_bytes": _db_bytes(output_dir), "wall_seconds": round(time.monotonic() - started, 3)}
+        if prepared.already_committed:
+            raise RuntimeError("prepared receipt references a committed hour that is no longer in the ledger")
+
+        parsed = _validate_prepared_scratch(prepared)
+        scratch_size = scratch_path.stat().st_size
+        _ensure_free(output_dir, prepared.min_free_bytes,
+                     headroom=max(DISK_HEADROOM_BYTES, scratch_size * 2))
+        _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+        merge_started = time.monotonic()
+        with sqlite3.connect(scratch_path) as scratch:
+            scratch.row_factory = sqlite3.Row
+            with global_db:
+                for index, row in enumerate(scratch.execute("SELECT * FROM repositories ORDER BY id"), 1):
+                    _merge_repository(global_db, row, source_hour)
+                    if index % 5000 == 0:
+                        _ensure_free(output_dir, prepared.min_free_bytes,
+                                     headroom=max(DISK_HEADROOM_BYTES, scratch_size * 2))
+                        _ensure_store_cap(output_dir, scratch_path, prepared.max_store_bytes)
+                merge_seconds = round(time.monotonic() - merge_started, 3)
+                global_db.execute("""INSERT INTO hours(
+                    source_hour,sha256,compressed_bytes,uncompressed_bytes,unique_events,malformed_events,
+                    repository_observations,committed_at,parse_seconds,merge_seconds)
+                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                                  (source_hour, prepared.sha256, prepared.compressed_bytes,
+                                   parsed["uncompressed_bytes"], parsed["unique_events"],
+                                   parsed["malformed_events"], parsed["repository_observations"],
+                                   datetime.now(timezone.utc).isoformat(), parsed["parse_seconds"], merge_seconds))
+        global_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        marker = global_db.execute("SELECT * FROM hours WHERE source_hour=?", (source_hour,)).fetchone()
+        report = _materialize_hour_report(output_dir, marker, source_path=str(prepared.source_path),
+                                          reconstructed=False)
+        result = {"status": "complete", "hour": source_hour, "already_committed": False,
+                  "repository_observations": parsed["repository_observations"], **report,
+                  "database_bytes": _db_bytes(output_dir), "wall_seconds": round(time.monotonic() - started, 3)}
+        _atomic_json(output_dir / "last-hour-report.json", result)
+        _cleanup_scratch(scratch_path)
+        return result
+    finally:
+        global_db.close()
 
 
 def aggregate_hour(path: Path, output_dir: Path, *, source_hour: str,
@@ -487,74 +757,14 @@ def aggregate_hour(path: Path, output_dir: Path, *, source_hour: str,
                    max_event_line_bytes: int = MAX_EVENT_LINE_BYTES,
                    max_store_bytes: int = MAX_COMPACT_STORE_BYTES,
                    min_free_bytes: int = 300 * 1024**3) -> dict[str, Any]:
-    """Deduplicate one hour locally, then atomically merge repository deltas."""
-    started = time.monotonic()
-    path = Path(path).expanduser().resolve()
-    output_dir = Path(output_dir).expanduser().resolve()
-    source_hour = _hour_string(source_hour)
-    output_dir.mkdir(parents=True, exist_ok=True)
-    scratch_dir = output_dir / "scratch"
-    scratch_dir.mkdir(exist_ok=True)
-    global_db = _global_db(output_dir / "gharchive-compact.sqlite3")
-    scratch_path = scratch_dir / f"{source_hour.replace(':', '').replace('-', '')}.sqlite3"
-    try:
-        if path.stat().st_size > max_compressed_bytes:
-            raise ValueError(f"compressed hour exceeds limit ({path.stat().st_size} > {max_compressed_bytes})")
-        if max_store_bytes < 1:
-            raise ValueError("compact store byte cap must be positive")
-        _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
-        digest = gharchive._file_hash(path)
-        if expected_sha256 is not None and digest != expected_sha256:
-            raise ValueError("input SHA256 differs from acquisition receipt")
-        existing = global_db.execute("SELECT * FROM hours WHERE source_hour=?", (source_hour,)).fetchone()
-        if existing:
-            if existing["sha256"] != digest:
-                raise RuntimeError("a different hash is already committed for this UTC hour")
-            report = _materialize_hour_report(output_dir, existing, source_path=str(path), reconstructed=True)
-            if scratch_path.exists():
-                _cleanup_scratch(scratch_path)
-            return {"status": "complete", "hour": source_hour, "already_committed": True,
-                    "repository_observations": existing["repository_observations"], **report,
-                    "database_bytes": _db_bytes(output_dir), "wall_seconds": round(time.monotonic() - started, 3)}
-        parsed = _parse_hour(path, scratch_path, source_hour, digest,
-                             max_compressed_bytes=max_compressed_bytes,
-                             max_uncompressed_bytes=max_uncompressed_bytes, max_events=max_events,
-                             max_event_line_bytes=max_event_line_bytes,
-                             min_free_bytes=min_free_bytes, max_store_bytes=max_store_bytes)
-        scratch_size = scratch_path.stat().st_size
-        _ensure_free(output_dir, min_free_bytes, headroom=max(DISK_HEADROOM_BYTES, scratch_size * 2))
-        _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
-        merge_started = time.monotonic()
-        with sqlite3.connect(scratch_path) as scratch:
-            scratch.row_factory = sqlite3.Row
-            with global_db:
-                for index, row in enumerate(scratch.execute("SELECT * FROM repositories ORDER BY id"), 1):
-                    _merge_repository(global_db, row, source_hour)
-                    if index % 5000 == 0:
-                        _ensure_free(output_dir, min_free_bytes,
-                                     headroom=max(DISK_HEADROOM_BYTES, scratch_size * 2))
-                        _ensure_store_cap(output_dir, scratch_path, max_store_bytes)
-                merge_seconds = round(time.monotonic() - merge_started, 3)
-                global_db.execute("""INSERT INTO hours(
-                    source_hour,sha256,compressed_bytes,uncompressed_bytes,unique_events,malformed_events,
-                    repository_observations,committed_at,parse_seconds,merge_seconds)
-                    VALUES(?,?,?,?,?,?,?,?,?,?)""",
-                                  (source_hour, digest, path.stat().st_size, parsed["uncompressed_bytes"],
-                                   parsed["unique_events"], parsed["malformed_events"],
-                                   parsed["repository_observations"], datetime.now(timezone.utc).isoformat(),
-                                   parsed["parse_seconds"], merge_seconds))
-        global_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        marker = global_db.execute("SELECT * FROM hours WHERE source_hour=?", (source_hour,)).fetchone()
-        report = _materialize_hour_report(output_dir, marker, source_path=str(path), reconstructed=False)
-        result = {"status": "complete", "hour": source_hour, "already_committed": False,
-                  "repository_observations": parsed["repository_observations"], **report,
-                  "database_bytes": _db_bytes(output_dir), "wall_seconds": round(time.monotonic() - started, 3)}
-        # The compact transaction and hour/hash marker are committed before scratch deletion.
-        _atomic_json(output_dir / "last-hour-report.json", result)
-        _cleanup_scratch(scratch_path)
-        return result
-    finally:
-        global_db.close()
+    """Compatibility wrapper: prepare an hour, then atomically commit it."""
+    prepared = prepare_hour(
+        path, output_dir, source_hour=source_hour, expected_sha256=expected_sha256,
+        max_compressed_bytes=max_compressed_bytes, max_uncompressed_bytes=max_uncompressed_bytes,
+        max_events=max_events, max_event_line_bytes=max_event_line_bytes,
+        max_store_bytes=max_store_bytes, min_free_bytes=min_free_bytes,
+    )
+    return commit_prepared_hour(prepared)
 
 
 def _db_bytes(output_dir: Path) -> int:

@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 from .novelty_model import MODEL_SCHEMA, PAIR_LABELS
 
 EVALUATION_SCHEMA = "gh-ml-novelty-heldout-evaluation-v1"
+EVALUATOR_VERSION = "gh-ml-novelty-evaluator-v1"
 PLAN_PATH = Path(__file__).resolve().parents[2] / "docs" / "novelty-model-evaluation-plan.md"
 EXPECTED_PLAN_SHA256 = "12695c3dbc1cb98dab40708536ae3ea73d84b878243940ba7c56b6431ca6109f"
 WILSON_Z_95 = 1.959963984540054
@@ -42,6 +43,96 @@ def _wilson(successes: int, total: int, z: float = WILSON_Z_95) -> dict[str, flo
 
 def _load_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def _load_annotations(path: str | Path, expected_sha256: str | None) -> tuple[list[dict[str, Any]], str, str | None]:
+    actual_sha256 = sha256_file(path)
+    if expected_sha256 is not None and actual_sha256 != expected_sha256:
+        raise ValueError("annotation file SHA-256 does not match the authorized frozen input")
+    source = Path(path)
+    if source.suffix.casefold() == ".jsonl":
+        rows: list[dict[str, Any]] = []
+        for line_number, line in enumerate(source.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                raise ValueError(f"blank line in JSONL annotations at line {line_number}")
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"invalid JSONL annotation at line {line_number}") from exc
+            if not isinstance(row, dict):
+                raise ValueError(f"JSONL annotation at line {line_number} must be an object")
+            rows.append(row)
+        return rows, actual_sha256, None
+    payload = _load_json(source)
+    if isinstance(payload, list):
+        return payload, actual_sha256, None
+    if isinstance(payload, dict):
+        if payload.get("frozen") is not True:
+            raise ValueError("adjudicated annotations must have an explicit frozen receipt")
+        return payload.get("annotations"), actual_sha256, payload.get("roster_sha256")
+    raise ValueError("annotations must be a JSON array, frozen JSON wrapper, or JSONL")
+
+
+def _validate_prediction_contract(
+    model: Mapping[str, Any], roster_rows: Sequence[Mapping[str, str]], predictions: Sequence[Any],
+) -> tuple[tuple[str, ...], float, dict[str, Any]]:
+    head = model.get("heads", {}).get("pair")
+    if not isinstance(head, dict):
+        raise ValueError("frozen model has no pair head")
+    supported = tuple(head.get("classes", ()))
+    if not supported or len(set(supported)) != len(supported) or any(label not in PAIR_LABELS for label in supported):
+        raise ValueError("model pair-head classes contain unknown, duplicate, or missing labels")
+    metadata_head = model["metadata"].get("heads", {}).get("pair")
+    if not isinstance(metadata_head, dict):
+        raise ValueError("model metadata has no pair-head audit")
+    cutoff = head.get("cutoff")
+    metadata_cutoff = metadata_head.get("cutoff")
+    if cutoff is None or metadata_cutoff is None or cutoff != metadata_cutoff:
+        raise ValueError("pair-head cutoff disagrees between model parameters and metadata")
+    if not isinstance(cutoff, (int, float)) or isinstance(cutoff, bool) or not 0 <= cutoff <= 1:
+        raise ValueError("frozen model has no valid pair-head cutoff")
+
+    roster_ids = {row["pair_id"] for row in roster_rows}
+    by_id: dict[str, dict[str, Any]] = {}
+    for row in predictions:
+        if not isinstance(row, dict) or not isinstance(row.get("pair_id"), str) or row["pair_id"] in by_id:
+            raise ValueError("predictions require unique pair IDs")
+        by_id[row["pair_id"]] = row
+    if set(by_id) != roster_ids:
+        raise ValueError("predictions must exactly cover the frozen roster")
+
+    for pair_id, pred in by_id.items():
+        probs = pred.get("probabilities")
+        if not isinstance(probs, dict):
+            raise ValueError(f"prediction {pair_id} is missing probabilities")
+        if pred.get("supported_labels") != list(supported):
+            raise ValueError(f"prediction {pair_id} supported labels disagree with model classes")
+        if set(probs) != set(PAIR_LABELS):
+            raise ValueError(f"prediction {pair_id} probabilities do not match fixed pair label schema")
+        if any(probs[label] is not None for label in PAIR_LABELS if label not in supported):
+            raise ValueError(f"prediction {pair_id} assigns a probability to an unsupported class")
+        vals = [probs[label] for label in supported]
+        if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not math.isfinite(v) or not 0 <= v <= 1 for v in vals):
+            raise ValueError(f"prediction {pair_id} has invalid probabilities for supported labels")
+        if abs(sum(vals) - 1.0) > 1e-5:
+            raise ValueError(f"prediction {pair_id} probabilities must sum to one over supported labels")
+        best_label = supported[max(range(len(supported)), key=lambda i: vals[i])]
+        confidence = max(vals)
+        declared_decision = pred.get("decision")
+        prediction_label = pred.get("prediction_label")
+        if declared_decision == "abstain":
+            if prediction_label is not None:
+                raise ValueError(f"prediction {pair_id} abstains but has a prediction_label")
+        elif declared_decision != prediction_label:
+            raise ValueError(f"prediction {pair_id} decision and prediction_label disagree")
+        if head.get("abstain_all", False) and declared_decision != "abstain":
+            raise ValueError(f"prediction {pair_id} violates frozen abstain-all policy")
+        expected_abstain = bool(head.get("abstain_all", False) or confidence < cutoff)
+        if declared_decision != "abstain" and not expected_abstain and (
+            prediction_label != best_label or prediction_label not in supported
+        ):
+            raise ValueError(f"prediction {pair_id} decision conflicts with probabilities")
+    return supported, float(cutoff), by_id
 
 
 def _frozen_inputs(
@@ -143,6 +234,7 @@ def _frozen_inputs(
     preds = pred_doc.get("predictions")
     if not isinstance(preds, list):
         raise ValueError("predictions must be a list")
+    _validate_prediction_contract(model, normalized, preds)
     return model, roster, normalized, preds, roster_hash
 
 
@@ -152,6 +244,8 @@ def evaluate_heldout(
     annotations_path: str | Path,
     predictions_path: str | Path,
     freeze_receipt_path: str | Path,
+    *,
+    expected_annotations_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Score a frozen test set against matching adjudications and predictions.
 
@@ -165,17 +259,9 @@ def evaluate_heldout(
     model, roster, roster_rows, predictions, roster_hash = _frozen_inputs(
         model_dir, roster_path, predictions_path, freeze_receipt_path
     )
-    annotation_doc = _load_json(annotations_path)
-    if isinstance(annotation_doc, dict):
-        if annotation_doc.get("frozen") is not True:
-            raise ValueError("adjudicated annotations must have an explicit frozen receipt")
-        if annotation_doc.get("roster_sha256") != roster_hash:
-            raise ValueError("annotations do not match the frozen held-out roster")
-        annotations = annotation_doc.get("annotations")
-    else:
-        # The adjudication protocol's frozen export is a top-level list. Its
-        # containing file hash plus exact roster coverage bind this label view.
-        annotations = annotation_doc
+    annotations, annotation_sha256, annotation_roster_hash = _load_annotations(annotations_path, expected_annotations_sha256)
+    if annotation_roster_hash is not None and annotation_roster_hash != roster_hash:
+        raise ValueError("annotations do not match the frozen held-out roster")
     if not isinstance(annotations, list):
         raise ValueError("annotations must be a list")
     truth_by_id: dict[str, str] = {}
@@ -278,13 +364,16 @@ def evaluate_heldout(
     meta = model["metadata"]
     return {
         "schema": EVALUATION_SCHEMA,
+        "evaluator_version": EVALUATOR_VERSION,
+        "evaluator_source_sha256": sha256_file(Path(__file__)),
+        "evaluator_test_source_sha256": sha256_file(Path(__file__).resolve().parents[2] / "tests" / "test_novelty_evaluation.py"),
         "model_schema": model.get("schema"),
         "package_version": meta.get("package_version"),
         "evaluation_plan_sha256": EXPECTED_PLAN_SHA256,
         "model_manifest_sha256": sha256_file(Path(model_dir) / "model-v1.json"),
         "model_array_sha256": model.get("array_sha256"),
         "roster_sha256": roster_hash,
-        "annotation_file_sha256": sha256_file(annotations_path),
+        "annotation_file_sha256": annotation_sha256,
         "prediction_file_sha256": sha256_file(predictions_path),
         "frozen_pair_count": total,
         "expected_pair_count": roster["expected_pair_count"],
@@ -325,5 +414,9 @@ def evaluate_heldout(
 def write_heldout_report(*args: Any, output_path: str | Path, **kwargs: Any) -> dict[str, Any]:
     """Evaluate and write a deterministic JSON report."""
     report = evaluate_heldout(*args, **kwargs)
-    Path(output_path).write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    target = Path(output_path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        raise FileExistsError(f"refusing to overwrite immutable evaluation report: {target}")
+    target.write_text(json.dumps(report, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     return report

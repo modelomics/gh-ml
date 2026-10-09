@@ -27,6 +27,18 @@ def archive(path, *records):
     return path
 
 
+def assert_empty_or_absent_ledger(output_dir):
+    ledger = output_dir / "gharchive-compact.sqlite3"
+    if not ledger.exists():
+        return
+    with sqlite3.connect(ledger) as db:
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "repositories" in tables:
+            assert db.execute("SELECT count(*) FROM repositories").fetchone()[0] == 0
+        if "hours" in tables:
+            assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
+
+
 def test_hour_local_dedup_cross_hour_occurrences_and_field_provenance(tmp_path):
     first = archive(tmp_path / "2023-08-29-00.json.gz",
                     event("same-event", "2023-08-29T00:20:00Z", "first"),
@@ -77,9 +89,7 @@ def test_hour_merge_transaction_rolls_back_and_replay_is_idempotent(tmp_path, mo
     monkeypatch.setattr(gharchive_compact, "_merge_repository", crash_after_repo)
     with pytest.raises(RuntimeError, match="simulated process failure"):
         gharchive_compact.aggregate_hour(path, out, source_hour="2023-08-29T00:00:00Z", min_free_bytes=0)
-    with sqlite3.connect(out / "gharchive-compact.sqlite3") as db:
-        assert db.execute("SELECT count(*) FROM repositories").fetchone()[0] == 0
-        assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
+    assert_empty_or_absent_ledger(out)
     assert list((out / "scratch").iterdir())
 
     monkeypatch.setattr(gharchive_compact, "_merge_repository", merge)
@@ -155,9 +165,7 @@ def test_per_hour_limits_prevent_partial_global_commit(tmp_path):
     with pytest.raises(ValueError, match="event-line limit"):
         gharchive_compact.aggregate_hour(path, out, source_hour="2023-08-29T00:00:00Z", max_events=1,
                                          min_free_bytes=0)
-    with sqlite3.connect(out / "gharchive-compact.sqlite3") as db:
-        assert db.execute("SELECT count(*) FROM repositories").fetchone()[0] == 0
-        assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
+    assert_empty_or_absent_ledger(out)
     assert not list((out / "scratch").iterdir())
 
 
@@ -182,9 +190,7 @@ def test_oversized_event_line_is_rejected_with_bounded_read(tmp_path):
     with pytest.raises(ValueError, match="event line exceeds configured limit"):
         gharchive_compact.aggregate_hour(path, out, source_hour="2023-08-29T00:00:00Z",
                                          max_event_line_bytes=512, min_free_bytes=0)
-    with sqlite3.connect(out / "gharchive-compact.sqlite3") as db:
-        assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
-        assert db.execute("SELECT count(*) FROM repositories").fetchone()[0] == 0
+    assert_empty_or_absent_ledger(out)
     assert not list((out / "scratch").iterdir())
 
 
@@ -196,8 +202,7 @@ def test_uncompressed_hour_limit_is_enforced_before_unbounded_line_read(tmp_path
         gharchive_compact.aggregate_hour(path, out, source_hour="2023-08-29T00:00:00Z",
                                          max_event_line_bytes=10_000, max_uncompressed_bytes=256,
                                          min_free_bytes=0)
-    with sqlite3.connect(out / "gharchive-compact.sqlite3") as db:
-        assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
+    assert_empty_or_absent_ledger(out)
 
 
 def test_repository_ids_are_checked_against_sqlite_integer_range(tmp_path):
@@ -234,5 +239,4 @@ def test_compact_store_byte_cap_pauses_before_hour_commit(tmp_path):
     with pytest.raises(gharchive_compact.StoreCapReached):
         gharchive_compact.aggregate_hour(path, out, source_hour="2023-08-29T00:00:00Z",
                                          max_store_bytes=1, min_free_bytes=0)
-    with sqlite3.connect(out / "gharchive-compact.sqlite3") as db:
-        assert db.execute("SELECT count(*) FROM hours").fetchone()[0] == 0
+    assert_empty_or_absent_ledger(out)

@@ -26,7 +26,7 @@ def _bundle(root: Path) -> dict:
     inv_part.write_bytes(b"inventory-fixture")
     gates = {"views": True, "rights": False, "coverage": False}
     views = {}
-    for view, rows in (("current", 1), ("candidates", 2)):
+    for view, rows in (("current", 3), ("candidates", 2)):
         part = root / "views" / view / "part-000.parquet"
         part.parent.mkdir(parents=True, exist_ok=True)
         part.write_bytes(f"{view}-fixture".encode())
@@ -44,6 +44,15 @@ def _bundle(root: Path) -> dict:
         "assessment_manifest_sha256": _digest(root / "assessments/assessment-manifest.json"),
         "source_fingerprints": {"snapshot": "sha256:abc123"},
         "inventory_rows": 3,
+        "assessment_coverage": {
+            "selection_status_counts": {"include": 1, "review": 1,
+                                         "exclude": 1, "unknown": 0},
+            "candidate_eligible_count": 2,
+        },
+        "view_semantics": {
+            "current": "one latest merged metadata and assessment row per inventory ID independent of selector status",
+            "candidates": "rows where candidate_eligible=true under the pinned candidate rule",
+        },
         "retained_artifacts": {"inventory/repositories/part-000.parquet": {
             "bundle_path": str(inv_part), "sha256": _digest(inv_part), "rows": 3,
             "schema": "github_id: int64",
@@ -65,9 +74,15 @@ def test_generate_metadata_uses_receipts_and_keeps_rights_and_scope_limits_expli
     schema = json.loads((tmp_path / "schema.json").read_text())
     attribution = json.loads((tmp_path / "source-attribution.json").read_text())
 
-    assert "**2**" not in card  # no baked-in pilot count in explanatory prose
+    assert "| inventory | 3 |" in card
     assert "| candidates | 2 |" in card
-    assert "| current | 1 |" in card
+    assert "| current | 3 |" in card
+    assert "| include | 1 |" in card
+    assert "| review | 1 |" in card
+    assert "| exclude | 1 |" in card
+    assert "| unknown | 0 |" in card
+    assert "Candidate-eligible rows: **2**" in card
+    assert "regardless of selector status" in card
     assert "is incomplete" in card
     assert "Rights gate: unresolved" in card
     assert "not an exhaustive census" in card
@@ -79,7 +94,7 @@ def test_generate_metadata_uses_receipts_and_keeps_rights_and_scope_limits_expli
     assert "source-attribution.json" in card
 
 
-@pytest.mark.parametrize("corruption", ["missing_view", "incomplete_gate", "contradictory_count", "tampered_shard"])
+@pytest.mark.parametrize("corruption", ["missing_view", "incomplete_gate", "contradictory_count", "tampered_shard", "contradictory_statuses", "contradictory_eligible"])
 def test_verification_fails_closed_for_missing_incomplete_or_contradictory_receipts(tmp_path, corruption):
     manifest = _bundle(tmp_path)
     if corruption == "missing_view":
@@ -90,6 +105,10 @@ def test_verification_fails_closed_for_missing_incomplete_or_contradictory_recei
         manifest["views"]["current"]["rows"] = 99
     elif corruption == "tampered_shard":
         (tmp_path / "views/current/part-000.parquet").write_bytes(b"changed")
+    elif corruption == "contradictory_statuses":
+        manifest["assessment_coverage"]["selection_status_counts"]["unknown"] = 1
+    elif corruption == "contradictory_eligible":
+        manifest["assessment_coverage"]["candidate_eligible_count"] = 1
     _json(tmp_path / "manifest.json", manifest)
     with pytest.raises(ValueError):
         verify_release_receipt(tmp_path)
