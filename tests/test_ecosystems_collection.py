@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -303,19 +304,35 @@ def test_source_age_summary_uses_bounded_deterministic_sample():
 def test_storage_floor_is_enforced_periodically_and_never_configured_below_300(tmp_path, monkeypatch):
     with pytest.raises(CollectionError, match="300 GiB"):
         invoke(tmp_path, Eco({}), min_free_gib=299)
-    calls = 0
 
-    class Usage:
-        free = 400 * (1024 ** 3)
+    archive_path = Path("/mnt/archive")
+    original_exists = Path.exists
+    monkeypatch.setattr(
+        Path,
+        "exists",
+        lambda path: True if path == archive_path else original_exists(path),
+    )
+    space = {"low": False}
+    monkeypatch.setattr(
+        ecosystems_collection.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=(299 if space["low"] else 400) * 1024**3),
+    )
 
-    def disk_usage(_path):
-        nonlocal calls
-        calls += 1
-        return Usage() if calls < 4 else type("Low", (), {"free": 299 * (1024 ** 3)})()
+    class RowsCrossingStorageFloor:
+        def __bool__(self):
+            return True
 
-    monkeypatch.setattr(ecosystems_collection.shutil, "disk_usage", disk_usage)
+        def __iter__(self):
+            for index in range(300):
+                if index == 250:
+                    space["low"] = True
+                yield eco(index + 1, f"owner/r{index}")
+
+    client = Eco({})
+    client.list_repositories = lambda **_kwargs: RowsCrossingStorageFloor()
     with pytest.raises(CollectionError, match="free-space floor"):
-        invoke(tmp_path, Eco({1: [eco(i + 1, f"owner/r{i}") for i in range(300)]}))
+        invoke(tmp_path, client)
     with sqlite3.connect(tmp_path / "state.sqlite") as db:
         assert db.execute("select count(*) from repositories").fetchone()[0] == 0
 

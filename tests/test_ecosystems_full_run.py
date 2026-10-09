@@ -3,13 +3,24 @@ from __future__ import annotations
 import gzip
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from gh_ml import ecosystems_full_run as full_run
 
 
+def _mock_archive_capacity(monkeypatch, *, free_gib: int = 400) -> None:
+    """Give tests a synthetic archive mount without allocating archive-sized files."""
+    monkeypatch.setattr(
+        full_run.shutil,
+        "disk_usage",
+        lambda _path: SimpleNamespace(free=free_gib * 1024**3),
+    )
+
+
 def test_runner_keeps_github_out_of_primary_then_starts_fallback(tmp_path, monkeypatch):
+    _mock_archive_capacity(monkeypatch)
     monkeypatch.setattr(full_run, "_source_revision", lambda: "pinned-test-source")
     calls = []
     github_builds = []
@@ -52,6 +63,7 @@ def test_runner_keeps_github_out_of_primary_then_starts_fallback(tmp_path, monke
 
 
 def test_permanent_provider_400_stops_without_github_or_retry(tmp_path, monkeypatch):
+    _mock_archive_capacity(monkeypatch)
     monkeypatch.setattr(full_run, "_source_revision", lambda: "pinned-test-source")
     calls = []
     sleeps = []
@@ -83,7 +95,8 @@ def test_permanent_provider_400_stops_without_github_or_retry(tmp_path, monkeypa
     assert sleeps == []
 
 
-def test_verified_compression_updates_receipt_before_removing_raw(tmp_path):
+def test_verified_compression_updates_receipt_before_removing_raw(tmp_path, monkeypatch):
+    _mock_archive_capacity(monkeypatch)
     source = tmp_path / "repositories-test.jsonl"
     source.write_text("{\"github_id\":1}\n{\"github_id\":2}\n")
     receipt = tmp_path / "receipt-test.json"

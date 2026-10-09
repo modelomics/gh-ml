@@ -27,6 +27,17 @@ def _write(path: Path, rows: list[dict]) -> None:
     pq.write_table(pa.Table.from_pylist(rows), path, compression="zstd")
 
 
+def _mock_publication_space(monkeypatch) -> None:
+    """Give output-producing fixtures ample synthetic headroom without changing policy."""
+    from types import SimpleNamespace
+    import gh_ml.publication_bundle as bundle_module
+
+    monkeypatch.setattr(
+        bundle_module.shutil, "disk_usage",
+        lambda _path: SimpleNamespace(total=3 * 1024**4, used=0, free=3 * 1024**4),
+    )
+
+
 def test_readiness_requires_hashed_artifacts_and_full_population_counts():
     manifest = {"complete": True, "row_count": 4}
     assert not _artifact_coverage(manifest, {}, 4, count_keys=("row_count",))
@@ -228,7 +239,7 @@ def test_combined_assessment_requires_explicit_complete_partition_coverage_and_r
                               "metadata_evidence_tier": "strong", "metadata_evidence_signals": ["framework"],
                               "domains": ["vision"], "methods": ["transformer"],
                               "triage_status": "candidate", "triage_reason": "evidence",
-                              "selection_version": "select-v1", "selection_status": "selected",
+                              "selection_version": "select-v1", "selection_status": "include",
                               "selection_reason": "repo", "selection_signals": ["code"],
                               "candidate_rule_version": "candidate-v1", "candidate_eligible": True,
                               "candidate_reason": "method implementation", "candidate_evidence": ["code"],
@@ -284,6 +295,20 @@ def test_combined_assessment_requires_explicit_complete_partition_coverage_and_r
     assert bundle["publishable"] is False
     assert bundle["gates"]["combined_current_and_candidate_views_rebuilt"] is True
     assert (tmp_path / "bundle" / "inventory" / part_record["path"]).is_file()
+    assert bundle["assessment_coverage"]["selection_status_counts"] == {
+        "include": 1, "review": 0, "exclude": 0, "unknown": 0,
+    }
+    assert bundle["assessment_coverage"]["candidate_eligible_count"] == 1
+    assert "all inventory IDs" in bundle["view_semantics"]["current"]
+    assert "candidate_eligible=true" in bundle["view_semantics"]["candidates"]
+    for view_name in ("current", "candidates"):
+        for view_part in bundle["views"][view_name]["parts"]:
+            assert view_part["path"].startswith("views/")
+            assert (tmp_path / "bundle" / view_part["path"]).is_file()
+    from gh_ml.publication_metadata import generate_release_metadata
+    release_metadata = generate_release_metadata(tmp_path / "bundle")
+    assert release_metadata["schema"]["bundle_status"]["publishable"] is False
+    assert (tmp_path / "bundle" / "README.md").is_file()
 
     incomplete = json.loads((assessment_root / "assessment-manifest.json").read_text())
     incomplete["buckets"] = []
@@ -382,10 +407,11 @@ def test_partitioned_inventory_resume_uses_committed_bucket_receipts(tmp_path, m
     assert completed["complete"] is True
 
 
-def test_bundle_merges_partial_records_and_keeps_known_null_unknown_and_aliases(tmp_path):
+def test_bundle_merges_partial_records_and_keeps_known_null_unknown_and_aliases(tmp_path, monkeypatch):
     import pytest
 
     pytest.importorskip("duckdb")
+    _mock_publication_space(monkeypatch)
     baseline = tmp_path / "baseline"
     _write(baseline / "repositories.parquet", [
         {"github_id": 1, "full_name": "old-org/renamed", "name": "renamed",
@@ -432,10 +458,11 @@ def test_bundle_merges_partial_records_and_keeps_known_null_unknown_and_aliases(
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def test_bundle_quarantines_same_time_numeric_id_collisions(tmp_path):
+def test_bundle_quarantines_same_time_numeric_id_collisions(tmp_path, monkeypatch):
     import pytest
 
     pytest.importorskip("duckdb")
+    _mock_publication_space(monkeypatch)
     baseline = tmp_path / "baseline"
     _write(baseline / "repositories.parquet", [
         {"github_id": 42, "full_name": "one/name", "name": "name", "updated_at": "2020-01-01"},
@@ -457,10 +484,11 @@ def test_bundle_quarantines_same_time_numeric_id_collisions(tmp_path):
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def test_bundle_manifest_keeps_novelty_as_separate_evidence_and_gates_missing_work(tmp_path):
+def test_bundle_manifest_keeps_novelty_as_separate_evidence_and_gates_missing_work(tmp_path, monkeypatch):
     import pytest
 
     pytest.importorskip("duckdb")
+    _mock_publication_space(monkeypatch)
     baseline = tmp_path / "baseline"
     _write(baseline / "repositories.parquet", [{"github_id": 7, "name": "org/repo"}])
     bulk = tmp_path / "bulk.parquet"
@@ -486,10 +514,11 @@ def test_bundle_manifest_keeps_novelty_as_separate_evidence_and_gates_missing_wo
         shutil.rmtree(scratch, ignore_errors=True)
 
 
-def test_bundle_streams_compact_gharchive_sqlite_with_event_field_provenance(tmp_path):
+def test_bundle_streams_compact_gharchive_sqlite_with_event_field_provenance(tmp_path, monkeypatch):
     import pytest
 
     pytest.importorskip("duckdb")
+    _mock_publication_space(monkeypatch)
     baseline = tmp_path / "baseline"
     _write(baseline / "repositories.parquet", [{"github_id": 1, "name": "old/repo"}])
     bulk = tmp_path / "bulk.parquet"
