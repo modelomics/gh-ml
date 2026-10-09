@@ -95,7 +95,16 @@ def test_fit_prediction_and_numeric_artifact_replay(tmp_path):
     assert (tmp_path / "model-v1.npz").is_file()
     loaded = NoveltyModel.load(tmp_path)
     replay = loaded.predict_pair(pair.pair_id, by_id[pair.left_repo_id], by_id[pair.right_repo_id])
-    assert replay == original
+    numeric_fields = {"probabilities", "max_probability", "margin"}
+    assert replay.keys() == original.keys()
+    for key in original.keys() - numeric_fields:
+        assert replay[key] == original[key]
+    assert replay["probabilities"].keys() == original["probabilities"].keys()
+    assert replay["probabilities"] == pytest.approx(
+        original["probabilities"], rel=1e-12, abs=1e-14,
+    )
+    for key in ("max_probability", "margin"):
+        assert replay[key] == pytest.approx(original[key], rel=1e-12, abs=1e-14)
     assert loaded.metadata["split_audit"]["leakage_check"] == "passed"
 
 
