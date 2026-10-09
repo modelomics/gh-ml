@@ -43,9 +43,11 @@ def test_missing_evidence_manifest_fails_closed_without_claiming_any_gate(tmp_pa
         "source_coverage_complete": False,
         "novelty_assessment_complete": False,
         "held_out_evaluation_passed": False,
+        "full_corpus_audit_passed": False,
         "source_specific_rights_review_complete": False,
     }
     assert result["readiness_gaps"] == list(result["gates"])
+    assert result["corpus_audit"] == {"status": "missing_full_corpus_audit"}
 
 
 def test_path_refs_are_explicit_and_cannot_escape_declared_root(tmp_path):

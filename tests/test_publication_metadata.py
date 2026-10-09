@@ -75,6 +75,7 @@ def test_generate_metadata_uses_receipts_and_keeps_rights_and_scope_limits_expli
     attribution = json.loads((tmp_path / "source-attribution.json").read_text())
 
     assert "| inventory | 3 |" in card
+    assert "| observations | unavailable |" in card
     assert "| candidates | 2 |" in card
     assert "| current | 3 |" in card
     assert "| include | 1 |" in card
@@ -84,7 +85,7 @@ def test_generate_metadata_uses_receipts_and_keeps_rights_and_scope_limits_expli
     assert "Candidate-eligible rows: **2**" in card
     assert "regardless of selector status" in card
     assert "is incomplete" in card
-    assert "Rights gate: unresolved" in card
+    assert "Rights scope review: incomplete" in card
     assert "not an exhaustive census" in card
     assert "not expert ground truth" in card
     assert schema["views"]["current"]["parts"][0]["path"] == "views/current/part-000.parquet"
@@ -92,6 +93,11 @@ def test_generate_metadata_uses_receipts_and_keeps_rights_and_scope_limits_expli
     assert attribution["rights_gate"] == "unresolved"
     assert generated["schema"] == schema
     assert "source-attribution.json" in card
+    assert schema["bundle_status"]["publishable"] is False
+    assert schema["verified_gates"]["source_coverage_complete"] is False
+    assert schema["verified_gates"]["full_corpus_audit_passed"] is False
+    assert schema["evidence_attachment"]["status"] == "missing"
+    assert schema["corpus_audit"]["status"] == "missing"
 
 
 @pytest.mark.parametrize("corruption", ["missing_view", "incomplete_gate", "contradictory_count", "tampered_shard", "contradictory_statuses", "contradictory_eligible"])

@@ -1,7 +1,8 @@
-"""Generate sanitized local release metadata from a verified bundle receipt.
+"""Generate sanitized local release metadata from verified bundle receipts.
 
-No repository contents are read. The generator consumes only the bundle
-manifest, its pinned source manifests, and the hash-pinned derived view shards.
+No repository contents are read. The generator consumes the immutable bundle
+manifest, retained observation snapshots, the separately pinned evidence
+manifest, and the hash-pinned derived view shards.
 """
 from __future__ import annotations
 
@@ -89,6 +90,64 @@ def verify_release_receipt(bundle_dir: str | Path) -> dict[str, Any]:
     if not isinstance(gaps, list) or sorted(gaps) != expected_gaps:
         raise ValueError("bundle readiness gaps contradict its gate receipts")
 
+    # Evidence is an attachment to the immutable base manifest. Its cached
+    # receipt is never authoritative: re-run the verifier against the exact
+    # pinned evidence manifest whenever metadata is generated.
+    effective_gates = dict(gates)
+    evidence_gate_names = {
+        "source_coverage_complete": "source_coverage_complete",
+        "novelty_assessment_complete": "novelty_assessment_complete",
+        "held_out_evaluation_passed": "held_out_evaluation_passed",
+        "full_corpus_audit_passed": "full_corpus_audit_passed",
+        "source_specific_rights_review_complete": "source_specific_rights_review_complete",
+    }
+    for name in evidence_gate_names:
+        effective_gates[name] = False
+    attachment_info: dict[str, Any] = {"status": "missing"}
+    attachment_decl = manifest.get("evidence_attachment")
+    if isinstance(attachment_decl, Mapping):
+        relative = _safe_relative(attachment_decl.get("path"), "evidence_attachment.path")
+        if relative.as_posix() != "evidence-verification.json":
+            raise ValueError("unsupported evidence attachment location")
+        attachment_path = root / relative
+        if attachment_path.is_file():
+            attachment = _read_json(attachment_path)
+            if attachment.get("schema") != "gh-ml-publication-evidence-attachment-v1":
+                raise ValueError("unsupported evidence verification receipt")
+            base_sha = _sha256(root / "manifest.json")
+            if attachment.get("bundle_manifest_sha256") != base_sha:
+                raise ValueError("evidence attachment is pinned to a different base manifest")
+            evidence_path_text = attachment.get("evidence_manifest_path")
+            if not isinstance(evidence_path_text, str) or not evidence_path_text:
+                raise ValueError("attached evidence manifest path is malformed")
+            evidence_path = Path(evidence_path_text)
+            if not evidence_path.is_absolute() or not evidence_path.is_file():
+                raise ValueError("attached evidence manifest is unavailable for re-verification")
+            evidence_sha = _check_digest(attachment.get("evidence_manifest_sha256"),
+                                         "evidence_attachment.evidence_manifest_sha256")
+            if _sha256(evidence_path) != evidence_sha:
+                raise ValueError("attached evidence manifest hash mismatch")
+            from .publication_evidence import verify_publication_evidence
+
+            verification = verify_publication_evidence(root, evidence_path)
+            if attachment.get("verification") != verification:
+                raise ValueError("cached evidence verification differs from recomputed verification")
+            evidence_gates = verification.get("gates")
+            if (not isinstance(evidence_gates, Mapping)
+                    or set(evidence_gates) != set(evidence_gate_names)
+                    or any(not isinstance(value, bool) for value in evidence_gates.values())):
+                raise ValueError("recomputed evidence gate set is malformed")
+            effective_gates.update({key: evidence_gates[source]
+                                    for key, source in evidence_gate_names.items()})
+            attachment_info = {
+                "status": "verified" if verification.get("complete") else "incomplete",
+                "path": relative.as_posix(),
+                "evidence_manifest_sha256": evidence_sha,
+                "gates": dict(evidence_gates),
+                "readiness_gaps": list(verification.get("readiness_gaps", [])),
+            }
+    effective_gaps = sorted(key for key, passed in effective_gates.items() if not passed)
+
     for key, path_text in (("inventory_manifest_sha256", "inventory/inventory-manifest.json"),
                            ("assessment_manifest_sha256", "assessments/assessment-manifest.json")):
         expected = _check_digest(manifest.get(key), key)
@@ -131,6 +190,38 @@ def verify_release_receipt(bundle_dir: str | Path) -> dict[str, Any]:
     for name, fingerprint in source_fingerprints.items():
         if not isinstance(fingerprint, str) or not fingerprint.strip():
             raise ValueError(f"source_fingerprints.{name} must be a non-empty fingerprint")
+
+    observation_retention: dict[str, Any] = {"status": "not_retained", "sources": {}}
+    observation_decl = manifest.get("observation_retention")
+    if isinstance(observation_decl, Mapping) and observation_decl.get("manifest_path"):
+        relative = _safe_relative(observation_decl.get("manifest_path"),
+                                  "observation_retention.manifest_path")
+        observation_path = root / relative
+        expected_hash = _check_digest(observation_decl.get("manifest_sha256"),
+                                      "observation_retention.manifest_sha256")
+        if not observation_path.is_file() or _sha256(observation_path) != expected_hash:
+            raise ValueError("retained observation manifest is missing or has changed")
+        from .publication_observations import verify_observation_sources
+
+        retained_observations = verify_observation_sources(observation_path.parent)
+        retained_fingerprints = retained_observations.get("source_fingerprints")
+        retained_sources = retained_observations.get("sources", {})
+        if retained_fingerprints != observation_decl.get("source_fingerprints"):
+            raise ValueError("retained observation fingerprints do not match the bundle inventory")
+        for label, fingerprint in retained_fingerprints.items():
+            record = retained_sources.get(label, {})
+            inventory_label = label if label in source_fingerprints else record.get("receipt_source_label")
+            if (not isinstance(inventory_label, str)
+                    or source_fingerprints.get(inventory_label) != fingerprint):
+                raise ValueError("retained observation fingerprints do not match the bundle inventory source labels")
+        observation_retention = {
+            "status": "verified" if all(item.get("artifact_set_verified") is True
+                                          for item in retained_observations["sources"].values())
+                      else "partial_or_unverified",
+            "sources": retained_observations["sources"],
+            "manifest_sha256": expected_hash,
+            "description": observation_decl.get("description"),
+        }
 
     inventory_rows = manifest.get("inventory_rows")
     if isinstance(inventory_rows, bool) or not isinstance(inventory_rows, int) or inventory_rows < 0:
@@ -204,7 +295,9 @@ def verify_release_receipt(bundle_dir: str | Path) -> dict[str, Any]:
             "candidate_eligible_count": eligible_count,
             "view_semantics": {"current": current_semantics,
                                "candidates": candidate_semantics},
-            "publishable": manifest["publishable"], "readiness_gaps": expected_gaps}
+            "publishable": all(effective_gates.values()), "readiness_gaps": effective_gaps,
+            "gates": effective_gates, "evidence_attachment": attachment_info,
+            "observation_retention": observation_retention}
 
 
 def _atomic_json(path: Path, data: Mapping[str, Any]) -> None:
@@ -234,8 +327,12 @@ def render_release_card(verified: Mapping[str, Any]) -> str:
         raise ValueError("bundle version provenance is incomplete")
     source_lines = "\n".join(f"- `{name}` source fingerprint: `{digest}`"
                               for name, digest in sources.items())
+    retained_observations = verified.get("observation_retention", {})
+    observation_sources = retained_observations.get("sources", {})
+    observations_label = ("retained source artifacts; per-source counts below"
+                          if observation_sources else "unavailable")
     counts = {"inventory": verified["inventory_rows"],
-              "observations": "not a separate view",
+              "observations": observations_label,
               "candidates": views["candidates"]["rows"],
               "current": views["current"]["rows"]}
     view_lines = "\n".join(
@@ -249,9 +346,26 @@ def render_release_card(verified: Mapping[str, Any]) -> str:
     gap_text = (", ".join(f"`{item}`" for item in verified["readiness_gaps"])
                 if verified["readiness_gaps"] else "none")
     release_state = "passes all declared bundle gates" if verified["publishable"] else "is incomplete"
+    attachment = verified.get("evidence_attachment", {})
+    evidence_state = attachment.get("status", "missing")
+    observation_retention = manifest.get("observation_retention", {})
+    observation_description = (observation_retention.get("description")
+                               if isinstance(observation_retention, Mapping)
+                               else None) or "No separate retained source-observation snapshot is attached."
+    observation_source_lines = "\n".join(
+        f"- `{label}`: {item.get('granularity')}; {item.get('row_count')} source rows; artifact set {'verified' if item.get('artifact_set_verified') else 'unverified'}."
+        for label, item in sorted(observation_sources.items())
+    ) or "- No source observation artifacts retained."
+    corpus_audit = verified.get("corpus_audit", {"status": "missing"})
+    corpus_audit_text = (f"Full-corpus route-stratified audit: `{corpus_audit.get('status')}`; "
+                         f"sampled {corpus_audit.get('sample_rows', 'unknown')} rows from "
+                         f"{corpus_audit.get('population_rows', 'unknown')} declared rows. "
+                         "This audit is separate from pairwise novelty evaluation.")
     return f"""# GitHub ML repository discovery bundle
 
-This local bundle {release_state}. Its discovery and curation views are not an exhaustive census of GitHub repositories or ML work. The `inventory` is a deduplicated projection; raw `observations` are a distinct history and are not materialized as a separate view here. `current` contains one latest merged metadata and assessment row for every inventory ID, regardless of selector status. `candidates` contains rows with `candidate_eligible=true` under the pinned candidate rule. Neither view is a claim that every row is an ML repository, and candidate eligibility does not establish scientific novelty, correctness, reproducibility, or quality. Declared readiness gaps: {gap_text}.
+This local bundle {release_state}. Its discovery and curation views are not an exhaustive census of GitHub repositories or ML work. The `inventory` is a deduplicated projection; `current` contains one latest merged metadata and assessment row for every inventory ID, regardless of selector status. `candidates` contains rows with `candidate_eligible=true` under the pinned candidate rule. Neither view is a claim that every row is an ML repository, and candidate eligibility does not establish scientific novelty, correctness, reproducibility, or quality. Declared readiness gaps: {gap_text}. Evidence attachment status: `{evidence_state}`.
+
+{corpus_audit_text}
 
 ## Verified contents
 
@@ -259,7 +373,9 @@ This local bundle {release_state}. Its discovery and curation views are not an e
 | --- | ---: | --- |
 {view_lines}
 
-The verified inventory contains **{verified['inventory_rows']}** deduplicated repository records. This is not a raw observation-history view: source observation history and raw inventories are distinct inputs, and no observation count is inferred here. The separately receipted `quarantine.parquet` records invalid IDs and collisions and is not counted as a view. Row totals come from hash-verified bundle shard receipts; they are not hardcoded pilot counts.
+The verified inventory contains **{verified['inventory_rows']}** deduplicated repository records. This is not an observation-history row count. Observation retention: {observation_description} Retained source granularity is reported per source below; these rows can overlap and are not summed into a unique-repository count. The separately receipted `quarantine.parquet` records invalid IDs and collisions and is not counted as a view. Row totals come from hash-verified bundle shard receipts; they are not hardcoded pilot counts.
+
+{observation_source_lines}
 
 ### Current selector statuses
 
@@ -273,7 +389,7 @@ Total current rows: **{views['current']['rows']}**. Candidate-eligible rows: **{
 
 The machine-readable [source-attribution.json](source-attribution.json) records source labels and fingerprints from the verified bundle and summarizes the source statements in the project license notes. Confirm source inclusion against the retained manifests. Ecosyste.ms dated snapshot terms, current service terms, GH Archive event-data rights, GitHub metadata, and the separate Papers with Code sidecar must remain attributed according to their own source scope. GH Archive's code/documentation license does not grant a blanket license to event records. Repository-declared license values describe source repositories; they do not grant rights over repository contents.
 
-Coverage is limited by the dated 2023-08-30 ecosyste.ms snapshot, the upstream page cap on live ecosyste.ms enumeration, incomplete post-snapshot GH Archive hourly acquisition, GitHub Search vocabulary/indexing/request limits, and missing or stale source metadata. Snapshot fields are historical. Event, publication, commit, observation, and ingestion times have distinct meanings; an observation time does not make old source metadata current. Missing and unknown values remain unknown, and unresolved GH Archive hours remain gaps.
+Coverage limitations are recorded in the verified evidence attachment when present. A missing attachment leaves source completeness unverified. Snapshot fields are historical. Event, publication, commit, observation, and ingestion times have distinct meanings; an observation time does not make old source metadata current. Missing and unknown values remain unknown, and unresolved GH Archive hours remain gaps.
 
 ## Selection and annotation limits
 
@@ -283,7 +399,7 @@ Selection and probable-content tags are versioned metadata rules. Candidate elig
 
 Selection version: `{versions['selection']}`. Candidate rule: `{versions['candidate_rule']}`. Metadata evidence version: `{versions['metadata_evidence']}`. Model artifact SHA-256: `{versions['model_sha256']}`. Schema, per-view files, row counts, and file hashes are in [schema.json](schema.json); source fingerprints and scoped attribution policy are in [source-attribution.json](source-attribution.json).
 
-**Rights gate: unresolved.** Source terms are preserved with their stated scope; no combined redistribution clearance is inferred. The source-specific rights and attribution review must be completed before any public distribution. This generated card is a local artifact and does not itself authorize or perform publication.
+**Rights scope review: {('complete' if verified['gates'].get('source_specific_rights_review_complete') else 'incomplete')}.** Source terms are preserved with their stated scope; no combined redistribution clearance is inferred. This review status is not a legal clearance. This generated card is a local artifact and does not itself authorize or perform publication.
 
 ## Source fingerprints
 
@@ -300,6 +416,9 @@ def generate_release_metadata(bundle_dir: str | Path) -> dict[str, Any]:
         "bundle_manifest": "manifest.json",
         "bundle_status": {"publishable": verified["publishable"],
                            "readiness_gaps": verified["readiness_gaps"]},
+        "verified_gates": verified["gates"],
+        "evidence_attachment": verified["evidence_attachment"],
+        "corpus_audit": verified.get("corpus_audit", {"status": "missing"}),
         "views": verified["views"],
         "view_semantics": verified["view_semantics"],
         "assessment_coverage": {
@@ -309,8 +428,12 @@ def generate_release_metadata(bundle_dir: str | Path) -> dict[str, Any]:
         "inventory": {"rows": verified["inventory_rows"],
                        "parts": verified["inventory_parts"],
                        "description": "Deduplicated repository inventory; not a raw observation ledger."},
-        "observation_history": {"status": "not_materialized_as_a_separate_view",
+        "observation_history": {"status": verified["observation_retention"]["status"],
                                 "row_count": None,
+                                "sources": {label: {"granularity": item.get("granularity"),
+                                                    "rows": item.get("row_count"),
+                                                    "artifact_set_verified": item.get("artifact_set_verified")}
+                                            for label, item in verified["observation_retention"].get("sources", {}).items()},
                                 "description": "No observation-history total is inferred from deduplicated inventory rows."},
         "limitations": [
             "Discovery coverage is not exhaustive.",

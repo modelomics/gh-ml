@@ -94,6 +94,22 @@ def _atomic_json(path: Path, data: Mapping[str, Any]) -> None:
             os.unlink(temp)
 
 
+def _atomic_json_noreplace(path: Path, data: Mapping[str, Any]) -> None:
+    """Atomically create JSON without replacing an existing committed receipt."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, ensure_ascii=False, sort_keys=True, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.link(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
 def _read_manifest(path: Path | None) -> dict[str, Any] | None:
     if path is None or not path.is_file():
         return None
@@ -493,7 +509,11 @@ def materialize_combined_assessment_views(
                 "evidence_signals": listcol("a", ass_cols, "metadata_evidence_signals"),
                 "evidence_tier": col("a", ass_cols, "metadata_evidence_tier"),
                 "evidence_version": col("a", ass_cols, "metadata_evidence_version"),
-                "first_observed_at": col("i", inv_cols, "source_time"),
+                # A source freshness timestamp (e.g. updated_at) says when the
+                # source row describes the repository, not when we collected it.
+                # Preserve observation times only when the inventory explicitly
+                # carries observation-specific fields.
+                "first_observed_at": col("i", inv_cols, "first_observed_at", "VARCHAR"),
                 "fork": col("i", inv_cols, "fork", "BOOLEAN"),
                 "forks": col("i", inv_cols, "forks", "BIGINT"),
                 "github_id": col("i", inv_cols, "github_id", "BIGINT"),
@@ -502,8 +522,8 @@ def materialize_combined_assessment_views(
                 "license": col("i", inv_cols, "license"),
                 "methods": listcol("a", ass_cols, "methods"),
                 "name": f"coalesce({col('i', inv_cols, 'full_name')}, {col('i', inv_cols, 'name')}, {col('a', ass_cols, 'name')})",
-                "novelty_signals": "[]::VARCHAR[]", "observation_count": "1::BIGINT",
-                "observed_at": col("i", inv_cols, "source_time"), "paper_ids": "[]::VARCHAR[]",
+                "novelty_signals": "[]::VARCHAR[]", "observation_count": col("i", inv_cols, "observation_count", "BIGINT"),
+                "observed_at": col("i", inv_cols, "observed_at", "VARCHAR"), "paper_ids": "[]::VARCHAR[]",
                 "pushed_at": col("i", inv_cols, "pushed_at"), "query_ids": "[]::VARCHAR[]",
                 "readme_blob_sha": col("a", ass_cols, "readme_blob_sha"),
                 "readme_checked_at": col("a", ass_cols, "readme_checked_at"),
@@ -579,6 +599,10 @@ def assemble_verified_publication_bundle(
     min_free_bytes: int = MIN_FREE_BYTES,
     memory_limit: str = "512MB",
     allow_fixture_reserve: bool = False,
+    observation_retention_dir: str | Path | None = None,
+    evaluation_audit_plan_sha256: str | None = None,
+    corpus_audit_plan_sha256: str | None = None,
+    evidence_manifest_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Assemble a local publication bundle from reusable pinned artifacts.
 
@@ -587,6 +611,11 @@ def assemble_verified_publication_bundle(
     source completion evidence are supplied, the resulting bundle is explicitly
     non-publishable even though its inventory/triage views may be complete.
     """
+    if corpus_audit_plan_sha256 is not None and (
+        not isinstance(corpus_audit_plan_sha256, str) or len(corpus_audit_plan_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in corpus_audit_plan_sha256)
+    ):
+        raise ValueError("corpus_audit_plan_sha256 must be a lowercase SHA-256 digest")
     inventory = verify_publication_inventory(inventory_dir)
     assessment = verify_combined_assessment(inventory_dir, assessment_dir)
     selection_status_counts: Counter[str] = Counter()
@@ -648,6 +677,11 @@ def assemble_verified_publication_bundle(
             _retain(receipt_source, output / "assessments" / "buckets" / receipt["bucket_id"] / "receipt.json", mutable=True)
     _retain(assessment_root / "assessment-manifest.json",
             output / "assessments" / "assessment-manifest.json", mutable=True)
+    observation_manifest = None
+    if observation_retention_dir is not None:
+        observation_manifest = _attach_observation_snapshot(
+            observation_retention_dir, output / "observations", inventory["source_fingerprints"]
+        )
     views = materialize_combined_assessment_views(
         inventory_root, assessment_root, output / "views", memory_limit=memory_limit,
         max_output_bytes=max_output_bytes, allow_fixture_reserve=allow_fixture_reserve,
@@ -682,19 +716,49 @@ def assemble_verified_publication_bundle(
         "combined_current_and_candidate_views_rebuilt": True,
         "novelty_assessment_complete": False,
         "held_out_evaluation_passed": False,
+        "full_corpus_audit_passed": False,
         "source_coverage_complete": False,
         "source_specific_rights_review_complete": False,
+        # Evidence attachment can satisfy the four directly verified evidence
+        # gates above. These broader acceptance rows remain independent and
+        # false until full-scope audits exist; a pilot attachment cannot pass
+        # the documented publication matrix.
+        "freshness_and_time_audit_passed": False,
+        "ids_duplication_lineage_reconciliation_passed": False,
+        "probable_content_evidence_audit_passed": False,
+        "selected_readme_evidence_audit_passed": False,
+        "ml_hierarchy_original_content_audit_passed": False,
+        "full_scope_reproducible_rebuild_passed": False,
+        "full_bundle_integrity_audit_passed": False,
+        "operating_budget_verified": False,
     }
     manifest = {
         "schema": SCHEMA_VERSION,
         "created_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "bundle_kind": "local-publication-bundle",
+        "evidence_attachment": {"path": "evidence-verification.json",
+                                "verification_is_separate": True},
         "publishable": False,
         "gates": gates,
         "readiness_gaps": [name for name, passed in gates.items() if not passed],
         "inventory_manifest_sha256": _sha256(inventory_root / "inventory-manifest.json"),
         "assessment_manifest_sha256": _sha256(assessment_root / "assessment-manifest.json"),
         "source_fingerprints": inventory["source_fingerprints"],
+        "assembly": {
+            "mode": "verified_inventory_and_assessment_no_remerge",
+            "inventory_dir": str(inventory_root),
+            "assessment_dir": str(assessment_root),
+            "command_template": [
+                "uv", "run", "python", "scripts/assemble_publication_bundle.py", "assemble",
+                "--inventory", str(inventory_root), "--assessment", str(assessment_root),
+                "--output", "<new-output-directory>",
+            ] + (["--observations", str(Path(observation_retention_dir).expanduser().resolve())]
+                 if observation_retention_dir is not None else [])
+              + (["--evaluation-audit-plan-sha256", evaluation_audit_plan_sha256]
+                 if evaluation_audit_plan_sha256 else [])
+              + (["--corpus-audit-plan-sha256", corpus_audit_plan_sha256]
+                 if corpus_audit_plan_sha256 else []),
+        },
         "inventory_rows": inventory["inventory_rows"],
         "triage_and_selection_versions": {
             "selection": assessment.get("selection_version"),
@@ -707,6 +771,16 @@ def assemble_verified_publication_bundle(
                                  "route_counts": assessment.get("route_counts", {}),
                                  "selection_status_counts": normalized_selection_counts,
                                  "candidate_eligible_count": candidate_eligible_count},
+        "evaluation_expectations": ({"audit_plan_sha256": evaluation_audit_plan_sha256}
+                                     if evaluation_audit_plan_sha256 else {}),
+        "corpus_audit_expectations": ({"plan_sha256": corpus_audit_plan_sha256}
+                                       if corpus_audit_plan_sha256 else {}),
+        "observation_retention": ({
+            "manifest_path": "observations/observations-manifest.json",
+            "manifest_sha256": _sha256(output / "observations" / "observations-manifest.json"),
+            "source_fingerprints": observation_manifest.get("source_fingerprints", {}),
+            "description": "Compact retained source repository/event-field projection; GH Archive is not raw event history.",
+        } if observation_manifest else {"status": "not_retained"}),
         "view_semantics": {
             "current": "One latest merged metadata and assessment row per inventory repository ID; includes all inventory IDs independent of selector status.",
             "candidates": "Repositories with candidate_eligible=true under the pinned candidate rule; this is the probable-content discovery subset, not a scientific novelty claim.",
@@ -724,7 +798,77 @@ def assemble_verified_publication_bundle(
                     "archive_reserve_bytes": max(min_free_bytes, MIN_FREE_BYTES)},
     }
     _atomic_json(output / "manifest.json", manifest)
+    if evidence_manifest_path is not None:
+        attach_publication_evidence(output, evidence_manifest_path)
     return manifest
+
+
+def _attach_observation_snapshot(source_dir: str | Path, destination: Path,
+                                 source_fingerprints: Mapping[str, str]) -> dict[str, Any]:
+    """Attach an already committed observation snapshot without linking live inputs."""
+    from .publication_observations import verify_observation_sources
+
+    source = Path(source_dir).expanduser().resolve()
+    verified = verify_observation_sources(source)
+    fingerprints = verified.get("source_fingerprints", {})
+    known = set(source_fingerprints.values())
+    if not isinstance(fingerprints, Mapping) or not fingerprints:
+        raise ValueError("observation retention has no source fingerprint bindings")
+    if any(value not in known for value in fingerprints.values()):
+        raise ValueError("observation retention contains fingerprints absent from inventory")
+    destination.mkdir(parents=True, exist_ok=False)
+    files: set[str] = {"observations-manifest.json"}
+    for record in verified["sources"].values():
+        for key in ("input_manifest_path", "acquisition_hour_manifest_path", "checkpoint_path"):
+            value = record.get(key)
+            if isinstance(value, str):
+                files.add(value)
+        for key in ("artifacts", "quarantine_artifacts"):
+            for artifact in record.get(key, []):
+                if isinstance(artifact, Mapping) and isinstance(artifact.get("path"), str):
+                    files.add(artifact["path"])
+    for relative in sorted(files):
+        rel = Path(relative)
+        if rel.is_absolute() or ".." in rel.parts or not rel.parts:
+            raise ValueError(f"unsafe retained observation path: {relative}")
+        src = source / rel
+        if src.is_symlink() or not src.is_file() or not src.resolve().is_relative_to(source):
+            raise ValueError(f"missing or unsafe retained observation artifact: {relative}")
+        dst = destination / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        if rel.name.endswith((".parquet", ".pq", ".jsonl", ".ndjson")):
+            try:
+                os.link(src, dst)
+            except OSError:
+                shutil.copy2(src, dst)
+        else:
+            shutil.copy2(src, dst)
+    return verify_observation_sources(destination)
+
+
+def attach_publication_evidence(bundle_dir: str | Path,
+                                evidence_manifest_path: str | Path) -> dict[str, Any]:
+    """Verify an evidence manifest against an immutable base bundle and write a separate receipt."""
+    from .publication_evidence import verify_publication_evidence
+
+    root = Path(bundle_dir).expanduser().resolve()
+    manifest_path = root / "manifest.json"
+    if not manifest_path.is_file():
+        raise FileNotFoundError(manifest_path)
+    evidence_path = Path(evidence_manifest_path).expanduser().resolve()
+    if not evidence_path.is_file():
+        raise FileNotFoundError(evidence_path)
+    base_digest = _sha256(manifest_path)
+    verification = verify_publication_evidence(root, evidence_path)
+    receipt = {
+        "schema": "gh-ml-publication-evidence-attachment-v1",
+        "bundle_manifest_sha256": base_digest,
+        "evidence_manifest_path": str(evidence_path),
+        "evidence_manifest_sha256": _sha256(evidence_path),
+        "verification": verification,
+    }
+    _atomic_json_noreplace(root / "evidence-verification.json", receipt)
+    return receipt
 
 
 def materialize_publication_inventory(

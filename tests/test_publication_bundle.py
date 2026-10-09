@@ -194,7 +194,8 @@ def test_combined_assessment_requires_explicit_complete_partition_coverage_and_r
     inventory_root = tmp_path / "inventory"
     part_path = inventory_root / "repositories" / "part-000.parquet"
     _write(part_path, [{"github_id": 7, "full_name": "org/repo", "name": "repo",
-                        "description": "ML framework", "domains": ["vision"],
+                        "description": "ML framework", "updated_at": "2019-01-02T03:04:05Z",
+                        "domains": ["vision"],
                         "methods": ["transformer"], "topics": ["ml"], "stars": 5}])
     from gh_ml.publication_partition import sorted_id_sha256
     part_record = {"bucket_id": "outer-000/inner-000",
@@ -286,19 +287,30 @@ def test_combined_assessment_requires_explicit_complete_partition_coverage_and_r
     current = pq.read_table(tmp_path / "views" / "current" / "outer-000--inner-000.parquet")
     assert current.column_names[0] == "all_domains"
     assert current.to_pylist()[0]["github_id"] == 7
+    assert current.to_pylist()[0]["observed_at"] is None
+    assert current.to_pylist()[0]["first_observed_at"] is None
+    assert current.to_pylist()[0]["observation_count"] is None
+    assert str(current.schema.field("observed_at").type) == "string"
+    assert str(current.schema.field("first_observed_at").type) == "string"
     assert json.loads(current.to_pylist()[0]["extra_json"])["triage_status"] == "candidate"
     from gh_ml.publication_bundle import assemble_verified_publication_bundle
     bundle = assemble_verified_publication_bundle(
         inventory_root, assessment_root, tmp_path / "bundle", max_output_bytes=1024**2,
-        allow_fixture_reserve=True,
+        allow_fixture_reserve=True, corpus_audit_plan_sha256="e" * 64,
     )
     assert bundle["publishable"] is False
     assert bundle["gates"]["combined_current_and_candidate_views_rebuilt"] is True
+    assert bundle["gates"]["full_corpus_audit_passed"] is False
+    assert bundle["corpus_audit_expectations"]["plan_sha256"] == "e" * 64
     assert (tmp_path / "bundle" / "inventory" / part_record["path"]).is_file()
     assert bundle["assessment_coverage"]["selection_status_counts"] == {
         "include": 1, "review": 0, "exclude": 0, "unknown": 0,
     }
     assert bundle["assessment_coverage"]["candidate_eligible_count"] == 1
+    assert bundle["assembly"]["mode"] == "verified_inventory_and_assessment_no_remerge"
+    assert bundle["assembly"]["command_template"][:4] == [
+        "uv", "run", "python", "scripts/assemble_publication_bundle.py",
+    ]
     assert "all inventory IDs" in bundle["view_semantics"]["current"]
     assert "candidate_eligible=true" in bundle["view_semantics"]["candidates"]
     for view_name in ("current", "candidates"):

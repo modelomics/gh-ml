@@ -336,6 +336,18 @@ def _parse_utc_hour(value: Any, field: str) -> datetime:
     return parsed.astimezone(UTC)
 
 
+def _parse_aware_timestamp(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must include a timezone")
+    return parsed.astimezone(UTC)
+
+
 def _command_option(command: Any, option: str) -> str | None:
     if not isinstance(command, list) or any(not isinstance(value, str) for value in command):
         return None
@@ -949,6 +961,131 @@ def _inventory_contains_ids(bundle_root: Path, inventory: Mapping[str, Any],
     return not any(buckets.values())
 
 
+def _verify_corpus_audit(bundle_root: Path, evidence_root: Path,
+                         record: Mapping[str, Any], manifest: Mapping[str, Any],
+                         inventory: Mapping[str, Any], assessment: Mapping[str, Any],
+                         source_fingerprints: Mapping[str, str]) -> tuple[bool, dict[str, Any], list[dict[str, Any]]]:
+    """Re-run the frozen v2 corpus sampler and scorer against the verified bundle."""
+    expected = manifest.get("corpus_audit_expectations")
+    expected_plan_sha = (
+        _digest(expected.get("plan_sha256"), "corpus_audit_expectations.plan_sha256")
+        if isinstance(expected, Mapping) and expected.get("plan_sha256") is not None else None
+    )
+    names = ("plan", "sample_manifest", "key", "roster", "labels", "evidence",
+             "evidence_freeze", "report")
+    refs = {name: record.get(name) for name in names}
+    if any(not isinstance(refs[name], Mapping) for name in names):
+        return False, {"status": "missing_hash_pinned_corpus_audit_artifacts"}, []
+    infos: dict[str, dict[str, Any]] = {}
+    paths: dict[str, Path] = {}
+    kinds = {"key": "jsonl", "roster": "jsonl", "labels": "jsonl", "evidence": "jsonl"}
+    for name in names:
+        info = _verify_ref(bundle_root, evidence_root, refs[name], f"corpus audit {name}",
+                           kind=kinds.get(name), rows_required=name in kinds)
+        infos[name] = info
+        paths[name] = _safe_ref(bundle_root, evidence_root, refs[name], f"corpus audit {name}")
+    if expected_plan_sha is None:
+        return False, {"status": "missing_bundle_frozen_corpus_audit_plan_pin"}, list(infos.values())
+    if infos["plan"]["sha256"] != expected_plan_sha:
+        raise ValueError("corpus audit plan differs from the immutable bundle plan pin")
+    plan = _object(paths["plan"], "corpus audit plan")
+    sample = _object(paths["sample_manifest"], "corpus audit sample manifest")
+    evidence_freeze = _object(paths["evidence_freeze"], "corpus audit evidence freeze")
+    report = _object(paths["report"], "corpus audit evaluation report")
+    inventory_path = bundle_root / "inventory" / "inventory-manifest.json"
+    assessment_path = bundle_root / "assessments" / "assessment-manifest.json"
+    from .corpus_audit import PLAN_SCHEMA, SAMPLE_SCHEMA, STRATA, _sampling_frame_sha256
+    expected_model = {key: assessment.get(key) for key in (
+        "model_schema", "model_sha256", "model_file_sha256", "selection_version",
+        "candidate_rule_version", "metadata_evidence_version", "readme_evidence_version")}
+    frame_sha = _sampling_frame_sha256(inventory)
+    if (plan.get("schema") != PLAN_SCHEMA or plan.get("frozen_before_labels") is not True
+            or plan.get("sampling_frame") != "full_declared_corpus"
+            or plan.get("inventory_manifest_sha256") != _sha256(inventory_path)
+            or plan.get("assessment_manifest_sha256") != _sha256(assessment_path)
+            or plan.get("source_fingerprints") != dict(source_fingerprints)
+            or plan.get("sampling_frame_sha256") != frame_sha
+            or plan.get("population_rows") != inventory.get("inventory_rows")
+            or plan.get("triage_model") != expected_model):
+        raise ValueError("corpus audit plan does not bind the verified full inventory, assessment, and model")
+    if (sample.get("schema") != SAMPLE_SCHEMA
+            or sample.get("audit_plan_sha256", sample.get("plan_sha256")) != expected_plan_sha
+            or sample.get("roster_sha256") != infos["roster"]["sha256"]
+            or sample.get("scoring_key_sha256", sample.get("key_sha256")) != infos["key"]["sha256"]
+            or sample.get("inventory_manifest_sha256") != _sha256(inventory_path)
+            or sample.get("assessment_manifest_sha256") != _sha256(assessment_path)
+            or sample.get("sampling_frame_sha256") != frame_sha
+            or sample.get("source_fingerprints") != dict(source_fingerprints)
+            or sample.get("triage_model") != expected_model):
+        raise ValueError("corpus audit sample manifest does not bind the frozen plan and bundle")
+    if infos["roster"]["sha256"] != plan.get("roster_sha256"):
+        raise ValueError("corpus audit roster does not match the frozen plan")
+    if (evidence_freeze.get("schema") != "gh-ml-corpus-audit-evidence-freeze-v1"
+            or evidence_freeze.get("frozen_before_labels") is not True
+            or evidence_freeze.get("sample_manifest_sha256") != infos["sample_manifest"]["sha256"]
+            or evidence_freeze.get("plan_sha256") != infos["plan"]["sha256"]
+            or evidence_freeze.get("key_sha256") != infos["key"]["sha256"]
+            or evidence_freeze.get("roster_sha256") != infos["roster"]["sha256"]
+            or evidence_freeze.get("evidence_sha256") != infos["evidence"]["sha256"]):
+        raise ValueError("corpus audit evidence-freeze receipt does not bind the frozen audit inputs")
+    _parse_aware_timestamp(evidence_freeze.get("frozen_at"), "corpus audit evidence freeze frozen_at")
+    evidence_source = evidence_freeze.get("evidence_source")
+    if (not isinstance(evidence_source, Mapping)
+            or any(not isinstance(evidence_source.get(field), str) or not evidence_source[field].strip()
+                   for field in ("tool", "tool_version"))):
+        raise ValueError("corpus audit evidence-freeze receipt lacks acquisition provenance")
+    try:
+        key_mode = paths["key"].stat().st_mode & 0o777
+    except OSError as exc:
+        raise ValueError("corpus audit scoring key is inaccessible") from exc
+    if key_mode & 0o077:
+        raise ValueError("corpus audit scoring key must not be group/world accessible")
+
+    # Reuse the sampler's read-only replay verifier. Requiring these four
+    # artifacts in one frozen directory keeps its contract independent of cwd.
+    audit_dir = paths["plan"].parent
+    audit_names = {"plan": "audit-plan.json", "sample_manifest": "sample-manifest.json",
+                   "key": "scoring-key.private.jsonl", "roster": "readme-review-roster.jsonl"}
+    if any(paths[name].parent != audit_dir or paths[name].name != filename
+           for name, filename in audit_names.items()):
+        raise ValueError("corpus audit plan, sample manifest, key, and roster must share one audit directory")
+    from .corpus_audit import verify_corpus_audit_sample
+    replay = verify_corpus_audit_sample(
+        inventory_dir=bundle_root / "inventory", assessment_dir=bundle_root / "assessments",
+        audit_dir=audit_dir,
+        expected_pins={"inventory_manifest_sha256": _sha256(inventory_path),
+                       "assessment_manifest_sha256": _sha256(assessment_path),
+                       "sampling_frame_sha256": frame_sha,
+                       "plan_sha256": expected_plan_sha,
+                       "sample_manifest_sha256": infos["sample_manifest"]["sha256"]},
+    )
+    if (replay.get("population_rows") != plan.get("population_rows")
+            or replay.get("triage_status_counts") != plan.get("triage_status_counts")
+            or replay.get("sampling_frame_sha256") != frame_sha):
+        raise ValueError("corpus audit design or route populations differ from the verified full frame")
+    key_rows = _read_jsonl(paths["key"], "corpus audit scoring key")
+    from .corpus_audit_evaluation import evaluate_corpus_audit
+    recomputed = evaluate_corpus_audit(
+        plan_path=paths["plan"], sample_manifest_path=paths["sample_manifest"],
+        key_path=paths["key"], roster_path=paths["roster"], labels_path=paths["labels"],
+        evidence_path=paths["evidence"], evidence_freeze_manifest_path=paths["evidence_freeze"],
+        expected_plan_sha256=expected_plan_sha,
+    )
+    if report != recomputed:
+        raise ValueError("corpus audit report differs from the recomputed scoring result")
+    accepted = recomputed.get("acceptance_passed") is True
+    summary = {"status": "complete" if accepted else "acceptance_unmet",
+               "plan_sha256": expected_plan_sha,
+               "sampling_frame_sha256": frame_sha,
+               "population_rows": plan.get("population_rows"),
+               "sample_rows": len(key_rows),
+               "challenge_rows": plan.get("challenge_count"),
+               "acceptance_passed": accepted,
+               "acceptance_results": recomputed.get("acceptance_results"),
+               "report_sha256": infos["report"]["sha256"]}
+    return accepted, summary, list(infos.values())
+
+
 def _sampling_frame_sha256(inventory: Mapping[str, Any]) -> str:
     parts = inventory.get("verified_files", {}).get("repositories", {}).get("parts")
     if not isinstance(parts, list):
@@ -1343,20 +1480,23 @@ def verify_publication_evidence(bundle_dir: str | Path,
     * novelty has exact per-bucket candidate-ID digests and one status/evidence
       JSONL row per eligible candidate, a hash-pinned NPZ plus version manifest,
       and quote/locator evidence bound to the candidate's README content hash;
-    * evaluation has a bundle-frozen pre-label audit plan and roster, the
-      recomputed inventory-frame digest and selection-stratum totals, a
-      probability design meeting its stated finite-population precision targets,
-      an evaluator model pin, and a declared JSONL SHA; and
+    * ``corpus_audit`` has a bundle-frozen route-stratified audit plan, exact
+      sample/key/roster hashes, a pre-label evidence-freeze receipt, a replayed
+      full-frame seeded sample, and a deterministically recomputed scorer report;
+      the legacy ``evaluation`` field is unsupported for held-out novelty; and
     * ``rights.sources`` has one scoped review record per pinned source label.
     """
     root = Path(bundle_dir).expanduser().resolve()
     evidence_path = Path(evidence_manifest_path).expanduser().resolve()
     gaps = ["source_coverage_complete", "novelty_assessment_complete",
-            "held_out_evaluation_passed", "source_specific_rights_review_complete"]
+            "held_out_evaluation_passed", "full_corpus_audit_passed",
+            "source_specific_rights_review_complete"]
     if not evidence_path.is_file():
         gates = {key: False for key in gaps}
         return {"schema": EVIDENCE_SCHEMA, "complete": False, "gates": gates,
-                "readiness_gaps": list(gaps), "verified_artifacts": [], "input_pins": {}}
+                "readiness_gaps": list(gaps), "verified_artifacts": [], "input_pins": {},
+                "corpus_audit": {"status": "missing_full_corpus_audit"},
+                "evaluation": {"status": "missing_pairwise_novelty_held_out_evaluation"}}
     evidence = _object(evidence_path, "publication evidence manifest")
     if evidence.get("schema") != EVIDENCE_SCHEMA:
         raise ValueError("unsupported publication evidence schema")
@@ -1535,15 +1675,24 @@ def verify_publication_evidence(bundle_dir: str | Path,
         verified_artifacts.extend({"source": "novelty", **item} for item in novelty_artifacts)
     else:
         novelty_ok, novelty_result = False, {"status": "missing_novelty_evidence"}
-    evaluation_record = evidence.get("evaluation")
-    if isinstance(evaluation_record, Mapping):
-        evaluation_ok, evaluation_result, evaluation_artifacts = _verify_evaluation(
-            root, evidence_root, evaluation_record, inventory, source_fingerprints,
-            manifest,
-        )
-        verified_artifacts.extend({"source": "evaluation", **item} for item in evaluation_artifacts)
+    # The old ``evaluation`` record was a selection-status audit and is not a
+    # novelty model held-out test. Keep it visible for migration diagnostics,
+    # but never use it to pass the distinct novelty evaluation gate.
+    if "evaluation" in evidence:
+        evaluation_result = {"status": "unsupported_legacy_evaluation_contract",
+                             "detail": "requires a separate pairwise novelty held-out evaluator"}
     else:
-        evaluation_ok, evaluation_result = False, {"status": "missing_held_out_evaluation"}
+        evaluation_result = {"status": "missing_pairwise_novelty_held_out_evaluation"}
+    evaluation_ok = False
+    corpus_record = evidence.get("corpus_audit")
+    if isinstance(corpus_record, Mapping):
+        corpus_ok, corpus_result, corpus_artifacts = _verify_corpus_audit(
+            root, evidence_root, corpus_record, manifest, inventory,
+            assessment_manifest, source_fingerprints,
+        )
+        verified_artifacts.extend({"source": "corpus_audit", **item} for item in corpus_artifacts)
+    else:
+        corpus_ok, corpus_result = False, {"status": "missing_full_corpus_audit"}
     rights_ok, rights_result, rights_artifacts = _verify_rights(
         evidence.get("rights"), source_fingerprints, root, evidence_root,
     )
@@ -1552,6 +1701,7 @@ def verify_publication_evidence(bundle_dir: str | Path,
         "source_coverage_complete": source_ok,
         "novelty_assessment_complete": novelty_ok,
         "held_out_evaluation_passed": evaluation_ok,
+        "full_corpus_audit_passed": corpus_ok,
         "source_specific_rights_review_complete": rights_ok,
     }
     return {
@@ -1565,6 +1715,7 @@ def verify_publication_evidence(bundle_dir: str | Path,
         "source_coverage": source_results,
         "novelty": novelty_result,
         "evaluation": evaluation_result,
+        "corpus_audit": corpus_result,
         "rights": rights_result,
         "verified_artifacts": verified_artifacts,
     }
