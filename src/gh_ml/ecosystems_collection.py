@@ -645,10 +645,17 @@ def run_import(*, state_db: Path, output_dir: Path, ecosystems_client: Any,
                         report["deferred"] += 1
                         db.commit()
                         continue
-                    _put(db, candidate)
+                    stored = _put(db, candidate)
                     report["fallback_used"] += 1
-                    with db:
-                        db.execute("DELETE FROM unresolved WHERE target_key=?", (item["target_key"],))
+                    if _is_incomplete(stored):
+                        # A successful request can still omit required fields.
+                        # Keep that target retryable without treating GitHub's
+                        # unavailable source-sync clock as a missing field.
+                        _queue(db, rid, name, expected, "incomplete_github_fallback")
+                        report["deferred"] += 1
+                    else:
+                        with db:
+                            db.execute("DELETE FROM unresolved WHERE target_key=?", (item["target_key"],))
 
             has_later = db.execute("SELECT 1 FROM unresolved WHERE target_key>? LIMIT 1", (queue_last,)).fetchone()
             next_key = queue_last if has_later else ""
