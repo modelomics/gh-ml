@@ -129,6 +129,16 @@ def test_provider_outage_does_not_trigger_github_or_advance_cursor(tmp_path):
     assert report["api_requests"]["github"] == 0
 
 
+def test_permanent_provider_error_is_reported_without_advancing_cursor(tmp_path):
+    eco_client = Eco({1: EcosystemsHTTPError(400, "Page limit exceeded")})
+    report = invoke(tmp_path, eco_client)
+    assert report["status"] == "deferred"
+    assert report["http_status"] == 400
+    assert report["error_type"] == "EcosystemsHTTPError"
+    assert report["cursor"]["next_page"] == 1
+    assert report["cursor"]["ended"] is False
+
+
 def test_discovery_missing_from_ecosystems_uses_github_and_404_is_recorded(tmp_path):
     source = tmp_path / "targets.jsonl"
     source.write_text(json.dumps({"github_id": 77, "full_name": "owner/missing"}) + "\n")

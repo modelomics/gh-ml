@@ -4,6 +4,8 @@ import gzip
 import json
 from pathlib import Path
 
+import pytest
+
 from gh_ml import ecosystems_full_run as full_run
 
 
@@ -47,6 +49,38 @@ def test_runner_keeps_github_out_of_primary_then_starts_fallback(tmp_path, monke
     assert delta.suffixes[-2:] == [".jsonl", ".gz"]
     assert gzip.open(delta, "rt").read() == "{\"github_id\":1}\n"
     assert json.loads((tmp_path / "run" / "status.json").read_text())["phase_runs"]
+
+
+def test_permanent_provider_400_stops_without_github_or_retry(tmp_path, monkeypatch):
+    monkeypatch.setattr(full_run, "_source_revision", lambda: "pinned-test-source")
+    calls = []
+    sleeps = []
+
+    def collector(**kwargs):
+        calls.append(kwargs)
+        export = kwargs["output_dir"] / "repositories-400.jsonl"
+        export.write_text("")
+        receipt = kwargs["output_dir"] / "receipt-400.json"
+        report = {
+            "run_id": "400", "status": "deferred", "http_status": 400,
+            "export_path": str(export), "receipt_path": str(receipt),
+            "cursor": {"next_page": 101, "ended": False}, "pages_requested": 0,
+            "remaining_queue": 0, "pending_export_queue": 0,
+        }
+        receipt.write_text(json.dumps(report))
+        return report
+
+    result = full_run.run_full(
+        state_db=tmp_path / "state.sqlite", run_dir=tmp_path / "run", collector=collector,
+        ecosystems_client_factory=lambda: object(),
+        github_client_factory=lambda *_args, **_kwargs: pytest.fail("GitHub fallback must not start"),
+        max_runtime_seconds=60, sleeper=sleeps.append,
+    )
+    assert result["status"] == "stopped_source_error"
+    assert result["cursor"]["next_page"] == 101
+    assert result["last_error"] == "ecosyste.ms returned permanent HTTP 400"
+    assert len(calls) == 1
+    assert sleeps == []
 
 
 def test_verified_compression_updates_receipt_before_removing_raw(tmp_path):

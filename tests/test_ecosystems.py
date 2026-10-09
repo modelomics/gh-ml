@@ -161,6 +161,26 @@ def test_list_requests_stable_id_order_and_no_auth(monkeypatch):
     assert seen["timeout"] == 3
 
 
+def test_mailto_is_sent_only_in_from_header_and_can_come_from_environment(monkeypatch):
+    seen = {}
+
+    def fake_open(request, timeout):
+        seen["headers"] = {key.lower(): value for key, value in request.header_items()}
+        seen["url"] = request.full_url
+        return FakeResponse([record()])
+
+    monkeypatch.setattr(ecosystems, "urlopen", fake_open)
+    monkeypatch.setenv("ECOSYSTEMS_MAILTO", "contact@example.org")
+    EcosystemsClient(max_retries=0).list_repositories(page=1)
+    assert seen["headers"]["from"] == "contact@example.org"
+    assert "mailto=contact%40example.org" in seen["url"]
+    assert "authorization" not in seen["headers"]
+
+    EcosystemsClient(max_retries=0, mailto="explicit@example.org").list_repositories(page=1)
+    assert seen["headers"]["from"] == "explicit@example.org"
+    assert "mailto=explicit%40example.org" in seen["url"]
+
+
 def test_detail_404_is_missing_but_other_http_errors_are_typed(monkeypatch):
     def missing(_request, **_kwargs):
         raise HTTPError("https://example.invalid", 404, "missing", Message(), None)

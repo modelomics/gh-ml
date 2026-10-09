@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .ecosystems import normalize_repository
+from .ecosystems import EcosystemsHTTPError, normalize_repository
 
 _FIELDS = ("description", "topics", "language", "fork", "archived", "created_at", "pushed_at", "last_synced_at")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -490,6 +490,9 @@ def run_import(*, state_db: Path, output_dir: Path, ecosystems_client: Any,
                 report["status"] = "deferred"
                 report["deferred"] += 1
                 report["error"] = "ecosystems_page_deferred"
+                report["error_type"] = type(exc).__name__
+                if isinstance(exc, EcosystemsHTTPError):
+                    report["http_status"] = exc.status
                 break
             if not page_rows:
                 ended = True

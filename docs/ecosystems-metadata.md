@@ -47,28 +47,19 @@ The existing `readme-graphql` enrichment stage also accepts repeatable `--github
 
 ## Downstream use and operational status
 
-Treat each delta as source observations and pass it to the existing review and compact-README pipeline as an inventory input. Preserve the receipt alongside the run, including the cursor and queue state needed for resumption. The command does not classify records as ML or novelty, or establish complete GitHub coverage. The one-time full inventory runner is documented below; it is not a recurring scheduled workflow.
+Treat each delta as source observations and pass it to the existing review and compact-README pipeline as an inventory input. Preserve the receipt alongside the run, including the cursor and queue state needed for resumption. The command does not classify records as ML or novelty, or establish complete GitHub coverage. The attempted full scan is stopped at the upstream pagination limit; the current runner is not a complete-inventory workflow.
 
-### One-time resumable full inventory run
+### Stopped full-scan attempt and recovery status
 
-The full runner performs the ecosyste.ms listing pass first, with GitHub fallback disabled, until the listing cursor reaches an empty page. Only then does it enter the fallback phase and retry eligible queued records through GitHub. A provider outage or rate limit is retried with exponential backoff (10 seconds up to one hour); it does not trigger a GitHub-wide fallback. Each invocation has a seven-day continuous runtime budget by default. If that budget expires, restart the same command with the same state database and run directory to resume. Do not change the source revision during a run or resume: the runner pins a source revision in `status.json` and refuses a mismatch.
+The attempted run used ecosyste.ms as its primary source and kept GitHub fallback disabled. It stopped at the upstream host controller's hard 100-page limit: requesting page 101 returned HTTP 400, `Page limit exceeded (max 100)`. The saved cursor is `next_page=101`, `ended=false`, with 100,040 repositories and no pending exports. No GitHub API requests were made. The user service is stopped and disabled; do not restart the same unit and expect it to exhaust the inventory. Full status, timestamps, hashes, and checkpoint paths are in the [maintained run manifest](ecosystems-full-run-2026-10-08.md) and the archive [machine run manifest](/mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08/run-manifest.json).
 
-The production run directory is `/mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08`; it holds `code/`, `state.sqlite`, `deltas/`, `logs/`, and `status.json`. The frozen source snapshot in `code/` is used for launch and every resume. The initial run is tracked in [the maintained run manifest](ecosystems-full-run-2026-10-08.md). The systemd unit runs:
+The checkpoint is retained at `/mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08/state.sqlite`; compressed deltas and receipts are in `deltas/`, and the frozen source snapshot is in `code/`. Keep these artifacts for recovery and audit. The last confirmed chunk and the failing page request are preserved in the machine manifest and receipts. Do not describe the next page as resumable with the old command: the page limit is imposed upstream and will reproduce the same failure.
 
-```sh
-PYTHONPATH=/mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08/code/src \
-uv run --no-project \
-  --python /mnt/shared/Projects/Code/Academic/modelomics/gh-ml-graphql/.venv/bin/python \
-  python -m gh_ml.ecosystems_full_run \
-  --state-db /mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08/state.sqlite \
-  --run-dir /mnt/archive/runs/gh-ml-ecosystems-full-2026-10-08 \
-  --chunk-pages 10 --per-page 1000 --chunk-seconds 3300 \
-  --max-runtime-seconds 604800 --fallback-requests 100
-```
+The ecosyste.ms listing controller rejects page 101 even though the API endpoint accepts offset pagination. This full scan therefore cannot exhaust the host inventory through the current listing route. A distinct owner-scoped route was verified to serve page 101, but a naive owner-by-owner walk would require roughly 38 million owner requests before counting pagination within owners. The old bulk export is also unsuitable as a current inventory: its dated snapshot is 2023-08-30, contains about 168,553,800 records, and is 226,814,699,303 bytes. These are source constraints, not estimates of present-day coverage. See the provider's [open data page](https://repos.ecosyste.ms/open-data).
 
-This invocation uses the existing project virtualenv and explicitly sets the frozen snapshot's `src/` on `PYTHONPATH`. The run creates compressed JSONL deltas only after verifying decompressed record count and SHA256 against the raw export; each receipt is updated with the compressed path, record count, and hash. The runner checks archive free space before each chunk and stops with resumable status if free space falls below 300 GiB. GitHub credentials are read from `GITHUB_TOKEN` only when the runner reaches fallback; the token is not included in arguments or artifacts. Monitor `status.json` for phase, cursor, counts, last receipt/export, retry delay, free space, and errors. Do not launch another copy against the same run directory.
+For a future request to the provider, contact metadata can be supplied through the runner's `--mailto` flag or `ECOSYSTEMS_MAILTO` environment variable. The client sends the value as both the `mailto` query parameter and the HTTP `From` header. Keep the contact address in local environment/configuration; do not put a personal address in this guide, command examples, or run manifest. A polite contact header does not change the 100-page limit.
 
-The source listing sorts by mutable `full_name`, so page movement can cause omissions or repeats while repositories are renamed. An exhausted cursor means the endpoint walk ended; it does not prove complete or point-in-time GitHub coverage. Preserve the resulting inventory as an ecosyste.ms observation with source age and provenance intact.
+Any alternative source or acquisition change requires separate validation; do not resume via the existing page-number command. The old runner's seven-day process budget, exponential backoff, code pin, verified gzip exports, and 300 GiB archive floor remain implementation behavior, but they do not bypass the host pagination cap. The listing sorts by mutable `full_name`, so page movement can cause omissions or repeats while repositories are renamed. Even an exhausted cursor would not establish complete or point-in-time GitHub coverage. Preserve collected rows as ecosyste.ms observations with source age and provenance intact.
 
 ### Primary-source pilot
 

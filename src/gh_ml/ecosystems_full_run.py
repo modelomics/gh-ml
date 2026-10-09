@@ -61,6 +61,14 @@ def _owned_compressed_bytes(out_dir: Path) -> int:
                if p.is_file() and p.name.startswith("repositories-") and p.name.endswith(".jsonl.gz"))
 
 
+def _permanent_http_status(report: dict[str, Any]) -> int | None:
+    status = report.get("http_status")
+    if (isinstance(status, int) and not isinstance(status, bool) and 400 <= status < 500
+            and status not in (408, 409, 425, 429)):
+        return status
+    return None
+
+
 def _compress_verified(path: Path) -> tuple[Path, int, str]:
     """Gzip a completed JSONL delta and verify bytes and records before unlinking raw."""
     free = shutil.disk_usage("/mnt/archive").free
@@ -217,6 +225,17 @@ def run_full(*, state_db: Path, run_dir: Path, chunk_pages: int = 10,
                                        min_free_gib=ARCHIVE_FLOOR_GIB, process_queue=True,
                                        queue_target_limit=5000, export_batch_limit=10_000)
                     compressed, _rows, _digest = _finalize_report(report)
+                permanent_status = _permanent_http_status(report)
+                if permanent_status is not None:
+                    status.update(status="stopped_source_error", phase=phase, updated_at=_now(), retry_at=None,
+                                  cursor=report.get("cursor"), pages_requested=report.get("pages_requested"),
+                                  last_report_status=report.get("status"),
+                                  last_error=f"ecosyste.ms returned permanent HTTP {permanent_status}",
+                                  archive_free_bytes=_check_space(),
+                                  compressed_delta_bytes=_owned_compressed_bytes(out_dir),
+                                  latest_export=str(compressed), latest_receipt=str(report["receipt_path"]))
+                    _atomic_json(status_path, status)
+                    return status
                 receipt = Path(report["receipt_path"])
                 cursor = report.get("cursor", {})
                 if phase == "primary" and cursor.get("ended"):
@@ -290,6 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-runtime-seconds", type=int, default=604800)
     parser.add_argument("--fallback-requests", type=int, default=100)
     parser.add_argument("--storage-cap-gib", type=int, default=DEFAULT_STORAGE_CAP_GIB)
+    parser.add_argument("--mailto", default=os.environ.get("ECOSYSTEMS_MAILTO"),
+                        help="contact email sent in the ecosyste.ms From header (or ECOSYSTEMS_MAILTO)")
     parser.add_argument("--github-token-env", action="append", default=[])
     args = parser.parse_args(argv)
     from .github_tokens import build_pooled_client
@@ -304,11 +325,15 @@ def main(argv: list[str] | None = None) -> int:
         return build_pooled_client(names, fallback_token=token, deadline=deadline)
 
     try:
+        def ecosystems_factory() -> EcosystemsClient:
+            return EcosystemsClient(mailto=args.mailto)
+
         result = run_full(state_db=args.state_db, run_dir=args.run_dir,
                           chunk_pages=args.chunk_pages, per_page=args.per_page,
                           chunk_seconds=args.chunk_seconds, max_runtime_seconds=args.max_runtime_seconds,
                           fallback_requests=args.fallback_requests, storage_cap_gib=args.storage_cap_gib,
-                          token_env_names=token_names, github_client_factory=github_factory)
+                          token_env_names=token_names, github_client_factory=github_factory,
+                          ecosystems_client_factory=ecosystems_factory)
     except Exception as exc:
         print(f"full inventory runner failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

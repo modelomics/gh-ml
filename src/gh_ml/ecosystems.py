@@ -8,6 +8,7 @@ used safely by long-running collectors.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
 from collections.abc import Mapping
@@ -71,13 +72,18 @@ def _retry_after(value: str | None) -> float | None:
 class EcosystemsClient:
     """Small stdlib-only client for the public ecosyste.ms GitHub API."""
 
-    def __init__(self, *, timeout: float = _DEFAULT_TIMEOUT, max_retries: int = _MAX_RETRIES) -> None:
+    def __init__(self, *, timeout: float = _DEFAULT_TIMEOUT, max_retries: int = _MAX_RETRIES,
+                 mailto: str | None = None) -> None:
         if timeout <= 0:
             raise ValueError("timeout must be positive")
         if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
         self.timeout = float(timeout)
         self.max_retries = int(max_retries)
+        contact = mailto if mailto is not None else os.environ.get("ECOSYSTEMS_MAILTO")
+        if contact is not None and (not contact.strip() or "\r" in contact or "\n" in contact):
+            raise ValueError("mailto must be a non-empty email address without line breaks")
+        self.mailto = contact.strip() if contact is not None else None
 
     def list_repositories(
         self,
@@ -121,10 +127,16 @@ class EcosystemsClient:
         return result
 
     def _get_json(self, url: str, *, deadline: float | None, missing_404: bool = False) -> Any:
+        if self.mailto:
+            separator = "&" if "?" in url else "?"
+            url = f"{url}{separator}{urlencode({'mailto': self.mailto})}"
         attempt = 0
         while True:
             remaining = _remaining(deadline)
-            request = Request(url, headers={"Accept": "application/json", "User-Agent": _USER_AGENT}, method="GET")
+            headers = {"Accept": "application/json", "User-Agent": _USER_AGENT}
+            if self.mailto:
+                headers["From"] = self.mailto
+            request = Request(url, headers=headers, method="GET")
             try:
                 with urlopen(request, timeout=min(self.timeout, remaining)) as response:
                     body = _read_bounded(response)
