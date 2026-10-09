@@ -274,6 +274,28 @@ def _parser() -> argparse.ArgumentParser:
     graphql.add_argument("--max-triage-repositories", type=int, default=10_000,
                          help="maximum stored repositories to rescore/rotate per invocation")
     graphql.add_argument("--github-token-env", default="GITHUB_TOKEN", help="environment variable holding GitHub token")
+    graphql.add_argument("--github-pool-token-env", action="append", default=[],
+                         help="additional GitHub token environment variable for account-aware pooling; repeatable")
+    ecosystems_import = subparsers.add_parser(
+        "ecosystems-import", help="import bounded public repository metadata from ecosyste.ms into resumable local state",
+    )
+    ecosystems_import.add_argument("--state-db", type=Path, required=True, help="persistent SQLite state path")
+    ecosystems_import.add_argument("--output-dir", type=Path, required=True, help="directory for local JSONL and run receipts")
+    ecosystems_import.add_argument("--max-pages", type=int, default=1,
+                                   help="maximum ecosyste.ms inventory pages (0..604800; 0 skips primary listing)")
+    ecosystems_import.add_argument("--per-page", type=int, default=1000, help="repositories per page (1..1000)")
+    ecosystems_import.add_argument("--max-github-requests", type=int, default=100,
+                                   help="maximum logical GitHub repository fallback attempts (HTTP retries and pool validation are additional)")
+    ecosystems_import.add_argument("--max-seconds", type=int, default=3300, help="whole-run budget (0..604800 seconds)")
+    ecosystems_import.add_argument("--input", type=Path, action="append", default=[],
+                                   help="optional discovery JSONL input; repeat to read multiple files")
+    ecosystems_import.add_argument("--updated-after", help="optional ecosyste.ms updated_after query bound")
+    ecosystems_import.add_argument("--min-free-gib", type=float, default=300,
+                                   help="minimum free space on /mnt/archive (default 300 GiB)")
+    ecosystems_import.add_argument("--github-token-env", action="append", default=[],
+                                   help="GitHub token environment variable for fallback; repeatable")
+    ecosystems_import.add_argument("--no-github-fallback", action="store_true",
+                                   help="run primary-source import without GitHub metadata fallback")
     return parser
 
 
@@ -321,6 +343,121 @@ def _census(args: argparse.Namespace) -> int:
     print(f"Census checkpoint: {args.output_dir / 'checkpoint.json'}")
     print(f"Next GitHub ID cursor: {checkpoint.get('next_since')}")
     return 0
+
+
+def _ecosystems_import(args: argparse.Namespace, *, ecosystems_client_factory: Any = None,
+                       github_client_factory: Any = None, collector: Any = None) -> int:
+    """Import a bounded ecosyste.ms batch, optionally enriching via GitHub."""
+    from .ecosystems import EcosystemsClient
+    from .ecosystems_collection import run_import
+
+    if not 0 <= args.max_pages <= 604800:
+        raise ValueError("--max-pages must be from 0 through 604800")
+    if not 1 <= args.per_page <= 1000:
+        raise ValueError("--per-page must be from 1 through 1000")
+    if args.max_github_requests < 0:
+        raise ValueError("--max-github-requests must be nonnegative")
+    if not 0 <= args.max_seconds <= 604800:
+        raise ValueError("--max-seconds must be from 0 through 604800")
+    if not isinstance(args.min_free_gib, (int, float)) or not 0 <= args.min_free_gib < float("inf"):
+        raise ValueError("--min-free-gib must be a finite nonnegative number")
+    if args.updated_after is not None and not args.updated_after.strip():
+        raise ValueError("--updated-after must be non-empty when supplied")
+
+    repo_root = Path(__file__).resolve().parents[2]
+    state_path = args.state_db.expanduser().resolve()
+    output_path = args.output_dir.expanduser().resolve()
+    for label, candidate in (("--state-db", state_path), ("--output-dir", output_path)):
+        if candidate == repo_root or repo_root in candidate.parents:
+            raise ValueError(f"{label} must be outside the source repository")
+    if not state_path.suffix:
+        raise ValueError("--state-db must name a SQLite database file")
+    inputs = [path.expanduser().resolve() for path in args.input]
+    missing = next((path for path in inputs if not path.is_file()), None)
+    if missing is not None:
+        raise ValueError(f"discovery input does not exist or is not a file: {missing}")
+    archive = Path("/mnt/archive").resolve()
+    uses_archive = any(path == archive or archive in path.parents for path in (state_path, output_path))
+    if uses_archive and args.min_free_gib < 300:
+        raise ValueError("--min-free-gib must be at least 300 to preserve the archive reserve")
+    reserve_bytes = int(args.min_free_gib * 1024**3) if uses_archive else 0
+    if uses_archive:
+        for candidate in (state_path.parent, output_path):
+            if candidate != archive and archive not in candidate.parents:
+                continue
+            existing = candidate
+            while not existing.exists() and existing != existing.parent:
+                existing = existing.parent
+            stats = os.statvfs(existing)
+            if stats.f_bavail * stats.f_frsize < reserve_bytes:
+                raise OSError(f"insufficient free space to preserve the {args.min_free_gib:g} GiB archive reserve")
+
+    started = time.monotonic()
+    deadline = started + args.max_seconds
+    token_env_names = args.github_token_env or ["GITHUB_TOKEN"]
+    github_client = None
+    pool_summary = None
+    fallback_enabled = not args.no_github_fallback and args.max_github_requests > 0
+    if fallback_enabled:
+        token = next((os.environ[name] for name in token_env_names if os.environ.get(name)), None)
+        if token is None:
+            token = _github_token(token_env_names[0])
+        if token:
+            if github_client_factory is not None:
+                github_client = github_client_factory(token=token)
+            else:
+                from .github_tokens import build_pooled_client
+
+                github_client = build_pooled_client(token_env_names, fallback_token=token, deadline=deadline)
+    if collector is None:
+        collector = run_import
+    client = (ecosystems_client_factory or EcosystemsClient)()
+    report = collector(
+        state_db=state_path, output_dir=output_path,
+        ecosystems_client=client, github_client=github_client,
+        max_pages=args.max_pages, per_page=args.per_page,
+        max_github_requests=args.max_github_requests, deadline=deadline,
+        discovery_paths=inputs, updated_after=args.updated_after, min_free_gib=args.min_free_gib,
+    )
+    token_pool = getattr(github_client, "token_pool", None)
+    if token_pool is not None and callable(getattr(token_pool, "summary", None)):
+        pool_summary = token_pool.summary()
+    request_accounting = {
+        "github_budget_unit": "github_client.get_repository invocations",
+        "github_budget_limit": args.max_github_requests,
+        "report_github_count": "report.api_requests.github counts logical get_repository attempts",
+        "actual_http_requests": "not counted; GitHub transport retries can issue more HTTP requests",
+        "pool_validation": "GET /user account validation requests are additional and excluded from the budget",
+    }
+    if isinstance(report, dict):
+        report["github_request_accounting"] = request_accounting
+        if pool_summary is not None:
+            report["token_pool"] = pool_summary
+        receipt_path = report.get("receipt_path")
+        if isinstance(receipt_path, str):
+            path = Path(receipt_path)
+            if path.is_file():
+                try:
+                    receipt = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    receipt = None
+                if isinstance(receipt, dict):
+                    receipt["github_request_accounting"] = request_accounting
+                    if pool_summary is not None:
+                        receipt["token_pool"] = pool_summary
+                    _write_json(path, receipt)
+    summary = {
+        "command": "ecosystems-import",
+        "report": report,
+        "state_db": str(state_path),
+        "output_dir": str(output_path),
+        "token_pool": pool_summary,
+        "github_request_accounting": request_accounting,
+    }
+    print(json.dumps(summary, sort_keys=True, default=str))
+    partial = (not isinstance(report, dict) or report.get("status") != "complete"
+               or report.get("deferred", 0) > 0 or report.get("remaining_queue", 0) > 0)
+    return 2 if partial else 0
 
 
 def _census_daily(args: argparse.Namespace, *, api: Any = None, downloader: Any = None,
@@ -1030,7 +1167,15 @@ def _readme_graphql(args: argparse.Namespace, *, client_factory: Any = None,
                 raise OSError(f"insufficient free space to preserve the {args.min_free_gib:g} GiB archive reserve")
     run_id = _run_id(now)
     store_type = store_factory or EvidenceStore
-    client = (client_factory or GitHubClient)(token=_github_token(args.github_token_env))
+    pool_env_names = getattr(args, "github_pool_token_env", [])
+    if pool_env_names:
+        from .github_tokens import build_pooled_client
+
+        client = build_pooled_client(
+            pool_env_names, fallback_token=_github_token(args.github_token_env), deadline=deadline,
+        )
+    else:
+        client = (client_factory or GitHubClient)(token=_github_token(args.github_token_env))
     model_path = getattr(args, "triage_model", None)
     triage_model = None
     triage_schema = None
@@ -1539,6 +1684,8 @@ def main(argv: list[str] | None = None) -> int:
             return _historical_sample(args)
         if args.command == "pwc-import":
             return _pwc_import(args)
+        if args.command == "ecosystems-import":
+            return _ecosystems_import(args)
         if args.command == "current-view":
             return _current_view(args)
         if args.command == "census":

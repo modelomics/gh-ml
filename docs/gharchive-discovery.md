@@ -1,0 +1,50 @@
+# Local GH Archive discovery
+
+`gh_ml.gharchive` aggregates downloaded GH Archive hourly JSONL gzip files into a persistent, local repository/event ledger. It is a complementary event-based discovery source for the existing GitHub ML registry. The module has no network client: acquire and verify hourly files with a separate, auditable script, then pass those local files to the parser. It does not call GitHub APIs, publish to Hugging Face, or classify repositories as ML.
+
+## Run and resume
+
+Install the project environment with `uv sync --extra dev`. Keep input archives and generated state under `/mnt/archive/runs`, outside the source tree. Supply each archive as a repeated `--input`; use the same output directory and SQLite database to resume an interrupted or deliberately bounded pass.
+
+```sh
+uv run python -m gh_ml.gharchive \
+  --input /mnt/archive/runs/gh-archive-input/2026-10-07-10.json.gz \
+  --input /mnt/archive/runs/gh-archive-input/2026-10-07-11.json.gz \
+  --output-dir /mnt/archive/runs/gh-archive-followup-2026-10-08/aggregate
+```
+
+`--max-events N` is optional and bounds processed event rows for a short trial. A limited run reports `partial`; rerun with the same input files and output directory to continue. A successful complete-file record is skipped on later invocations when its path and SHA-256 still match. Changed inputs are tracked under their new hash. The report records per-input hashes, byte/event progress, malformed rows, completion status, event types, metadata availability, and the persistent ledger size. Output files are `gharchive.sqlite3`, `repositories.jsonl`, and `report.json`.
+
+`event_count` is the number of distinct event IDs linked to a repository row. Usually the association comes from the event's `repo.id`; a `ForkEvent` can also link the same event ID to its child repository. Consequently, summing repository `event_count` values can exceed the number of unique event IDs. Event-level progress and repository-level counts are different measures. The SQLite database is the resume source of truth; keep it with the run output. A `partial` result is not a complete archive scan.
+
+## Identity and metadata rules
+
+The event's top-level `repo.id` identifies the repository associated with the activity. A `ForkEvent` also describes the child in `payload.forkee`; a child with a different numeric ID is retained as its own repository record even when the parent record is otherwise missing. Metadata from the child object is never assigned to the parent. Nested repository objects such as a pull request's base or head repository are used only when their numeric ID equals the repository being enriched. Thus same-ID PR base/head metadata can enrich that repository, but must not cross repository IDs.
+
+An event can have an outer repository name/URL while lacking a matching-ID metadata object. That row is retained with its available identity fields; absent description, topics, language, or fork metadata remains unknown. Missing metadata is not evidence that a repository is non-ML. Likewise, GH Archive activity and repository names are discovery context, not evidence of a distinct ML contribution or scientific novelty.
+
+## Coverage and use
+
+The source represents repositories appearing in the selected public event stream during the supplied hours. It does not cover all GitHub repositories, private repositories, repositories with no event in those hours, or a complete history. Hourly source availability can be incomplete, and a parser's complete status means only that the supplied files were fully read. Report source-hour availability separately from parser completion.
+
+Use the output as an appendable discovery inventory or join it to a clearly dated repository metadata snapshot by numeric GitHub ID. Mark snapshot-filled fields as historical and keep their provenance and age visible. A missing join is unknown, not a negative ML label. Classification, eligibility, and later curation belong to separate stages and require their own evidence and coverage accounting.
+
+## Pilot run record
+
+The durable pilot is `/mnt/archive/runs/gh-ml-gharchive-pilot-2026-10-08/`. `day_manifest.json` and the acquisition receipts record source URLs, available hours, byte sizes, and source SHA-256 hashes. The final recent-hour parser report is `aggregate-final/report.json`; its exact invocation and parser SHA-256 (`875a34b6214bffd1c08ed16d04e2d4f3b8ff0d4e7c2095d80747cad7fd52c5ff`) are in `parser_current_final_receipt.json`. The historical report and command receipt are `aggregate-historical/report.json` and `parser_historical_final_receipt.json`. `metadata-join-manifest.json` records the join script hash, both aggregate hashes, the frozen inventory hash, and the per-source comparison results. The initial `aggregate/report.json` is a baseline from before the historical same-ID fork and pull-request metadata enhancement; do not use its event or metadata counts as final results.
+
+The recorded parser commands use `uv run --no-sync python -m gh_ml.gharchive`, one repeated `--input` per verified gzip, and an external `--output-dir`. The current run's inputs are the 14 files listed in `day_manifest.json`; its output is `/mnt/archive/runs/gh-ml-gharchive-pilot-2026-10-08/aggregate-final`. The historical command uses `/mnt/archive/runs/gh-ml-gharchive-pilot-2026-10-08/2025-01-15-12.json.gz` and output directory `/mnt/archive/runs/gh-ml-gharchive-pilot-2026-10-08/aggregate-historical`. Use the two parser receipts for the full argv, input hashes, source version, and timings.
+
+The recent-hour final parser run processed 83,750 valid events with no malformed rows and recorded 48,853 repository IDs in 19.035 seconds. It found 898 descriptions, 1,099 known topic fields (4 nonempty), 50 languages, and 1,099 fork values in event payloads; these are metadata availability counts, not ML counts. The event stream contributed 83,743 `event.repo` associations and 1,099 `payload.forkee` child associations. Fork children are separately represented, and some IDs can appear in both roles.
+
+The pilot used 14 available hours on 2026-10-07 (10:00–23:59 UTC); the other 10 hours returned HTTP 404. A separate historical comparison used 2025-01-15 12:00 UTC. The compressed source inputs total 217.4 MB: 97.1 MB for the recent hours plus 120.3 MB for the historical hour. The pilot acquisition used public GH Archive raw files; BigQuery was not configured. No GitHub API requests or publication were made. These are bounded samples and do not establish complete GH Archive or GitHub coverage. A one-hour measurement is not a full-day or 600-million-row runtime estimate.
+
+The metadata comparison joined the recent event repository IDs to a 330,680-row inventory snapshot dated 2026-09-27. Of 48,853 IDs, 1,294 matched and 47,559 were absent. The archive supplied 898 usable descriptions, 4 nonempty topic lists, 50 languages, and 1,099 fork values; empty-but-known topics remain distinct from unknown topics. After filling missing values from the older snapshot, 2,129 descriptions, 911 nonempty topic lists, 1,274 languages, and 2,393 fork values were available. The recent join report is `aggregate-final/metadata-join-report.json`.
+
+The separate 2025-01-15 12:00 UTC hour contained 270,553 events and 125,355 repository IDs; parsing took 64.6 seconds. Its archive payloads supplied 13,585 descriptions, 3,195 nonempty topic lists, 9,198 languages, and 12,116 fork values. The historical join matched 1,211 IDs and filled missing fields to 14,524 descriptions, 3,923 nonempty topic lists, 10,087 languages, and 13,127 fork values. This historical join is diagnostic only: the Sept 27 2026 inventory is 620 days newer than the event hour, so its data is lookahead, not historical point-in-time coverage. The report is `aggregate-historical/metadata-join-report.json`.
+
+The reports use parser SHA `875a34b…` as recorded in both parser receipts. A later source-path deduplication change produced current source SHA `dca91b83698a382fcf1977e1cc9d8623e76b8e5250b63afbe0ac701554feaa4e`; it changes only observation-source serialization, not these aggregate counts. The parser tests and full suite passed after that fix (852 tests). The receipts, manifests, and reports are the provenance record; do not imply the benchmark ran from the later source hash.
+
+A separate CPU-only probe applied the frozen guarded semantic artifact to archive metadata alone. On all 48,853 current rows, 48,558 were routed to fetch for later inspection and 295 were deferred; 46,505 predictions remained `unknown`. On a deterministic 5,000-row sample from the 125,355 historical rows, 4,782 were routed to fetch, 218 deferred, and 4,522 remained `unknown`. Sparse or unsupported metadata defaults to fetch, so the observed sparsity kept most repositories eligible for inspection. These are routing counts, not ML labels, truth-accuracy estimates, population estimates for the historical archive, or evidence of classifier quality. The probe made no README or GitHub API calls and used no inventory-filled fields. Its report and receipt are in `/mnt/archive/runs/gh-ml-gharchive-pilot-2026-10-08/semantic-triage-probe/report.json` and `run_receipt.json`; the frozen model artifact is `/mnt/archive/runs/gh-ml-triage-v2-guarded-2026-10-08/model/semantic-minilm-lr-c10-guarded-v2.json`.
+
+The Sept 27 inventory is historical, not current GitHub state; it predates the Oct 7 events by about 10 days. Its joins can fill fields only for matching IDs and must not be described as live enrichment. Keep each run's exact command, source URL/hour list, compressed sizes, source hashes, parser source revision/hash, report, and any snapshot hash together in the run receipt or manifest. A separate ecosyste.ms probe receipt at `/mnt/archive/runs/gh-ml-gharchive-pilot-2026-10-08/ecosystems-probe.json` records one 1,000-row request that took 1.059 seconds; a separate 100-row probe also succeeded. Observed `last_synced_at` ages had a 478-day median, so this is a limited, stale metadata probe, not a full-inventory throughput benchmark.
